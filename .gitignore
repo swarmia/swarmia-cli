@@ -2,6 +2,12 @@
 /swarmia-cli
 /dist/
 
+# Captured hook events (local only)
+.swarmia/
+
+# Personal, machine-specific Claude Code config
+.claude/settings.local.json
+
 # Go test / coverage artifacts
 *.out
 

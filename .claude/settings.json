@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ],
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ]
+  }
+}

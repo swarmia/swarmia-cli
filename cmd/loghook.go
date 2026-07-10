@@ -1,0 +1,131 @@
+package cmd
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+var logFile string
+
+var logHookCmd = &cobra.Command{
+	Use:   "log-hook",
+	Short: "Log a Claude Code hook payload to a JSONL file",
+	Long: "log-hook reads a Claude Code hook payload from stdin and appends it to a JSONL\n" +
+		"file, one event per line. It is meant to be registered as a hook command in\n" +
+		"Claude Code settings so that agent activity can later be attributed to commits.\n\n" +
+		"It is a passive logger: it always exits 0 and writes nothing to stdout, so it\n" +
+		"can never block or interfere with the tool call that triggered it.",
+	// SilenceUsage/SilenceErrors keep cobra from ever writing to stdout/stderr on
+	// our behalf; RunE always returns nil so a logging failure can't fail the hook.
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := runLogHook(cmd.InOrStdin()); err != nil {
+			// Non-blocking: surface in the transcript but still exit 0.
+			fmt.Fprintf(os.Stderr, "swarmia-cli log-hook: %v\n", err)
+		}
+		return nil
+	},
+}
+
+func init() {
+	logHookCmd.Flags().StringVar(&logFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
+	rootCmd.AddCommand(logHookCmd)
+}
+
+// hookRecord is the envelope written per line: a capture timestamp plus the
+// original payload nested verbatim.
+type hookRecord struct {
+	LoggedAt string          `json:"logged_at"`
+	Event    json.RawMessage `json:"event"`
+}
+
+func runLogHook(stdin io.Reader) error {
+	payload, err := io.ReadAll(stdin)
+	if err != nil {
+		return fmt.Errorf("reading stdin: %w", err)
+	}
+	payload = []byte(strings.TrimSpace(string(payload)))
+	if len(payload) == 0 {
+		// Nothing to log; don't write a blank line.
+		return nil
+	}
+
+	// Preserve the payload verbatim when it is valid JSON. If it isn't (defensive
+	// — Claude Code always sends JSON), store it as a JSON string so every line of
+	// the file stays valid JSONL.
+	var event json.RawMessage
+	if json.Valid(payload) {
+		event = json.RawMessage(payload)
+	} else {
+		encoded, err := json.Marshal(string(payload))
+		if err != nil {
+			return fmt.Errorf("encoding non-JSON payload: %w", err)
+		}
+		event = encoded
+	}
+
+	line, err := json.Marshal(hookRecord{
+		LoggedAt: time.Now().UTC().Format(time.RFC3339),
+		Event:    event,
+	})
+	if err != nil {
+		return fmt.Errorf("encoding record: %w", err)
+	}
+	line = append(line, '\n')
+
+	return appendLine(resolveLogPath(), line)
+}
+
+// resolveLogPath picks the log file: --file flag, then $SWARMIA_LOG_FILE, then
+// <project>/.swarmia/events.jsonl where <project> is $CLAUDE_PROJECT_DIR or cwd.
+func resolveLogPath() string {
+	if logFile != "" {
+		return logFile
+	}
+	if env := os.Getenv("SWARMIA_LOG_FILE"); env != "" {
+		return env
+	}
+	base := os.Getenv("CLAUDE_PROJECT_DIR")
+	if base == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			base = cwd
+		}
+	}
+	return filepath.Join(base, ".swarmia", "events.jsonl")
+}
+
+// appendLine appends a single pre-serialized line under an exclusive file lock,
+// so concurrent hook invocations (parallel tool calls, subagents) can't produce
+// interleaved or corrupted lines.
+func appendLine(path string, line []byte) error {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("locking %s: %w", path, err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	if _, err := f.Write(line); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
