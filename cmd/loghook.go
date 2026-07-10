@@ -82,25 +82,7 @@ func runLogHook(stdin io.Reader) error {
 	}
 	line = append(line, '\n')
 
-	return appendLine(resolveLogPath(), line)
-}
-
-// resolveLogPath picks the log file: --file flag, then $SWARMIA_LOG_FILE, then
-// <project>/.swarmia/events.jsonl where <project> is $CLAUDE_PROJECT_DIR or cwd.
-func resolveLogPath() string {
-	if logFile != "" {
-		return logFile
-	}
-	if env := os.Getenv("SWARMIA_LOG_FILE"); env != "" {
-		return env
-	}
-	base := os.Getenv("CLAUDE_PROJECT_DIR")
-	if base == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			base = cwd
-		}
-	}
-	return filepath.Join(base, ".swarmia", "events.jsonl")
+	return appendLine(eventsPath(logFile), line)
 }
 
 // appendLine appends a single pre-serialized line under an exclusive file lock,

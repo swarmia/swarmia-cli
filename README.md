@@ -8,8 +8,8 @@ hooks. `swarmia-cli` registers as a hook, records what the agent does into a
 local log, and (in future increments) links that activity to your git history.
 
 > **Status:** early. Today the CLI can log Claude Code hook events to a local
-> JSONL file. Encryption, log rotation, git-ref sync, and commit matching are on
-> the roadmap.
+> JSONL file (`log-hook`) and store them per session in git refs (`process-logs`).
+> Encryption, remote sync automation, and commit matching are on the roadmap.
 
 ## Installation
 
@@ -60,6 +60,34 @@ The log file is chosen in this order:
 3. `$CLAUDE_PROJECT_DIR/.swarmia/events.jsonl` (falls back to the current
    directory if `$CLAUDE_PROJECT_DIR` is unset)
 
+### `process-logs`
+
+Takes the events captured by `log-hook`, groups them by session, and stores each
+session's events into a git ref named `refs/ai-sessions/<session_id>`:
+
+```sh
+swarmia-cli process-logs
+```
+
+- **Git plumbing only.** It writes objects and updates refs directly; it never
+  touches the working tree, index, or `HEAD`, so nothing shows up in `git status`.
+- **One ref per session.** The server enumerates `refs/ai-sessions/*`. Inspect one
+  with `git cat-file -p refs/ai-sessions/<session_id>:events.jsonl`.
+- **Accumulates.** Each run appends the new events to the session's ref (a new
+  commit chained onto the previous one), so a session that keeps going after its
+  logs were shipped keeps updating the same ref.
+- **Rotates.** After a successful store the local `events.jsonl` is emptied; if a
+  store fails, the unstored events are put back so the next run retries.
+- **Never blocks.** Like `log-hook` it always exits 0, so it is safe to wire into a
+  hook. It is meant for a periodic or lifecycle hook (e.g. session end), not every
+  tool call.
+- **Does not push by default.** Pushing the refs to a remote is left to you (run
+  `git push` yourself). Pass `--push` (with `--remote`, default `origin`) to also
+  push each stored ref; push failures are logged and non-fatal.
+
+Flags: `--file` (input path, same resolution as `log-hook`), `--push`, `--remote`,
+`--keep` (don't empty the log after storing — for debugging).
+
 ## Setting up the Claude Code hook
 
 `swarmia-cli` ships a ready-made hook configuration in
@@ -101,7 +129,9 @@ Project layout:
 main.go            thin entrypoint → cmd.Execute()
 cmd/
   root.go          cobra root command
-  loghook.go       the log-hook command
+  loghook.go       the log-hook command (captures hook payloads)
+  processlogs.go   the process-logs command (stores events in refs/ai-sessions/*)
+  paths.go         shared log-file / project-dir resolution
   version.go       version command + build metadata
 ```
 
