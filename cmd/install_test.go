@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -215,5 +216,208 @@ func TestDetectBinaryRefPrefersLocal(t *testing.T) {
 	}
 	if ref, src := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/swarmia-cli" {
 		t.Errorf("with local binary, ref = %q (%s), want ${CLAUDE_PROJECT_DIR}/swarmia-cli", ref, src)
+	}
+}
+
+// --- merging with existing user configurations ------------------------------
+
+// writeSettings seeds a repo's .claude/settings.json from a doc, as if the user
+// already had Claude Code configured.
+func writeSettings(t *testing.T, repoDir string, doc map[string]any) {
+	t.Helper()
+	claude := filepath.Join(repoDir, ".claude")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claude, "settings.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// grp builds a hook matcher-group. An empty matcher omits the key.
+func grp(matcher, command string) map[string]any {
+	g := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command}}}
+	if matcher != "" {
+		g["matcher"] = matcher
+	}
+	return g
+}
+
+func groupHasCmd(group map[string]any, command string) bool {
+	for _, h := range asSlice(group, "hooks") {
+		hm, _ := h.(map[string]any)
+		if c, _ := hm["command"].(string); c == command {
+			return true
+		}
+	}
+	return false
+}
+
+// The user already runs their own command on the same event+matcher we target;
+// ours is appended to that group and theirs is kept (no new duplicate group).
+func TestInstallMergesIntoSameMatcherGroup(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []any{grp("*", "my-linter")},
+		},
+	})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc := readSettings(t, repo)
+	cmds := commandsFor(t, doc, "PreToolUse")
+	if !contains(cmds, "my-linter") {
+		t.Errorf("user command dropped: %v", cmds)
+	}
+	if !contains(cmds, "swarmia-cli log-hook") {
+		t.Errorf("our log-hook not added: %v", cmds)
+	}
+	if n := len(doc["hooks"].(map[string]any)["PreToolUse"].([]any)); n != 1 {
+		t.Errorf("PreToolUse groups = %d, want 1 (merged into existing * group)", n)
+	}
+}
+
+// The user has their own hook under a different matcher; ours goes in its own
+// group and both coexist.
+func TestInstallCoexistsWithDifferentMatcher(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []any{grp("Bash", "audit-bash")},
+		},
+	})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := readSettings(t, repo)["hooks"].(map[string]any)["PreToolUse"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("PreToolUse groups = %d, want 2 (Bash + *)", len(groups))
+	}
+	var haveBash, haveStar bool
+	for _, g := range groups {
+		gm := g.(map[string]any)
+		switch gm["matcher"] {
+		case "Bash":
+			haveBash = groupHasCmd(gm, "audit-bash")
+		case "*":
+			haveStar = groupHasCmd(gm, "swarmia-cli log-hook")
+		}
+	}
+	if !haveBash {
+		t.Errorf("user's Bash group not preserved")
+	}
+	if !haveStar {
+		t.Errorf("our * group with log-hook not added")
+	}
+}
+
+// The user's own SessionEnd hook is kept, and our two commands are appended in
+// order (log-hook then process-logs).
+func TestInstallMergesUserSessionEndHook(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{
+		"hooks": map[string]any{
+			"SessionEnd": []any{grp("", "notify-done")},
+		},
+	})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+
+	se := commandsFor(t, readSettings(t, repo), "SessionEnd")
+	want := []string{"notify-done", "swarmia-cli log-hook", "swarmia-cli process-logs"}
+	if !reflect.DeepEqual(se, want) {
+		t.Errorf("SessionEnd = %v, want %v", se, want)
+	}
+}
+
+// An older/partial Swarmia install (log-hook everywhere, but process-logs missing
+// from SessionEnd) is completed by adding exactly the missing hook, with no
+// duplication of the ones already present.
+func TestInstallCompletesPartialSwarmiaInstall(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{
+		"hooks": map[string]any{
+			"UserPromptSubmit": []any{grp("", "swarmia-cli log-hook")},
+			"PreToolUse":       []any{grp("*", "swarmia-cli log-hook")},
+			"PostToolUse":      []any{grp("*", "swarmia-cli log-hook")},
+			"SessionStart":     []any{grp("", "swarmia-cli log-hook")},
+			"SessionEnd":       []any{grp("", "swarmia-cli log-hook")},
+			"Stop":             []any{grp("", "swarmia-cli log-hook")},
+		},
+	})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("added 1 hook")) {
+		t.Errorf("expected exactly 1 hook added (process-logs), got: %s", out.String())
+	}
+
+	doc := readSettings(t, repo)
+	if se := commandsFor(t, doc, "SessionEnd"); len(se) != 2 ||
+		se[0] != "swarmia-cli log-hook" || se[1] != "swarmia-cli process-logs" {
+		t.Errorf("SessionEnd = %v, want [log-hook, process-logs]", se)
+	}
+	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "Stop"} {
+		if cmds := commandsFor(t, doc, ev); len(cmds) != 1 || cmds[0] != "swarmia-cli log-hook" {
+			t.Errorf("%s = %v, want a single, un-duplicated log-hook", ev, cmds)
+		}
+	}
+}
+
+// Unrelated top-level settings and hooks for events we don't manage survive an
+// install untouched.
+func TestInstallPreservesUnmanagedHooksAndTopLevelKeys(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{
+		"model":       "opus",
+		"permissions": map[string]any{"allow": []any{"Bash(git*)"}},
+		"env":         map[string]any{"FOO": "bar"},
+		"hooks": map[string]any{
+			"Notification": []any{grp("", "ping-me")},
+			"PreCompact":   []any{grp("manual", "snapshot")},
+		},
+	})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc := readSettings(t, repo)
+	if doc["model"] != "opus" {
+		t.Errorf("top-level 'model' lost: %v", doc["model"])
+	}
+	if perms, _ := doc["permissions"].(map[string]any); perms == nil {
+		t.Errorf("permissions lost")
+	} else if allow, _ := perms["allow"].([]any); len(allow) != 1 || allow[0] != "Bash(git*)" {
+		t.Errorf("permissions altered: %v", doc["permissions"])
+	}
+	if env, _ := doc["env"].(map[string]any); env == nil || env["FOO"] != "bar" {
+		t.Errorf("env lost: %v", doc["env"])
+	}
+	if !contains(commandsFor(t, doc, "Notification"), "ping-me") {
+		t.Errorf("unmanaged Notification hook lost")
+	}
+	if !contains(commandsFor(t, doc, "PreCompact"), "snapshot") {
+		t.Errorf("unmanaged PreCompact hook lost")
+	}
+	if !contains(commandsFor(t, doc, "SessionEnd"), "swarmia-cli process-logs") {
+		t.Errorf("our hooks were not added alongside the existing config")
 	}
 }
