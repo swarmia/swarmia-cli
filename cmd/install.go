@@ -29,7 +29,8 @@ var installCmd = &cobra.Command{
 		"It is idempotent: hooks already present are left alone, and unrelated settings and\n" +
 		"hooks are preserved. The command used to invoke swarmia-cli in the hooks is\n" +
 		"auto-detected: a swarmia-cli binary at the repo root is preferred (handy for local\n" +
-		"development), otherwise a swarmia-cli on your $PATH. Override with --binary.",
+		"development), then an npm dependency in node_modules/.bin, then a swarmia-cli on\n" +
+		"your $PATH. Override with --binary.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir := installDir
@@ -100,12 +101,16 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 	return nil
 }
 
-// detectBinaryRef decides how hooks should invoke swarmia-cli, preferring a binary
-// built at the repo root (local development) over one installed on $PATH. npm /
-// node_modules detection is a future addition.
+// detectBinaryRef decides how hooks should invoke swarmia-cli, in order of
+// preference: a binary built at the repo root (local development), then an npm
+// dependency in node_modules/.bin (the @swarmia/cli package), then a binary on
+// $PATH (global install).
 func detectBinaryRef(repoDir string) (ref, source string) {
 	if isExecutable(filepath.Join(repoDir, binaryName)) {
 		return "${CLAUDE_PROJECT_DIR}/" + binaryName, "local binary at repo root"
+	}
+	if isExecutable(filepath.Join(repoDir, "node_modules", ".bin", binaryName)) {
+		return "${CLAUDE_PROJECT_DIR}/node_modules/.bin/" + binaryName, "npm dependency (node_modules/.bin)"
 	}
 	if _, err := exec.LookPath(binaryName); err == nil {
 		return binaryName, "found on $PATH"

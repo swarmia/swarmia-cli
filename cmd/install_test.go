@@ -219,6 +219,30 @@ func TestDetectBinaryRefPrefersLocal(t *testing.T) {
 	}
 }
 
+func TestDetectBinaryRefNodeModules(t *testing.T) {
+	repo := t.TempDir()
+	binDir := filepath.Join(repo, "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// With no repo-root binary, an npm dependency in node_modules/.bin is used.
+	if ref, _ := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/node_modules/.bin/swarmia-cli" {
+		t.Errorf("ref = %q, want the node_modules/.bin reference", ref)
+	}
+
+	// A repo-root binary still takes precedence over node_modules.
+	if err := os.WriteFile(filepath.Join(repo, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ref, _ := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/swarmia-cli" {
+		t.Errorf("with a repo-root binary present, ref = %q, want the repo-root reference", ref)
+	}
+}
+
 // --- merging with existing user configurations ------------------------------
 
 // writeSettings seeds a repo's .claude/settings.json from a doc, as if the user

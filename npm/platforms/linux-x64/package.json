@@ -1,0 +1,15 @@
+{
+  "name": "@swarmia/cli-linux-x64",
+  "version": "0.1.0",
+  "description": "swarmia-cli binary for Linux (x86-64). Installed automatically by @swarmia/cli.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "license": "UNLICENSED"
+}

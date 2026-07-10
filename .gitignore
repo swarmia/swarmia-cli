@@ -2,6 +2,12 @@
 /swarmia-cli
 /dist/
 
+# Cross-compiled binaries built into the npm platform packages (release artifacts)
+npm/platforms/*/bin/
+
+# npm dependencies (from local packaging tests)
+node_modules/
+
 # Captured hook events (local only)
 .swarmia/
 

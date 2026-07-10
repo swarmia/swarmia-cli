@@ -12,7 +12,18 @@ LDFLAGS := -s -w \
 	-X $(PKG)/cmd.commit=$(COMMIT) \
 	-X $(PKG)/cmd.date=$(DATE)
 
-.PHONY: all build install test vet fmt tidy clean
+# npm platform packages: <dir>:<GOOS>:<GOARCH>. The <dir> uses Node's
+# platform-arch naming (process.platform-process.arch), which the launcher in
+# npm/cli/bin/swarmia-cli maps to the @swarmia/cli-<dir> package.
+# Windows is intentionally excluded: the log file locking uses syscall.Flock
+# (POSIX only). Adding Windows needs a LockFileEx-based implementation first.
+NPM_PLATFORMS := \
+	darwin-arm64:darwin:arm64 \
+	darwin-x64:darwin:amd64 \
+	linux-arm64:linux:arm64 \
+	linux-x64:linux:amd64
+
+.PHONY: all build install test vet fmt tidy clean npm-binaries
 
 all: build ## Build the binary (default)
 
@@ -36,3 +47,14 @@ tidy: ## Tidy go.mod / go.sum
 
 clean: ## Remove build artifacts
 	rm -f $(BINARY)
+	rm -rf npm/platforms/*/bin
+
+npm-binaries: ## Cross-compile per-platform binaries into the npm packages
+	@for entry in $(NPM_PLATFORMS); do \
+		dir=$${entry%%:*}; rest=$${entry#*:}; os=$${rest%%:*}; arch=$${rest##*:}; \
+		out=npm/platforms/$$dir/bin/$(BINARY); \
+		[ "$$os" = "windows" ] && out=$$out.exe; \
+		echo "  $$dir ($$os/$$arch) -> $$out"; \
+		mkdir -p npm/platforms/$$dir/bin; \
+		GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o $$out . || exit 1; \
+	done

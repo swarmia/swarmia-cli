@@ -1,0 +1,15 @@
+{
+  "name": "@swarmia/cli-darwin-x64",
+  "version": "0.1.0",
+  "description": "swarmia-cli binary for macOS (Intel). Installed automatically by @swarmia/cli.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "license": "UNLICENSED"
+}

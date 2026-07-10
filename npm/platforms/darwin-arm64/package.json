@@ -1,0 +1,15 @@
+{
+  "name": "@swarmia/cli-darwin-arm64",
+  "version": "0.1.0",
+  "description": "swarmia-cli binary for macOS (Apple Silicon). Installed automatically by @swarmia/cli.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "license": "UNLICENSED"
+}

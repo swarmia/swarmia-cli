@@ -14,6 +14,17 @@ local log, and (in future increments) links that activity to your git history.
 
 ## Installation
 
+### npm (as a dev dependency)
+
+```sh
+npm install --save-dev @swarmia/cli
+```
+
+This gives the repo a `swarmia-cli` at `node_modules/.bin/swarmia-cli` — no global
+install needed, and `swarmia-cli install` detects it automatically. The package
+ships a tiny launcher plus a per-platform binary delivered as an optional
+dependency (macOS and Linux, arm64/x64); the right one installs for your host.
+
 ### `go install`
 
 ```sh
@@ -55,11 +66,13 @@ It adds the same wiring this repo uses — `log-hook` on prompts, all tool use, 
 session lifecycle, plus `process-logs` on `SessionEnd`. It is **idempotent** (hooks
 already present are left alone) and preserves any unrelated settings and hooks.
 
-The command the hooks use to invoke `swarmia-cli` is auto-detected:
+The command the hooks use to invoke `swarmia-cli` is auto-detected, in order:
 
 1. a `swarmia-cli` binary at the repo root → `${CLAUDE_PROJECT_DIR}/swarmia-cli`
    (handy during local development)
-2. otherwise a `swarmia-cli` on your `$PATH` → bare `swarmia-cli`
+2. an npm dependency at `node_modules/.bin/swarmia-cli` →
+   `${CLAUDE_PROJECT_DIR}/node_modules/.bin/swarmia-cli`
+3. otherwise a `swarmia-cli` on your `$PATH` → bare `swarmia-cli`
 
 Override it with `--binary`, and target another directory with `--dir`. After
 installing, reload hooks with `/hooks` in Claude Code (or start a fresh session).
@@ -143,12 +156,13 @@ instead of copying the block by hand — it detects the agent and writes the rig
 ## Development
 
 ```sh
-make build    # compile ./swarmia-cli
-make test     # run tests
-make vet      # go vet
-make fmt      # gofmt -w
-make tidy     # go mod tidy
-make clean    # remove the binary
+make build         # compile ./swarmia-cli
+make test          # run tests
+make vet           # go vet
+make fmt           # gofmt -w
+make tidy          # go mod tidy
+make npm-binaries  # cross-compile per-platform binaries into the npm packages
+make clean         # remove build artifacts
 ```
 
 Project layout:
@@ -162,7 +176,24 @@ cmd/
   processlogs.go   the process-logs command (stores events in refs/ai-sessions/*)
   paths.go         shared log-file / project-dir resolution
   version.go       version command + build metadata
+npm/
+  cli/             the @swarmia/cli package (JS launcher + package.json)
+  platforms/       one binary-only package per os/arch (@swarmia/cli-<os>-<arch>)
 ```
+
+### npm packaging
+
+`@swarmia/cli` follows the esbuild model: a small JS launcher
+(`npm/cli/bin/swarmia-cli`) plus one binary-only package per platform, published
+under `optionalDependencies` so npm installs only the host's binary. The launcher
+resolves and execs it, passing stdin/stdout/stderr and the exit code through
+unchanged.
+
+To cut a release: bump the version in every `npm/**/package.json` in lockstep, run
+`make npm-binaries` (fills each `npm/platforms/*/bin/`), then `npm publish` each
+platform package followed by `npm/cli`. The binaries are build artifacts and are
+gitignored. Windows is not packaged yet — the log-file locking is POSIX-only
+(`syscall.Flock`) and needs a `LockFileEx` implementation first.
 
 ## License
 

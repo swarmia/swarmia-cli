@@ -1,0 +1,25 @@
+{
+  "name": "@swarmia/cli",
+  "version": "0.1.0",
+  "description": "Swarmia Agent CLI — captures local AI-agent activity so AI-generated code can be attributed to the commits it lands in.",
+  "bin": {
+    "swarmia-cli": "bin/swarmia-cli"
+  },
+  "files": [
+    "bin/"
+  ],
+  "optionalDependencies": {
+    "@swarmia/cli-darwin-arm64": "0.1.0",
+    "@swarmia/cli-darwin-x64": "0.1.0",
+    "@swarmia/cli-linux-arm64": "0.1.0",
+    "@swarmia/cli-linux-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swarmia/swarmia-cli.git"
+  },
+  "license": "UNLICENSED"
+}
