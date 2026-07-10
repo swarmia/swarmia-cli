@@ -1,0 +1,9 @@
+# Build output
+/swarmia-cli
+/dist/
+
+# Go test / coverage artifacts
+*.out
+
+# Editor / OS cruft
+.DS_Store
