@@ -92,7 +92,10 @@ Flags: `--file` (input path, same resolution as `log-hook`), `--push`, `--remote
 
 `swarmia-cli` ships a ready-made hook configuration in
 [`.claude/settings.json`](.claude/settings.json). It registers `log-hook` for
-prompts, all tool use, and session lifecycle events.
+prompts, all tool use, and session lifecycle events, and runs `process-logs` on
+`SessionEnd` to store the session's events into `refs/ai-sessions/*`. (Because the
+log persists across sessions and `process-logs` groups by session, one session's
+`SessionEnd` also flushes any events a previous session left behind.)
 
 **Build the binary first** — the config invokes `${CLAUDE_PROJECT_DIR}/swarmia-cli`,
 so the compiled binary must exist at the repo root:
