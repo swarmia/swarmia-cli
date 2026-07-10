@@ -7,9 +7,10 @@ Coding agents like Claude Code, Codex, and Copilot expose activity through
 hooks. `swarmia-cli` registers as a hook, records what the agent does into a
 local log, and (in future increments) links that activity to your git history.
 
-> **Status:** early. Today the CLI can log Claude Code hook events to a local
-> JSONL file (`log-hook`) and store them per session in git refs (`process-logs`).
-> Encryption, remote sync automation, and commit matching are on the roadmap.
+> **Status:** early. Today the CLI can set up its hooks (`install`), log Claude
+> Code hook events to a local JSONL file (`log-hook`), and store them per session
+> in git refs (`process-logs`). Encryption, remote sync automation, and commit
+> matching are on the roadmap.
 
 ## Installation
 
@@ -38,6 +39,30 @@ Requires Go 1.26+. `make install` installs it onto your `$PATH` instead.
 swarmia-cli --help
 swarmia-cli version
 ```
+
+### `install`
+
+Sets up the Swarmia hooks in whatever supported coding agents are configured in
+the current repository (currently Claude Code — detected by a `.claude`
+directory):
+
+```sh
+swarmia-cli install            # add hooks to detected agents
+swarmia-cli install --dry-run  # preview without writing
+```
+
+It adds the same wiring this repo uses — `log-hook` on prompts, all tool use, and
+session lifecycle, plus `process-logs` on `SessionEnd`. It is **idempotent** (hooks
+already present are left alone) and preserves any unrelated settings and hooks.
+
+The command the hooks use to invoke `swarmia-cli` is auto-detected:
+
+1. a `swarmia-cli` binary at the repo root → `${CLAUDE_PROJECT_DIR}/swarmia-cli`
+   (handy during local development)
+2. otherwise a `swarmia-cli` on your `$PATH` → bare `swarmia-cli`
+
+Override it with `--binary`, and target another directory with `--dir`. After
+installing, reload hooks with `/hooks` in Claude Code (or start a fresh session).
 
 ### `log-hook`
 
@@ -111,9 +136,9 @@ Events will stream into `.swarmia/events.jsonl`:
 tail -f .swarmia/events.jsonl
 ```
 
-To use the hook in another repository, point the `command` at an installed
-binary (e.g. `swarmia-cli log-hook` once it's on your `$PATH`) and add the same
-`hooks` block to that project's `.claude/settings.json`.
+To set this up in another repository, run [`swarmia-cli install`](#install) there
+instead of copying the block by hand — it detects the agent and writes the right
+`hooks`, choosing an appropriate command reference automatically.
 
 ## Development
 
@@ -132,6 +157,7 @@ Project layout:
 main.go            thin entrypoint → cmd.Execute()
 cmd/
   root.go          cobra root command
+  install.go       the install command (wires hooks into detected agents)
   loghook.go       the log-hook command (captures hook payloads)
   processlogs.go   the process-logs command (stores events in refs/ai-sessions/*)
   paths.go         shared log-file / project-dir resolution
