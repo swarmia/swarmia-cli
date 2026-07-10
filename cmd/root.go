@@ -10,9 +10,9 @@ import (
 var name string
 
 var rootCmd = &cobra.Command{
-	Use:   "swarmia",
+	Use:   "swarmia-cli",
 	Short: "swarmia-cli is the command-line interface for Swarmia",
-	Long:  "swarmia-cli is the command-line interface for Swarmia.\n\nAt this stage it just says hello. More commands are on the way.",
+	Long:  "swarmia-cli is the command-line interface for Swarmia.\n\nIt captures local AI-agent activity so AI-generated code can be attributed to\nthe commits it lands in. See `swarmia-cli log-hook`.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, err := fmt.Fprintf(cmd.OutOrStdout(), "Hello, %s!\n", name)
 		return err
