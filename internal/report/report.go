@@ -46,6 +46,19 @@ type Session struct {
 	// replaced itself don't count.
 	AILinesByPath map[string]int `json:"ai_lines_by_path,omitempty"`
 	Attribution   *Attribution   `json:"attribution,omitempty"`
+	// Ended is set once the agent reported the session's end.
+	Ended bool `json:"ended,omitempty"`
+	// Delivery records the last payload sent to Swarmia for this session.
+	Delivery *Delivery `json:"delivery,omitempty"`
+}
+
+// Delivery is the outcome of the last delivery attempt that reached the
+// server for a session. Hash identifies the payload, so an unchanged session
+// isn't sent again; Rejected holds the server's reason if it refused it.
+type Delivery struct {
+	Hash     string    `json:"hash"`
+	SentAt   time.Time `json:"sent_at"`
+	Rejected string    `json:"rejected,omitempty"`
 }
 
 type Prompt struct {
@@ -238,6 +251,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 			if p.Model != "" {
 				s.Model = p.Model
 			}
+			s.Ended = false // resumed
+		case "SessionEnd":
+			s.Ended = true
 		case "UserPromptSubmit":
 			s.Prompts = append(s.Prompts, Prompt{At: at, Text: p.Prompt})
 		case "PostToolUse", "PostToolUseFailure":

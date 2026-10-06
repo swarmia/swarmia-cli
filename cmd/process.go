@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/swarmia/swarmia-cli/internal/config"
+	"github.com/swarmia/swarmia-cli/internal/deliver"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/report"
 )
@@ -28,16 +30,25 @@ var processCmd = &cobra.Command{
 		"sessions inactive for 30 days. Attribution is only recomputed when a session's\n" +
 		"edits or candidate commits changed; rebased or amended commits drop out and\n" +
 		"their replacements are matched.\n\n" +
+		"If a token is configured (see `swarmia-cli config`), changed sessions are then\n" +
+		"delivered to Swarmia (see `swarmia-cli send`); without one nothing is sent.\n\n" +
 		"log-hook starts it in the background when a session ends or the log grows\n" +
-		"large, and report runs it before printing, so running it by hand is rarely\n" +
-		"needed. Nothing is sent anywhere.",
+		"large, and report runs it (without delivering) before printing, so running it\n" +
+		"by hand is rarely needed.",
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		opts, _, err := processOptions(processFile, true, !processBackground)
+		opts, repo, err := processOptions(processFile, true, !processBackground)
 		if err != nil {
 			return quietIf(processBackground, err)
+		}
+		var delivered deliver.Outcome
+		if cfg, err := config.Load(repo.Root); err == nil && cfg.Token != "" {
+			opts.AfterAttribute = func(sessions []*report.Session) error {
+				delivered, err = deliver.Deliver(sessions, deliveryOptions(repo, cfg, opts, false))
+				return err
+			}
 		}
 		res, err := report.Process(opts)
 		if errors.Is(err, report.ErrBusy) {
@@ -49,6 +60,10 @@ var processCmd = &cobra.Command{
 		if !processBackground {
 			fmt.Fprintf(cmd.OutOrStdout(), "folded %d event(s); %d session(s) stored; %d pruned\n",
 				res.Folded, len(res.Sessions), res.Pruned)
+			if delivered.Sent > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "delivered %d session(s): %d accepted, %d rejected\n",
+					delivered.Sent, delivered.Accepted, delivered.Rejected)
+			}
 		}
 		return nil
 	},
@@ -109,5 +124,18 @@ var startBackgroundProcess = func(logPath string) {
 	detach(cmd)
 	if cmd.Start() == nil {
 		cmd.Process.Release()
+	}
+}
+
+// deliveryOptions configures delivery for this repository.
+func deliveryOptions(repo gitrepo.Repo, cfg config.Config, opts report.ProcessOptions, force bool) deliver.Options {
+	return deliver.Options{
+		Endpoint:   cfg.Endpoint,
+		Token:      cfg.Token,
+		CLIVersion: version,
+		Context:    payloadContext(repo, cfg),
+		StateDir:   opts.StateDir,
+		Now:        opts.Now,
+		Force:      force,
 	}
 }

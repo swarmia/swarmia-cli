@@ -61,7 +61,7 @@ code we don't need.
 | D11 | Windows | **Later, but design for it now** | Abstract file locking (flock) and paths behind small interfaces; keep state dir resolution OS-aware. |
 | D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. |
 | D13 | Local state location | **User state dir**: `~/.local/state/swarmia/<repo-id>/` (macOS: `~/Library/Application Support/swarmia/…`) | Never in `git status`, survives `git clean -fdx`, same for global and per-repo installs. Replaces in-repo `.swarmia/`. `<repo-id>` = hash of the common git dir so worktrees share state. |
-| D14 | Sessions with no commits | **Sent after a quiet period** | Session metadata + prompts sent once ended and idle for some hours; commit attributions follow later as amendments keyed by session id. |
+| D14 | Sessions with no commits | **Sent when they end** (revised from "after a quiet period") | Every send is the session's full payload and the server keeps the latest per session, so there's nothing to batch up: sessions go when they end (or when they change, at most every 15 min while running), and commit attribution follows as replacements when commits are pushed. |
 
 ## Data flow
 
@@ -167,7 +167,7 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 | Background worker | 🟡 basic: detached `process --background` on SessionEnd / log ≥ 8 MB, single-run lock; delivery will hook in here |
 | Config (repo + user), token resolution, prompt opt-out | ✅ done (`internal/config`, `swarmia-cli config`) |
 | Secret redaction | ✅ done (`internal/redact`; payload builder in `internal/payload`) |
-| HTTPS sender | ❌ |
+| HTTPS sender | ✅ done (`internal/deliver`, `swarmia-cli send`; API in `docs/ingest-api.md`) |
 | Other agents | ❌ |
 
 ## Milestones
@@ -185,7 +185,9 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
    "Findings from milestone 5".
 6. ✅ **Config + redaction** (done 2026-10-06): see D10, D15, D16 and
    "Findings from milestone 6".
-7. **Delivery:** background worker, HTTPS sender (needs the monorepo endpoint).
+7. ✅ **Delivery** (done 2026-10-06, client side): full-payload upserts to
+   `POST <endpoint>/sessions`, per-session results, backoff. Server: `hook`
+   repo, per `docs/ingest-api.md`.
 8. **Global install** (D2) + MDM docs.
 9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
 

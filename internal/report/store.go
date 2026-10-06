@@ -107,6 +107,9 @@ type ProcessOptions struct {
 	// returns ErrBusy at once (what background runs want).
 	Wait bool
 	Now  time.Time
+	// AfterAttribute, if set, runs on the up-to-date sessions while the lock
+	// is still held, before they are saved — delivery hooks in here.
+	AfterAttribute func([]*Session) error
 }
 
 // ErrBusy means another Process run holds the lock.
@@ -149,7 +152,11 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 		return res, err
 	}
 	res.Sessions = sessions
-	return res, st.Save(sessions...)
+	var hookErr error
+	if opts.AfterAttribute != nil {
+		hookErr = opts.AfterAttribute(sessions)
+	}
+	return res, errors.Join(st.Save(sessions...), hookErr)
 }
 
 // foldLog claims the log's contents, folds them into the sessions and saves

@@ -76,6 +76,11 @@ func runReport(out io.Writer) error {
 		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", opts.StateDir)
 		return nil
 	}
+	cfg, err := config.Load(repo.Root)
+	if err != nil {
+		return err
+	}
+	showDelivery = cfg.Token != ""
 	for i, s := range sessions {
 		if i > 0 {
 			fmt.Fprintln(out)
@@ -101,7 +106,16 @@ func selectSessions(sessions []*report.Session) []*report.Session {
 	return sessions
 }
 
+// showDelivery adds each session's delivery state to the text report; only
+// meaningful when a token is configured.
+var showDelivery bool
+
 func writeSessionText(out io.Writer, s *report.Session) {
+	defer func() {
+		if showDelivery {
+			fmt.Fprintf(out, "  %s\n", deliveryState(s))
+		}
+	}()
 	local := func(t time.Time) string { return t.Local().Format("2006-01-02 15:04") }
 	model := s.Model
 	if model == "" {
@@ -137,6 +151,17 @@ func writeSessionText(out io.Writer, s *report.Session) {
 	}
 }
 
+func deliveryState(s *report.Session) string {
+	switch d := s.Delivery; {
+	case d == nil:
+		return "not delivered yet"
+	case d.Rejected != "":
+		return "rejected by Swarmia: " + d.Rejected
+	default:
+		return "delivered " + d.SentAt.Local().Format("2006-01-02 15:04")
+	}
+}
+
 func classBreakdown(f report.File) string {
 	var parts []string
 	for _, c := range []attribution.Class{attribution.Exact, attribution.Normalized, attribution.Modified} {
@@ -157,6 +182,18 @@ func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Rep
 	if err != nil {
 		return err
 	}
+	ctx := payloadContext(repo, cfg)
+	payloads := make([]payload.Payload, 0, len(sessions))
+	for _, s := range sessions {
+		payloads = append(payloads, payload.Build(s, ctx))
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payloads)
+}
+
+// payloadContext gathers what payloads need beyond the session itself.
+func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
 	ctx := payload.Context{
 		RepoRoot:    repo.Root,
 		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin")),
@@ -170,13 +207,7 @@ func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Rep
 	if u, err := user.Current(); err == nil {
 		ctx.UserName = u.Username
 	}
-	payloads := make([]payload.Payload, 0, len(sessions))
-	for _, s := range sessions {
-		payloads = append(payloads, payload.Build(s, ctx))
-	}
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(payloads)
+	return ctx
 }
 
 func gitOutput(dir string, args ...string) string {

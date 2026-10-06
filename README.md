@@ -7,10 +7,10 @@ Coding agents like Claude Code, Codex, and Copilot expose activity through
 hooks. `swarmia-cli` registers as a hook, records what the agent does into a
 local log, and (in future increments) links that activity to your git history.
 
-> **Status:** early. Today the CLI can set up its hooks (`install`), log Claude
-> Code hook events locally (`log-hook`), and show which committed lines came
-> from agent sessions (`report`). Delivery to Swarmia is on the roadmap; nothing
-> is sent anywhere yet.
+> **Status:** early. The CLI sets up its hooks (`install`), logs Claude Code
+> hook events locally (`log-hook`), attributes committed lines to agent sessions
+> (`process`, `report`), and delivers sessions to Swarmia (`send`) — but only
+> once a token is configured; without one nothing leaves the machine.
 
 ## Installation
 
@@ -216,7 +216,7 @@ team may commit — its token can only submit data. Both files use
 
 ### What leaves the machine
 
-Nothing is sent yet. When delivery lands it will send exactly what
+Nothing is sent without a token. With one, delivery sends exactly what
 `report --json` prints, built with these rules:
 
 - **No source code.** Attribution is line ranges in pushed commits. Shell
@@ -234,6 +234,23 @@ Nothing is sent yet. When delivery lands it will send exactly what
 - **Only pushed commits**, and prompts only if configuration allows them.
 
 Prompts can still contain code you pasted into them.
+
+### `send`
+
+Delivers sessions to Swarmia. Background `process` runs (at session end) do
+this on their own once a token is configured; `send` does it now, ignoring
+throttling and backoff. `send --dry-run` only counts what would go.
+
+- Each session is sent as its complete current payload (what `report --json`
+  prints) in a gzipped `POST <endpoint>/sessions` with the token as a bearer
+  token. The server keeps the latest version of each session.
+- A session is sent again only when its payload changes — it continued, or a
+  commit was pushed — and at most every 15 minutes while it's still going.
+- The server answers per session; a rejected session isn't retried until it
+  changes. Failures back off (exponentially, honouring `Retry-After`; six hours
+  for an unusable token), and nothing is lost meanwhile.
+
+The ingest API is specified in [docs/ingest-api.md](docs/ingest-api.md).
 
 ### `state-dir`
 
@@ -308,6 +325,7 @@ cmd/
   report.go        the report command
   process.go       the process command and the background launch from log-hook
   config.go        the config command
+  send.go          the send command
   detach_*.go      starting the background run detached (per OS)
   version.go       version command + build metadata
 internal/
@@ -320,6 +338,7 @@ internal/
   config/          layered configuration (environment, user, repository)
   redact/          secret redaction and code stripping for free text
   payload/         builds what delivery sends, applying the privacy rules
+  deliver/         sends payloads to the ingest endpoint (batching, backoff)
   snapshot/        captures what shell commands changed in the worktree
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)
