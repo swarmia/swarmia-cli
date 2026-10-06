@@ -1,0 +1,254 @@
+# Swarmia Agent CLI — Roadmap
+
+> Working roadmap. Supersedes the Notion RFC
+> ("Swarmia Agent CLI: Tool for tracking agentic tool usage"). Feature context and
+> use cases: "Link sessions, prompts, and AI-generated code to source code (AI Git
+> Blame / Swarmia agent CLI)".
+
+## Summary of the change from the RFC
+
+The RFC stores encrypted, full session logs (including source code) in
+`refs/ai-sessions/*` in the customer's git repo, and matches sessions to commits
+on Swarmia's servers. This plan instead:
+
+1. **Matches locally.** The CLI attributes AI-generated lines to commits on the
+   developer's machine, where it has the exact AI output and the exact committed
+   content.
+2. **Sends no source code.** Only line-level attribution (per pushed commit +
+   path), session metadata and (redacted) prompts go to Swarmia.
+3. **Delivers over HTTPS**, not via git. No refs, no per-user encryption keys, no
+   CI decryption script, no polling of customer repos. Fits the monorepo's
+   webhook-driven GitHub integration.
+
+**Why:** none of the use cases need source code at rest. AI % per line/PR/dev,
+acceptance/survival rate, rework, cost-per-PR and incident linking need *line
+attribution*; session analysis, skill loop and struggle detection need *prompts
+and metadata*. The RFC's storage and encryption machinery exists only to protect
+code we don't need.
+
+## Principles (revised)
+
+1. Session ↔ commit linking is reliable, including after formatters and light
+   human edits. Many-to-many.
+2. ~~Locally running code is as dumb as possible.~~ → Local code does capture,
+   matching and redaction; everything else (aggregation, propagation through
+   squash merges, thresholds, analytics) is server-side. Matching is versioned so
+   results from bad versions can be discounted. **Needs sign-off from the RFC
+   owner.**
+3. Source code never leaves the developer's machine.
+4. Prompt privacy: only the author, Swarmia and customer admins see prompts; any
+   individual can withhold their own prompts.
+5. Never interferes with the developer: hooks are passive, always exit 0, heavy
+   work runs in a detached background worker.
+6. No network traffic unless a Swarmia token is configured (repo or user level).
+
+## Decisions
+
+| # | Topic | Decision | Notes / consequences |
+|---|---|---|---|
+| D1 | Prompt text | **Sent by default**; disable with a local setting | Individual opt-out (`prompts: false` in user config or `SWARMIA_PROMPTS=0`) always wins over repo/org config. Opt-out withholds prompt text only — line attribution and metadata still flow so org metrics have no blind spots. |
+| D2 | Install scope | **Both** user-global (MDM) and per-repo | Global hooks track only repos whose remote maps to a Swarmia-connected org (decided server-side via token → org). When both are installed, the global hook no-ops in repos that have per-repo hooks (de-dupe). |
+| D3 | Auth & identity | **Org token + git author email** | Token is write-only: can only submit data for its org; server rejects repos outside the org. Developer identity = git author email, mapped by existing Swarmia identities. |
+| D4 | Token distribution | **Both**: committed `.swarmia.json` (write-only token, like a Sentry DSN) and user config | User config (`~/.config/swarmia/config.json`, MDM or `swarmia-cli configure`) overrides repo config. No token anywhere → capture + match locally, send nothing. Accepted risk: a committed token allows junk submissions for that org → server-side validation/rate limits. |
+| D5 | Commit detection | **Lazy scan only** | On agent hooks and worker runs, scan `git log --all` + reflog since the oldest pending session. No git hooks, no daemon. Commits made after the developer stops using the agent are picked up at their next session. |
+| D6 | Partial edits | **Line-level diff** | For each located hunk, classify every committed line: `exact` (identical to AI output), `normalized` (D7), or `modified`/`human`. Server gets per-line classes, applies its own thresholds. |
+| D7 | Formatting-only differences | **Count as AI**, tagged `normalized` | Normalization per the RFC (whitespace, blank/comment lines, trailing `,`/`;`, quote style). |
+| D8 | Git-ref storage | **Delete** `process-logs` / `refs/ai-sessions/*` | Remains in git history. |
+| D9 | Agents | Claude Code, then **Codex, Cursor, Copilot CLI, Gemini CLI** | Capture layer needs a per-agent payload normalizer (session id, tool names, edit shapes differ). Order within the four: TBD. |
+| D10 | Secret redaction | **Full scanner locally** (gitleaks/betterleaks-style ruleset, Go library) | Applied to every free-text field before sending: prompts, Bash commands, tool inputs. Larger binary accepted. |
+| D11 | Windows | **Later, but design for it now** | Abstract file locking (flock) and paths behind small interfaces; keep state dir resolution OS-aware. |
+| D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. |
+| D13 | Local state location | **User state dir**: `~/.local/state/swarmia/<repo-id>/` (macOS: `~/Library/Application Support/swarmia/…`) | Never in `git status`, survives `git clean -fdx`, same for global and per-repo installs. Replaces in-repo `.swarmia/`. `<repo-id>` = hash of the common git dir so worktrees share state. |
+| D14 | Sessions with no commits | **Sent after a quiet period** | Session metadata + prompts sent once ended and idle for some hours; commit attributions follow later as amendments keyed by session id. |
+
+## Data flow
+
+```
+agent hooks ──► log-hook ──► <state>/events.jsonl            (raw, local only)
+   │  (Bash Pre/Post) └────► <state>/snapshots/               (working-tree fingerprints)
+   │
+   └─(lifecycle hook) spawns detached worker
+                     ┌──────────────┴───────────────┐
+        extract AI changes                    lazy scan: git log --all
+        (Edit/Write payloads +                 + reflog since oldest
+         Bash snapshot diffs)                  pending session
+                     └──────► local matcher ◄───────┘
+                                   │  per-line classes (exact/normalized/modified)
+                     pending store (sessions, hunks, matches; 30-day retention)
+                                   │  only commits reachable from a remote-tracking ref
+                                   ▼
+                       redact (D10) → HTTPS POST (batched, idempotent, retried)
+```
+
+### Capture
+
+- `log-hook` appends raw hook payloads (exists for Claude Code).
+- **New:** record `HEAD` sha and branch at SessionStart and on each edit, so
+  hunks know their base.
+- **New (D12):** Bash Pre/PostToolUse working-tree fingerprints.
+- Per-agent normalizers map payloads into one internal event shape (D9).
+
+### Local matching
+
+- AI changes = Edit/Write/MultiEdit hunks + Bash snapshot diffs.
+- Candidate commits: after the session's first edit, touching the file, any local
+  branch, plus reflog for rewritten history.
+- Locate each hunk with the RFC cascade (exact → normalized → 5-token-shingle
+  containment ≥ 0.5 to *locate*), then line-diff the located region to classify
+  each committed line (D6, D7).
+- Track `ai_lines_generated` vs `ai_lines_committed` per session.
+- **Pushed-only rule:** report only commits reachable from a remote-tracking
+  branch. Unpushed commits that get rewritten are re-matched against the new
+  commits.
+- Ephemeral/cloud agents: also match at Stop/SessionEnd against commits made in
+  the session.
+- `matcher_version` on every result; raw local data kept 30 days so a fixed
+  matcher can re-match recent history.
+
+### Delivery
+
+- Detached background worker spawned from lifecycle hooks.
+- Batched JSON over HTTPS; idempotency key = session id + commit sha + path;
+  exponential backoff; pending data persists until acked.
+- Sends only when a token resolves (D4).
+
+### Payload (draft)
+
+```json
+{
+  "session_id": "…", "agent": "claude-code", "model": "…",
+  "matcher_version": "1.0.0", "cli_version": "…",
+  "repo": "github.com/acme/app",
+  "author_email": "…",
+  "started_at": "…", "ended_at": "…",
+  "prompts": [{ "at": "…", "text": "…(redacted)…" }],
+  "prompts_withheld": false,
+  "tools": [{ "at": "…", "name": "Bash", "file": null, "command": "npm test" }],
+  "commits": [{
+    "sha": "<pushed sha>", "path": "src/foo.ts",
+    "lines": [
+      { "start": 40, "end": 58, "class": "exact" },
+      { "start": 59, "end": 61, "class": "modified" },
+      { "start": 62, "end": 72, "class": "normalized" }
+    ]
+  }],
+  "ai_lines_generated": 180,
+  "ai_lines_committed": 142
+}
+```
+
+Tool *outputs* (Read/Bash/Grep results) are never sent.
+
+### Server side (monorepo; listed for the contract)
+
+- Ingest endpoint keyed by org token; validate repo ∈ org; rate-limit.
+- Join line attribution onto commits already ingested via webhooks.
+- Propagate ranges from PR commits to squash/merge commits using diff hunk
+  headers from the GitHub API (no file contents stored).
+- Discount results from known-bad `matcher_version`s.
+
+## Current state of this repo vs. the plan
+
+| Piece | State |
+|---|---|
+| `install` (Claude Code, per-repo) | ✅ done; needs global mode (D2) |
+| `log-hook` raw capture | ✅ done; writes to state dir, records HEAD/branch |
+| npm packaging, CI | ✅ done |
+| `process-logs` → `refs/ai-sessions/*` | ✅ deleted (D8); install strips stale hooks |
+| State dir + repo id | ✅ done (`swarmia-cli state-dir`) |
+| HEAD/branch capture | ✅ done |
+| Bash snapshots | ✅ done (`internal/snapshot`; `changes` on the finishing event's record) |
+| Lock abstraction (Windows-ready) | ✅ done; Windows compiles in CI, untested, not shipped |
+| Matcher (locate + line classes) | ✅ done (`internal/attribution`, v0.1.0) |
+| Lazy commit scan + pushed-only rule | ❌ |
+| Pending store + retention | ❌ |
+| Background worker | ❌ |
+| Config (repo + user), token resolution, prompt opt-out | ❌ |
+| Secret redaction | ❌ |
+| HTTPS sender | ❌ |
+| Other agents | ❌ |
+
+## Milestones
+
+1. ✅ **Foundation** (done 2026-10-06): delete `process-logs`; state dir (D13); HEAD/branch capture;
+   lock/path abstractions (D11).
+2. ✅ **Matcher** (done 2026-10-06): hunk extraction, line classification;
+   golden tests from real sessions incl. a formatter case. See "Matcher notes".
+3. ✅ **Bash snapshots** (done 2026-10-06): ≈70 ms per hook in the monorepo
+   (one `git status`); see "Findings from milestone 3".
+4. ✅ **Local report** (done 2026-10-06): `swarmia-cli report` (+ `--json` draft
+   payload). Also pulled forward from M8: `install --scope local|user` for
+   personal setups (dogfooding in the monorepo).
+5. **Pending store, lazy scan, pushed-only rule, rewrite handling.**
+6. **Config + redaction:** repo/user config, token resolution, prompt opt-out,
+   secret scanner.
+7. **Delivery:** background worker, HTTPS sender (needs the monorepo endpoint).
+8. **Global install** (D2) + MDM docs.
+9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
+
+## Matcher notes (from milestone 2)
+
+- **Alignment instead of the RFC cascade.** One line-level Smith-Waterman local
+  alignment, using the RFC's normalization for line equality, replaces exact →
+  normalized → shingle. It gives per-line classes directly (D6) and tolerates
+  human insertions, moved blocks (iterates up to 8 pieces) and formatter line
+  wrapping/joining (up to 4 lines). Acceptance: ≥ 2 substantive lines matched,
+  including a surviving added line — or a modified added line pinned by context.
+- **Hunks are rebuilt, not read from `structuredPatch`.** Claude Code's
+  structuredPatch renders tabs as two spaces; hunks are diffed from
+  `originalFile` + tool input instead, with 3 lines of context.
+- **Combining hunks (for M5):** the same committed line can be claimed by several
+  hunks of a session (an AI line later rewritten by the AI). Take the best class
+  per line (exact > normalized > modified). `ai_lines_generated` should come
+  from the session's net diff, not the sum of hunks, or overwritten lines count
+  twice.
+- **Known limitation:** boilerplate (Go `package`/imports, near-identical
+  `package.json`s) matches across files. Harmless while matching is same-path
+  only; matters if a human rewrites an AI file except its boilerplate, or if
+  rename-following is added.
+- Real-data check (46 edits from July sessions): all edits that landed matched,
+  with every non-100% survival explained by later edits in the same session.
+
+## Findings from milestone 4
+
+- **Bash commands can contain source code.** Agents edit files via heredocs and
+  scripts; the draft payload's `tools[].command` would carry that code verbatim,
+  breaking principle 3. M6 needs a policy for tool inputs, not just secret
+  scanning (e.g. command name + hash, or strip heredoc/inline script bodies).
+- **Attribution rule:** a commit gets only lines it introduced vs. its first
+  parent; merges skipped; candidates limited to the user's `user.email` (keeps
+  the monorepo scan cheap: ~0.04 s for a week across 4,460 refs).
+- **Renames lose authorship:** lines moved to a new path (e.g. `git mv` + edit)
+  count only the edit. Rename-following is a later improvement.
+- **Log growth:** ~700 KB per 20 minutes of active session (Write payloads carry
+  whole files). `report` re-reads everything. Retention/compaction (M5) is
+  needed within a couple of weeks of dogfooding.
+- **Edits via Bash show up as `modified`** (seen on this repo's own history) —
+  concrete evidence for D12.
+
+## Findings from milestone 3
+
+- **Failed Bash commands never fire PostToolUse** — they fire
+  `PostToolUseFailure` (seen in recorded sessions: Pre without Post for every
+  failing command). install now hooks it; report reads both.
+- **Authored-line rule** for snapshot diffs: an added line counts only while its
+  normalized text occurs more often after the command than in the file before
+  it, HEAD before, or HEAD after. Excludes formatter runs over human code and
+  git stash/checkout/pull restores; keeps genuinely new generic lines.
+- **Known imprecision:** human edits saved while a command runs, and overlapping
+  parallel Bash calls (each sees the other's changes), are attributed to the
+  agent. Files > 1 MB and binary files are skipped.
+- **Latency:** 35 ms per Pre+Post pair here, 139 ms in the monorepo, dominated by
+  `git status`. Option later: use fsmonitor when the repo has it configured.
+
+## Still open
+
+- RFC owner sign-off on local matching (principle 2) and on dropping git storage.
+- Order among the four next agents.
+- Quiet period length for no-commit sessions (D14) and retention window (30 days
+  proposed).
+- Which remote counts as "pushed" with multiple remotes / forks (proposal: any
+  remote whose URL maps to the token's org).
+- Worker mechanism details: detached child process vs. OS scheduler; lock to
+  ensure a single worker per repo.
+- Server ingest API shape — to agree with the monorepo team.
