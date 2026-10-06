@@ -80,11 +80,17 @@ installing, reload hooks with `/hooks` in Claude Code (or start a fresh session)
 ### `log-hook`
 
 Reads a Claude Code hook payload from stdin and appends it to a JSONL log, one
-event per line, wrapped with a capture timestamp:
+event per line, wrapped with a capture timestamp and the project's git position
+(HEAD commit and branch) at that moment:
 
 ```json
-{"logged_at":"2026-07-10T19:02:37Z","event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
+{"logged_at":"2026-07-10T19:02:37Z","git":{"head":"ec37b5d…","branch":"main"},"event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
 ```
+
+`git` is omitted outside a repository; `head` is empty on a branch with no
+commits and `branch` is empty when HEAD is detached. The git state is read from
+`.git` files directly (no `git` process), so logging stays at a few milliseconds
+per event.
 
 It is a **passive** logger: it always exits 0 and writes nothing to stdout, so it
 can never block or interfere with the tool call that triggered it. Concurrent

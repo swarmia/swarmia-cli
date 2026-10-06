@@ -40,10 +40,12 @@ func init() {
 	rootCmd.AddCommand(logHookCmd)
 }
 
-// hookRecord is the envelope written per line: a capture timestamp plus the
+// hookRecord is the envelope written per line: a capture timestamp, the
+// project's git position at that moment (omitted outside a repo), and the
 // original payload nested verbatim.
 type hookRecord struct {
 	LoggedAt string          `json:"logged_at"`
+	Git      *gitState       `json:"git,omitempty"`
 	Event    json.RawMessage `json:"event"`
 }
 
@@ -72,10 +74,12 @@ func runLogHook(stdin io.Reader) error {
 		event = encoded
 	}
 
-	line, err := json.Marshal(hookRecord{
-		LoggedAt: time.Now().UTC().Format(time.RFC3339),
-		Event:    event,
-	})
+	rec := hookRecord{LoggedAt: time.Now().UTC().Format(time.RFC3339), Event: event}
+	// Best-effort: an unreadable repo state must not stop the event being logged.
+	if st, err := readGitState(projectDir()); err == nil {
+		rec.Git = &st
+	}
+	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding record: %w", err)
 	}

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -75,4 +76,68 @@ func resolveCommonDir(gitDir string) (string, string, error) {
 		}
 	}
 	return gitDir, commonDir, nil
+}
+
+// gitState is the repository position recorded with each event, so captured
+// edits know which commit they were made on top of.
+type gitState struct {
+	Head   string `json:"head,omitempty"`   // commit sha; empty on an unborn branch
+	Branch string `json:"branch,omitempty"` // short branch name; empty when detached
+}
+
+// readGitState reports HEAD for the worktree enclosing dir. It reads HEAD and
+// refs directly (fast enough for every hook) and only spawns git for reftable
+// repositories, whose ref storage isn't plain files.
+func readGitState(dir string) (gitState, error) {
+	gitDir, commonDir, err := gitDirs(dir)
+	if err != nil {
+		return gitState{}, err
+	}
+	if _, err := os.Stat(filepath.Join(commonDir, "reftable")); err == nil {
+		return readGitStateWithGit(dir)
+	}
+	data, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return gitState{}, err
+	}
+	head := strings.TrimSpace(string(data))
+	ref, symbolic := strings.CutPrefix(head, "ref: ")
+	if !symbolic {
+		return gitState{Head: head}, nil // detached
+	}
+	st := gitState{Branch: strings.TrimPrefix(ref, "refs/heads/")}
+	st.Head, err = resolveRef(commonDir, ref)
+	return st, err
+}
+
+// resolveRef looks a ref up as a loose file, then in packed-refs. A ref found in
+// neither is an unborn branch and resolves to "".
+func resolveRef(commonDir, ref string) (string, error) {
+	if data, err := os.ReadFile(filepath.Join(commonDir, filepath.FromSlash(ref))); err == nil {
+		return strings.TrimSpace(string(data)), nil
+	}
+	data, err := os.ReadFile(filepath.Join(commonDir, "packed-refs"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if sha, name, ok := strings.Cut(strings.TrimSpace(line), " "); ok && name == ref {
+			return sha, nil
+		}
+	}
+	return "", nil
+}
+
+func readGitStateWithGit(dir string) (gitState, error) {
+	var st gitState
+	if out, err := exec.Command("git", "-C", dir, "symbolic-ref", "--short", "-q", "HEAD").Output(); err == nil {
+		st.Branch = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "-q", "--verify", "HEAD").Output(); err == nil {
+		st.Head = strings.TrimSpace(string(out))
+	}
+	return st, nil
 }

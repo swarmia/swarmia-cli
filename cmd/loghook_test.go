@@ -56,6 +56,7 @@ func TestLockFileExcludesSecondOpener(t *testing.T) {
 func TestRunLogHookWrapsPayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir()) // not a repo: no git field
 
 	if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop","session_id":"s1"}`)); err != nil {
 		t.Fatal(err)
@@ -77,6 +78,9 @@ func TestRunLogHookWrapsPayload(t *testing.T) {
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
 		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(`"git"`)) {
+		t.Errorf("git field written outside a repo: %s", data)
 	}
 	if rec.LoggedAt == "" || rec.Event["session_id"] != "s1" {
 		t.Errorf("unexpected record: %s", data)
