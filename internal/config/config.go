@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -129,6 +130,19 @@ func parseBool(v string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("want true or false, got %q", v)
+}
+
+// tokenPattern is the format Swarmia issues CLI tokens in. The ingest endpoint
+// refuses anything else (401), so a mismatch is worth a warning — but only a
+// warning, in case the format evolves.
+var tokenPattern = regexp.MustCompile(`^swm_cli_[0-9a-f]{64,}$`)
+
+// TokenWarning describes what looks wrong with the configured token, or "".
+func (c Config) TokenWarning() string {
+	if c.Token == "" || tokenPattern.MatchString(c.Token) {
+		return ""
+	}
+	return "token doesn't look like a Swarmia CLI token (swm_cli_ followed by 64+ lowercase hex characters); the endpoint will likely refuse it"
 }
 
 // MaskedToken shows enough of the token to recognise it.

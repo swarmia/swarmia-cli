@@ -5,11 +5,12 @@ ingest service that receives its data (the `hook` service). It describes exactly
 what the client sends today, what it expects back, and what Swarmia is
 responsible for doing with it.
 
-**The endpoint is asynchronous.** `hook` authenticates nothing beyond what it
-can check cheaply, forwards each request to a Pub/Sub queue, and answers `2xx`.
-Validation, the repository check, storage and attribution joining happen
-downstream, after the client has its answer. So a `2xx` means *received*, not
-*accepted*: the client can't learn that a session was rejected. (A way to check
+**Processing is asynchronous.** `hook` checks each request's shape, publishes
+every session as its own message to a Pub/Sub queue, and answers with a result
+per session. Resolving the token to an organization, the repository check,
+storage and attribution joining happen downstream, after the client has its
+answer. So `accepted` means *queued*: the client learns about shape problems
+(`rejected`), but not about sessions the consumer later drops. (A way to check
 that is planned — see "Future: delivery status".)
 
 - **Base URL:** `https://hook.swarmia.com/cli` (clients can override it with the
@@ -58,8 +59,9 @@ the client can't prevent: a developer may paste code into a prompt.
   version of a session came from a request with a later `sent_at`, ignore the
   incoming one (still answer `accepted`).
 - **Batching.** One request carries 1–25 sessions and at most ~4 MB of JSON
-  before compression. Sessions in a batch are independent: the consumer must
-  process (and reject) each on its own, never fail the batch as a whole.
+  before compression. Sessions in a batch are independent: `hook` answers for
+  each and publishes each as its own message, and the consumer must process
+  each on its own, never fail the batch as a whole.
 - **Sessions belong to one repository.** A session's `repo` is the repository the
   agent worked in. (One agent session in one repository maps to one payload.)
 
@@ -203,7 +205,7 @@ Blank lines are never attributed, so ranges break at blank lines.
 
 Free text (`prompts[].text`, `tools[].command`) may contain:
 
-- `[REDACTED:<kind>]` — a secret the client removed. Kinds: `github-token`,
+- `[REDACTED:<kind>]` — a secret the client removed. Kinds: `swarmia-token`, `github-token`,
   `gitlab-token`, `slack-token`, `slack-webhook`, `aws-access-key`,
   `google-api-key`, `stripe-key`, `anthropic-key`, `openai-key`, `npm-token`,
   `sendgrid-key`, `jwt`, `private-key`, `password`, `secret`, `high-entropy`.
@@ -216,45 +218,64 @@ Display them as-is. Never try to reverse them.
 
 ## Response
 
-### 2xx — received
+### 200 OK — per-session results
 
-`hook` answers `202 Accepted` (any `2xx` works) once the request is queued. The
-body is ignored; send none.
+Once the request passes the whole-request checks below, `hook` answers `200`
+with one result per session it could identify:
 
-The client then marks every session in the batch as sent, and sends each again
-only when its payload changes. Whether the consumer later stored or rejected a
-session is invisible to the client.
+```json
+{
+  "results": [
+    { "session_id": "7999d991-42b2-47e9-932e-224855021364", "status": "accepted" },
+    { "session_id": "0b3c2f6e-1111-4222-8333-944455556666", "status": "rejected", "error": "repository unknown" }
+  ]
+}
+```
 
-> **Forward compatibility.** If a `2xx` body ever carries per-session results —
-> `{"results": [{"session_id": "…", "status": "accepted" | "rejected", "error": "…"}]}`
-> — the client honours them: a `rejected` session isn't retried until it
-> changes (its `error` is shown in `swarmia-cli report`), and a session left out
-> of the list is retried on the next run. The current asynchronous `hook`
-> doesn't return this, and doesn't need to.
+| Field | Type | Description |
+|---|---|---|
+| `results[].session_id` | string | Echoes the session's id. |
+| `results[].status` | string | `accepted` — published to the queue; `rejected` — failed a shape check. |
+| `results[].error` | string, only for `rejected` | `invalid payload: <field>` (a required field missing or of the wrong type), `repository unknown` (no `repo`), or `session too large` (the session's message exceeds the queue's ~9 MiB message limit). Shown to the developer by `swarmia-cli report`. |
+
+Client behaviour:
+
+- `accepted`: marked sent; resent only when the payload changes.
+- `rejected`: marked rejected with the reason; **not retried until the payload
+  changes** (e.g. after an `origin` remote is added, `repository unknown` goes
+  away on the next change).
+- **Left out of `results`:** treated as not sent and retried on the next run.
+  `hook` leaves out sessions whose publish failed, and sessions without a
+  `session_id` (which the client never sends).
+
+Whether the consumer later stores or drops an accepted session is invisible to
+the client.
 
 ### Errors — the whole request
 
-`hook` can only fail a request as a whole, for problems it notices before
-queueing. Everything else (an unknown repository, an invalid session) is the
-consumer's business and doesn't reach the client.
-
-| Status | When `hook` might return it | Client behaviour |
+| Status | When | Client behaviour |
 |---|---|---|
-| `400` | The body isn't gzip/JSON, or `schema_version` is unsupported — if `hook` checks. | Backs off exponentially (1 min doubling, max 6 h) and retries. |
-| `401` / `403` | The token is missing, malformed, or — if `hook` can look it up cheaply — unknown/revoked. | Pauses delivery for 6 hours. |
-| `413` | Request too large (`hook` or a proxy in front of it). | Splits the batch in half and retries; a single session that still gets `413` is not retried until it changes. |
-| `429` | Rate limited. | Waits for `Retry-After` (seconds) if given, else backs off exponentially. |
-| `5xx` | `hook` couldn't queue the request. | Waits for `Retry-After` if given, else backs off exponentially. |
+| `400` | Body isn't valid gzip or JSON (or not an object), `schema_version` isn't `1`, `cli_version` or `sent_at` is missing or invalid, or `sessions` is empty. | Backs off exponentially (1 min doubling, max 6 h) and retries. |
+| `401` | No `Authorization` header, or the token isn't `swm_cli_` followed by 64+ lowercase hex characters. | Pauses delivery for 6 hours. (`swarmia-cli config` and `send` warn about a malformed token up front.) |
+| `404` / `405` | Any path other than `/cli/sessions`, or any method other than `POST`. | Backs off exponentially (a misconfigured `endpoint`). |
+| `413` | More than 25 sessions. | Splits the batch in half and retries (the client never sends more than 25). |
+| `429` | Rate limited, if added (e.g. by infrastructure in front of `hook`). | Waits for `Retry-After` (seconds) if given, else backs off exponentially. |
+| `503` | None of the sessions could be published to the queue. | Waits for `Retry-After` if given, else backs off exponentially. |
+| other `5xx` | Unexpected failures. | As `503`. |
 
-None of these are required beyond `2xx` for success and `5xx` when queueing
-fails; the client copes with any of them. The error body is only logged (first
-~200 characters). Network errors and timeouts (the client waits 30 s) back off
-like `5xx`. Because the client retries after timeouts, the same payload can be
-queued twice — consumers must be idempotent (upserts make that free).
+Error bodies are only logged (first ~200 characters). Network errors and
+timeouts (the client waits 30 s) back off like `5xx`. Because the client retries
+after timeouts, the same payload can be queued twice — consumers must be
+idempotent (upserts make that free).
 
 ## Authentication and tokens
 
 - `Authorization: Bearer <token>`. The token identifies the **organization**.
+- **Format:** `swm_cli_` followed by 64 or more lowercase hex characters
+  (`hook` answers `401` to anything else). `hook` never forwards the token
+  itself: messages carry its SHA-256 digest (`tokenHash`), which the consumer
+  resolves to the organization. The CLI redacts `swm_cli_…` strings from
+  prompts and commands.
 - **The token is write-only and may be public.** Teams can commit it to a
   repository's `.swarmia.json` so every developer's CLI picks it up. Anyone who
   can read that repository — including the whole internet for a public one —
@@ -263,46 +284,49 @@ queued twice — consumers must be idempotent (upserts make that free).
   and validate accordingly (see Server responsibilities).
 - Tokens are also distributed by MDM, user config files or the `SWARMIA_TOKEN`
   environment variable.
-- Token format is up to the server; the CLI treats it as an opaque string. A
-  recognisable prefix (e.g. `swm_cli_…`) helps secret scanners and makes
-  `swarmia-cli config` output clearer.
 
 ## Limits
 
 | Limit | Client guarantee | Server should |
 |---|---|---|
-| Sessions per request | ≤ 25 | Accept ≥ 25; `413` beyond its limit. |
-| Request size (uncompressed JSON) | ≤ 4 MB, except a single session can exceed it | Accept ≥ 8 MB decompressed; refuse more with `413`. Guard against decompression bombs (cap while decompressing). |
-| Session size | Usually < 100 KB; long sessions with many prompts can reach a few MB | Consumer drops absurd sizes per session (and records why). |
+| Sessions per request | ≤ 25 | `hook` answers `413` beyond 25. |
+| Request size (uncompressed JSON) | ≤ 4 MB, except a single session can exceed it | Decompressed before the handler; guard against decompression bombs. |
+| Session size | Usually < 100 KB; long sessions with many prompts can reach a few MB | `hook` rejects a session whose message exceeds ~9 MiB (`session too large`). |
 | Request rate | One request per batch per background run; background runs happen at session ends | Rate limit per token; answer `429` with `Retry-After`. |
 
 ## Server responsibilities
 
-### `hook` (receiver)
+### `hook` (receiver) — as implemented
 
-1. Decompress (with a size cap) and, if cheap, check the body parses and has
-   a supported `schema_version` → else `400`.
-2. Check the `Authorization` header is present and well-formed → else `401`.
-   Looking the token up is optional here; the consumer must do it either way.
-3. Publish the request — body plus the token (or the organization it resolves
-   to) and `sent_at` — to the queue, and answer `202`. Fail with `5xx` only if
-   publishing fails.
-4. Rate limit per token (`429` with `Retry-After`).
+1. Serve only `POST /cli/sessions` (others: `404`/`405`); the body arrives
+   gzip-decompressed.
+2. Check the `Authorization` header carries a token in the CLI format → else
+   `401`. The token is replaced by its SHA-256 digest (`tokenHash`) straight
+   away; the plaintext never reaches messages or logs.
+3. Whole-request checks → `400` / `413` as above.
+4. For each session: check required fields and types (`invalid payload:
+   <field>`), that `repo` is set (`repository unknown`), and the message size
+   (`session too large`); then publish it as its own `cli-ingest/session`
+   message carrying `schemaVersion`, `cliVersion`, `sentAt`, `userAgent`,
+   `tokenHash` and the session exactly as received (unknown fields included).
+5. Answer `200` with per-session results; leave out sessions whose publish
+   failed; answer `503` if nothing could be published.
+6. Never log prompts: the body is detached from the request before anything can
+   throw.
 
 ### Consumer (downstream of the queue)
 
-1. **Authenticate** the token → organization; drop messages with unknown or
+1. **Authenticate** `tokenHash` → organization; drop messages with unknown or
    revoked tokens.
-2. **Validate each session independently.** Required: `session_id`, `agent`,
-   `matcher_version`, `started_at`, `ended_at`, and the arrays. Ignore unknown
-   fields (the client may add fields without bumping `schema_version`). An
-   invalid session never invalidates the rest of the batch.
+2. **Validate further.** `hook` only checked field presence and types; ignore
+   unknown fields (the client may add fields without bumping
+   `schema_version`).
 3. **Check the repository belongs to the organization.** Match `repo` against
    the organization's connected repositories (GitHub/GitLab integration) and
    drop sessions for others. This is what stops junk sent with a leaked token,
-   and keeps developers' personal projects out. Drop sessions with an empty
-   `repo`. Record why sessions were dropped, per token — that is what the
-   planned delivery status endpoint would report.
+   and keeps developers' personal projects out. Record why sessions were
+   dropped, per token — that is what the planned delivery status endpoint would
+   report.
 4. **Upsert** by (organization, `session_id`), replacing the stored payload,
    unless the stored version came from a later `sent_at`. Duplicate messages are
    expected.
@@ -332,8 +356,9 @@ queued twice — consumers must be idempotent (upserts make that free).
 
 ## Future: delivery status
 
-Because `hook` is asynchronous, the client can't tell whether its sessions were
-stored or dropped (unknown repository, revoked token, invalid payload). A
+`hook` only answers for shape problems, so the client can't tell whether an
+accepted session was stored or dropped downstream (repository not in the
+organization, unknown or revoked token). A
 separate, synchronous endpoint on `https://app.swarmia.com/` is planned for that:
 called with the same write-only token, it would answer — per session id the
 client sent, or summarised for the token — whether the session was received and
@@ -348,7 +373,7 @@ Request (shown decompressed):
 
 ```http
 POST /cli/sessions HTTP/1.1
-Authorization: Bearer swm_cli_8f3k2...
+Authorization: Bearer swm_cli_3f9a0c…
 Content-Type: application/json
 Content-Encoding: gzip
 User-Agent: swarmia-cli/0.4.0
@@ -394,7 +419,10 @@ User-Agent: swarmia-cli/0.4.0
 Response:
 
 ```http
-HTTP/1.1 202 Accepted
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{ "results": [ { "session_id": "e2e5c1d0-5f7a-4c1e-9d2b-3a4b5c6d7e8f", "status": "accepted" } ] }
 ```
 
 ## JSON Schema
@@ -478,8 +506,30 @@ Request body (after decompression):
 }
 ```
 
-The response body is ignored (see "Forward compatibility" under Response for
-the optional per-session format the client would honour).
+Response body (200):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hook.swarmia.com/cli/schemas/sessions-response-v1.json",
+  "type": "object",
+  "required": ["results"],
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["session_id", "status"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "status": { "enum": ["accepted", "rejected"] },
+          "error": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+```
 
 ## Versioning
 
@@ -495,6 +545,6 @@ the optional per-session format the client would honour).
 Point the CLI at a local implementation and send now:
 
 ```sh
-SWARMIA_ENDPOINT=http://127.0.0.1:8080/cli SWARMIA_TOKEN=dev swarmia-cli send
+SWARMIA_ENDPOINT=http://127.0.0.1:8080/cli SWARMIA_TOKEN=swm_cli_$(openssl rand -hex 32) swarmia-cli send
 swarmia-cli report --json   # the exact payloads it would send
 ```

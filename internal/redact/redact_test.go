@@ -8,6 +8,7 @@ import (
 func TestRedactsSecrets(t *testing.T) {
 	for _, tc := range []struct{ in, kind string }{
 		{"use ghp_" + strings.Repeat("a1B2", 9) + " for the API", "github-token"},
+		{"the cli token is swm_cli_" + strings.Repeat("0123456789abcdef", 4), "swarmia-token"},
 		{"token github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz", "github-token"},
 		{"export GITLAB=glpat-abcdefghij0123456789", "gitlab-token"},
 		{"xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx", "slack-token"},

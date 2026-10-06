@@ -38,6 +38,9 @@ var sendCmd = &cobra.Command{
 		if cfg.Token == "" && !sendDryRun {
 			return fmt.Errorf("no token configured; see `swarmia-cli config`")
 		}
+		if w := cfg.TokenWarning(); w != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s.\n", w)
+		}
 		var outcome deliver.Outcome
 		var pending int
 		opts.AfterAttribute = func(sessions []*report.Session) error {

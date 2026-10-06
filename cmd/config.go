@@ -44,6 +44,9 @@ var configCmd = &cobra.Command{
 			prompts = "withheld"
 		}
 		fmt.Fprintf(out, "prompts:   %s  (%s)\n", prompts, cfg.PromptsSource)
+		if w := cfg.TokenWarning(); w != "" {
+			fmt.Fprintf(out, "\nWarning: %s.\n", w)
+		}
 		return nil
 	},
 }

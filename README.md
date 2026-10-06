@@ -224,8 +224,8 @@ Nothing is sent without a token. With one, delivery sends exactly what
   (`python -c`, `node -e`, …) and quoted strings over 120 characters. Tool
   output is never included.
 - **Secrets redacted** from prompts and commands: provider token formats
-  (GitHub, GitLab, Slack, AWS, Google, Stripe, OpenAI, Anthropic, npm, SendGrid,
-  JWTs), private keys, passwords in URLs, connection strings and `curl -u`,
+  (Swarmia, GitHub, GitLab, Slack, AWS, Google, Stripe, OpenAI, Anthropic, npm,
+  SendGrid, JWTs), private keys, passwords in URLs, connection strings and `curl -u`,
   values of secret-looking assignments, and long random-looking strings. Each
   becomes `[REDACTED:<kind>]`.
 - **Local details masked:** the repository root becomes `<repo>`, your home
@@ -246,11 +246,15 @@ throttling and backoff. `send --dry-run` only counts what would go.
   token. The server keeps the latest version of each session.
 - A session is sent again only when its payload changes — it continued, or a
   commit was pushed — and at most every 15 minutes while it's still going.
-- The endpoint is asynchronous: it queues what it receives and answers `2xx`,
-  so "sent" means received, not processed — the CLI can't see whether Swarmia
-  later stored or dropped a session (a status endpoint is planned). Failures
-  back off (exponentially, honouring `Retry-After`; six hours for an unusable
-  token), and nothing is lost meanwhile.
+- The endpoint checks each session's shape, queues it, and answers per
+  session: a rejected session (e.g. `repository unknown` without an `origin`
+  remote) isn't retried until it changes, and `report` shows why. Processing is
+  asynchronous, so "sent" means queued — the CLI can't see whether Swarmia later
+  stored or dropped a session (a status endpoint is planned). Failures back off
+  (exponentially, honouring `Retry-After`; six hours for an unusable token), and
+  nothing is lost meanwhile.
+- Tokens look like `swm_cli_` + 64 hex characters; `config` and `send` warn if
+  the configured one doesn't.
 
 The ingest API is specified in [docs/ingest-api.md](docs/ingest-api.md).
 

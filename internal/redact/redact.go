@@ -3,8 +3,8 @@
 // what it finds with a [REDACTED:<kind>] marker:
 //
 //  1. private key blocks;
-//  2. well-known provider token formats (GitHub, GitLab, Slack, AWS, Google,
-//     Stripe, OpenAI, Anthropic, npm, SendGrid, JWTs);
+//  2. well-known provider token formats (Swarmia, GitHub, GitLab, Slack, AWS,
+//     Google, Stripe, OpenAI, Anthropic, npm, SendGrid, JWTs);
 //  3. passwords in URLs and connection strings;
 //  4. values assigned to secret-looking names (password=, api_key: …);
 //  5. long random-looking strings (high Shannon entropy).
@@ -29,6 +29,7 @@ var privateKey = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK
 
 // providerTokens are formats specific enough to redact on sight.
 var providerTokens = []pattern{
+	{"swarmia-token", regexp.MustCompile(`\bswm_cli_[0-9a-f]{32,}`)},
 	{"github-token", regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,255}\b`)},
 	{"github-token", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,255}\b`)},
 	{"gitlab-token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`)},

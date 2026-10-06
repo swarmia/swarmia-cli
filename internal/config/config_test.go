@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,21 @@ func TestInvalidConfigIsAnError(t *testing.T) {
 	t.Setenv("SWARMIA_PROMPTS", "maybe")
 	if _, err := Load(repo2); err == nil {
 		t.Error("expected an error for SWARMIA_PROMPTS=maybe")
+	}
+}
+
+func TestTokenWarning(t *testing.T) {
+	good := "swm_cli_" + strings.Repeat("0123456789abcdef", 4)
+	for tok, wantWarning := range map[string]bool{
+		"":                    false,
+		good:                  false,
+		"swm_cli_abc":         true,
+		strings.ToUpper(good): true,
+		"ghp_something":       true,
+	} {
+		if got := (Config{Token: tok}).TokenWarning() != ""; got != wantWarning {
+			t.Errorf("TokenWarning(%q) = %v, want %v", tok, got, wantWarning)
+		}
 	}
 }
 
