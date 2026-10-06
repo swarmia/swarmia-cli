@@ -136,10 +136,29 @@ The log file is chosen in this order:
 2. `$SWARMIA_LOG_FILE`
 3. `events.jsonl` in the repository's [state directory](#state-dir)
 
+### `process`
+
+Brings the local session store up to date:
+
+- **Folds** the raw event log into one compact record per session under
+  `sessions/` in the state directory — prompts, tool calls and the extracted
+  edit hunks, without the bulky whole-file payloads (in practice ~6× smaller) —
+  and empties the log. Identical records logged twice are folded once.
+- **Attributes** each session's edits to commits (see `report`), storing the
+  result. It is recomputed only when the session's edits or candidate commits
+  change; commits that were amended or rebased away stop being reachable, so
+  they drop out and their replacements are matched. Pushed status is refreshed
+  every run.
+- **Prunes** sessions with no activity for 30 days.
+
+`log-hook` starts it in the background (detached, never delaying the agent) when
+a session ends or the log passes 8 MB, and `report` runs it before printing, so
+running it by hand is rarely needed. Only one run proceeds at a time.
+
 ### `report`
 
-Matches recent agent sessions in the event log to the commits their edits
-landed in, and prints what each session contributed:
+Brings the session store up to date (as `process` does) and prints what each
+recent agent session contributed to which commits:
 
 ```sh
 swarmia-cli report               # the 5 most recent sessions
@@ -248,14 +267,16 @@ cmd/
   paths.go         project dir, state dir and log-file resolution
   statedir.go      the state-dir command
   report.go        the report command
-  lock_*.go        per-OS exclusive file locking
+  process.go       the process command and the background launch from log-hook
+  detach_*.go      starting the background run detached (per OS)
   version.go       version command + build metadata
 internal/
   events/          the local event log format (written by log-hook)
   gitrepo/         finds the enclosing repo and reads HEAD without spawning git
   attribution/     matches agent edits to committed files, line by line
                    (golden cases from real sessions in testdata/golden)
-  report/          groups the log into sessions and attributes them to commits
+  report/          folds the log into stored sessions and attributes them to commits
+  fslock/          cross-process file locks (per OS)
   snapshot/        captures what shell commands changed in the worktree
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)

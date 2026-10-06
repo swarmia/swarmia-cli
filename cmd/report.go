@@ -11,8 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
-	"github.com/swarmia/swarmia-cli/internal/events"
-	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/report"
 )
 
@@ -53,34 +51,22 @@ func init() {
 }
 
 func runReport(out io.Writer) error {
-	repo, err := gitrepo.Find(projectDir())
+	opts, repo, err := processOptions(reportFile, !reportAllAuth, true)
 	if err != nil {
 		return err
 	}
-	path, err := eventsPath(reportFile)
+	res, err := report.Process(opts)
 	if err != nil {
 		return err
 	}
-	recs, err := events.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	email := gitOutput(repo.Root, "config", "--get", "user.email")
-	opts := report.Options{RepoDir: repo.Root, FallbackRoot: repo.Root}
-	if !reportAllAuth {
-		opts.AuthorEmail = email
-	}
-	sessions, err := report.Build(recs, opts)
-	if err != nil {
-		return err
-	}
-	sessions = selectSessions(sessions)
+	sessions := selectSessions(res.Sessions)
 
 	if reportJSON {
+		email := gitOutput(repo.Root, "config", "--get", "user.email")
 		return writeReportJSON(out, sessions, gitOutput(repo.Root, "remote", "get-url", "origin"), email)
 	}
 	if len(sessions) == 0 {
-		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", path)
+		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", opts.StateDir)
 		return nil
 	}
 	for i, s := range sessions {
@@ -92,9 +78,9 @@ func runReport(out io.Writer) error {
 	return nil
 }
 
-func selectSessions(sessions []report.Session) []report.Session {
+func selectSessions(sessions []*report.Session) []*report.Session {
 	if reportSession != "" {
-		var out []report.Session
+		var out []*report.Session
 		for _, s := range sessions {
 			if strings.HasPrefix(s.ID, reportSession) {
 				out = append(out, s)
@@ -108,7 +94,7 @@ func selectSessions(sessions []report.Session) []report.Session {
 	return sessions
 }
 
-func writeSessionText(out io.Writer, s report.Session) {
+func writeSessionText(out io.Writer, s *report.Session) {
 	local := func(t time.Time) string { return t.Local().Format("2006-01-02 15:04") }
 	model := s.Model
 	if model == "" {
@@ -116,31 +102,31 @@ func writeSessionText(out io.Writer, s report.Session) {
 	}
 	fmt.Fprintf(out, "Session %s  %s  %s → %s\n", shortID(s.ID), model, local(s.StartedAt), s.EndedAt.Local().Format("15:04"))
 	shell := ""
-	if s.ShellEdits > 0 {
-		shell = fmt.Sprintf(" (%d via shell)", s.ShellEdits)
+	if n := s.ShellEdits(); n > 0 {
+		shell = fmt.Sprintf(" (%d via shell)", n)
 	}
-	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), s.Edits, shell, s.AILines)
-	if len(s.Commits) == 0 {
-		if s.AILines > 0 {
+	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), len(s.Edits), shell, s.AILines())
+	if len(s.Commits()) == 0 {
+		if s.AILines() > 0 {
 			fmt.Fprintln(out, "  not committed yet")
 		}
 		return
 	}
 	survived := 0
-	for _, c := range s.Commits {
+	for _, c := range s.Commits() {
 		state := "local "
 		if c.Pushed {
 			state = "pushed"
 		}
 		fmt.Fprintf(out, "  %s  %s  %s\n", c.SHA[:7], state, truncate(c.Subject, 60))
 		for _, f := range c.Files {
-			fmt.Fprintf(out, "      %-44s %4d line(s)%s\n", f.Path, len(f.Lines), classBreakdown(f))
+			fmt.Fprintf(out, "      %-44s %4d line(s)%s\n", f.Path, f.Total(), classBreakdown(f))
 		}
 		survived += c.Survived()
 	}
-	if s.AILines > 0 {
+	if ai := s.AILines(); ai > 0 {
 		fmt.Fprintf(out, "  %d of %d AI line(s) committed unchanged or reformatted (%d%%)\n",
-			survived, s.AILines, 100*survived/s.AILines)
+			survived, ai, 100*survived/ai)
 	}
 }
 
@@ -200,7 +186,7 @@ type payloadUnsentNB struct {
 	Text string `json:"text"`
 }
 
-func writeReportJSON(out io.Writer, sessions []report.Session, remote, email string) error {
+func writeReportJSON(out io.Writer, sessions []*report.Session, remote, email string) error {
 	payloads := make([]payload, 0, len(sessions))
 	for _, s := range sessions {
 		p := payload{
@@ -209,7 +195,7 @@ func writeReportJSON(out io.Writer, sessions []report.Session, remote, email str
 			Repo: repoSlug(remote), AuthorEmail: email,
 			StartedAt: s.StartedAt, EndedAt: s.EndedAt,
 			Prompts: []payloadPrompt{}, Tools: []payloadTool{}, Commits: []payloadCommit{},
-			AILines: s.AILines,
+			AILines: s.AILines(),
 			Unsent:  &payloadUnsentNB{Text: "draft: not sent; prompts are not redacted yet; only pushed commits would be included"},
 		}
 		for _, pr := range s.Prompts {
@@ -218,9 +204,9 @@ func writeReportJSON(out io.Writer, sessions []report.Session, remote, email str
 		for _, t := range s.Tools {
 			p.Tools = append(p.Tools, payloadTool{At: t.At, Name: t.Name, File: t.File, Command: t.Command})
 		}
-		for _, c := range s.Commits {
+		for _, c := range s.Commits() {
 			for _, f := range c.Files {
-				p.Commits = append(p.Commits, payloadCommit{SHA: c.SHA, Path: f.Path, Pushed: c.Pushed, Lines: report.Ranges(f.Lines)})
+				p.Commits = append(p.Commits, payloadCommit{SHA: c.SHA, Path: f.Path, Pushed: c.Pushed, Lines: f.Lines})
 			}
 			p.AILinesKept += c.Survived()
 		}

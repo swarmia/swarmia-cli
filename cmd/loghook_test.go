@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"github.com/swarmia/swarmia-cli/internal/events"
+	"github.com/swarmia/swarmia-cli/internal/fslock"
 )
 
-// lockFile must exclude a second opener of the same file until released; that
+// fslock.Lock must exclude a second opener of the same file until released; that
 // is what keeps concurrent log-hook invocations (parallel tool calls, subagents)
 // from interleaving writes.
 func TestLockFileExcludesSecondOpener(t *testing.T) {
@@ -27,14 +28,14 @@ func TestLockFileExcludesSecondOpener(t *testing.T) {
 		return f
 	}
 
-	unlock, err := lockFile(open())
+	unlock, err := fslock.Lock(open())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	acquired := make(chan struct{})
 	go func() {
-		unlock2, err := lockFile(open())
+		unlock2, err := fslock.Lock(open())
 		if err != nil {
 			t.Error(err)
 			return
@@ -150,5 +151,34 @@ func TestLogHookRecordsShellCommandChanges(t *testing.T) {
 	want := []events.FileChange{{Path: "gen.go", Hunks: [][]string{{"+package gen", "+", "+func Generated() {}"}}}}
 	if !reflect.DeepEqual(recs[1].Changes, want) {
 		t.Errorf("changes = %+v, want %+v", recs[1].Changes, want)
+	}
+}
+
+// Session end, or a log past the size threshold, starts a background fold.
+func TestLogHookStartsBackgroundProcess(t *testing.T) {
+	var started []string
+	startBackgroundProcess = func(logPath string) { started = append(started, logPath) }
+	t.Cleanup(func() { startBackgroundProcess = func(string) {} })
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+
+	for _, ev := range []string{"Stop", "PreToolUse", "SessionEnd"} {
+		if err := runLogHook(strings.NewReader(`{"hook_event_name":"` + ev + `","session_id":"s"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(started) != 1 || started[0] != path {
+		t.Fatalf("started = %v, want one run for SessionEnd", started)
+	}
+
+	if err := os.Truncate(path, backgroundLogSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop","session_id":"s"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(started) != 2 {
+		t.Errorf("a large log didn't start a run: %v", started)
 	}
 }

@@ -1,0 +1,165 @@
+package report
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/swarmia/swarmia-cli/internal/events"
+	"github.com/swarmia/swarmia-cli/internal/fslock"
+)
+
+// writeLog writes records as a raw event log, the way log-hook does.
+func writeLog(t *testing.T, path string, recs []events.Record) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for _, r := range recs {
+		line, _ := json.Marshal(r)
+		f.Write(append(line, '\n'))
+	}
+}
+
+func (f *fixture) process(t *testing.T, stateDir string, now time.Time) ProcessResult {
+	t.Helper()
+	res, err := Process(ProcessOptions{
+		Options:  Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"},
+		LogPath:  filepath.Join(stateDir, "events.jsonl"),
+		StateDir: stateDir,
+		Wait:     true,
+		Now:      now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestProcessFoldsLogAndCachesAttribution(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+
+	code := lines(4, "func generated%d() string { return \"value from the agent\" }")
+	f.agentWrite(t0, "gen.go", code, nil)
+	// The same event logged twice (overlapping hooks) folds once.
+	writeLog(t, logPath, append(f.recs, f.recs...))
+
+	res := f.process(t, state, t0.Add(time.Hour))
+	if res.Folded != 2 || len(res.Sessions) != 1 {
+		t.Fatalf("folded %d records into %d sessions, want 2 into 1", res.Folded, len(res.Sessions))
+	}
+	if s := res.Sessions[0]; len(s.Edits) != 1 || s.AILines() != 4 || len(s.Commits()) != 0 {
+		t.Errorf("edits=%d ailines=%d commits=%d, want 1, 4, 0", len(s.Edits), s.AILines(), len(s.Commits()))
+	}
+	if fi, err := os.Stat(logPath); err != nil || fi.Size() != 0 {
+		t.Errorf("log not emptied after folding: %v, %v", fi, err)
+	}
+
+	// Nothing new: the stored attribution is reused as is.
+	computed := res.Sessions[0].Attribution.ComputedAt
+	res = f.process(t, state, t0.Add(2*time.Hour))
+	if got := res.Sessions[0].Attribution.ComputedAt; !got.Equal(computed) {
+		t.Errorf("attribution recomputed without new inputs (%v → %v)", computed, got)
+	}
+
+	// A new commit with the agent's code: recomputed, and attributed.
+	sha := f.commit(t0.Add(3*time.Hour), "me@example.com", "add gen", map[string]string{"gen.go": code})
+	res = f.process(t, state, t0.Add(3*time.Hour))
+	if c := res.Sessions[0].Commits(); len(c) != 1 || c[0].SHA != sha || c[0].Survived() != 4 || c[0].Pushed {
+		t.Errorf("commits = %+v, want %s with 4 lines, local", c, sha[:7])
+	}
+
+	// Pushing refreshes the flag without needing new inputs.
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	f.git(t0, "me@example.com", "init", "-q", "--bare", remote)
+	f.git(t0, "me@example.com", "remote", "add", "origin", remote)
+	f.git(t0, "me@example.com", "push", "-q", "origin", "main")
+	res = f.process(t, state, t0.Add(4*time.Hour))
+	if c := res.Sessions[0].Commits(); len(c) != 1 || !c[0].Pushed {
+		t.Errorf("after push: %+v, want pushed", c)
+	}
+}
+
+// Amending a local commit replaces it: the old sha is unreachable, so the
+// attribution moves to the new one.
+func TestProcessFollowsRewrittenCommits(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	code := lines(3, "func rewritten%d() error { return errors.New(\"agent wrote this\") }")
+	f.agentWrite(t0, "x.go", code, nil)
+	writeLog(t, filepath.Join(state, "events.jsonl"), f.recs)
+
+	before := f.commit(t0.Add(time.Minute), "me@example.com", "wip", map[string]string{"x.go": code})
+	if c := f.process(t, state, t0.Add(time.Hour)).Sessions[0].Commits(); len(c) != 1 || c[0].SHA != before {
+		t.Fatalf("before amend: %+v", c)
+	}
+	f.git(t0.Add(2*time.Minute), "me@example.com", "commit", "-q", "--amend", "-m", "better message")
+	after := f.git(t0, "me@example.com", "rev-parse", "HEAD")
+	c := f.process(t, state, t0.Add(time.Hour)).Sessions[0].Commits()
+	if len(c) != 1 || c[0].SHA != after || c[0].Subject != "better message" {
+		t.Errorf("after amend: %+v, want only %s", c, after[:7])
+	}
+}
+
+// Edits folded in separate runs still count AI lines across the whole session.
+func TestProcessFoldsIncrementally(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	f.agentWrite(t0, "x.go", "func a() { return firstVersion() }\nfunc b() { return keep() }\n", nil)
+	writeLog(t, logPath, f.recs)
+	f.process(t, state, t0)
+
+	f.recs = nil
+	f.agentWrite(t0.Add(time.Second), "x.go", "func a() { return secondVersion() }\nfunc b() { return keep() }\n",
+		"func a() { return firstVersion() }\nfunc b() { return keep() }\n")
+	writeLog(t, logPath, f.recs)
+	res := f.process(t, state, t0)
+	if s := res.Sessions[0]; len(s.Edits) != 2 || s.AILines() != 2 {
+		t.Errorf("edits=%d ailines=%d, want 2 and 2 (secondVersion + keep)", len(s.Edits), s.AILines())
+	}
+}
+
+func TestProcessPrunesOldSessions(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	f.agentWrite(t0, "x.go", "func old() { return stale() }\n", nil)
+	writeLog(t, filepath.Join(state, "events.jsonl"), f.recs)
+	if res := f.process(t, state, t0); len(res.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(res.Sessions))
+	}
+	res := f.process(t, state, t0.Add(Retention+time.Hour))
+	if res.Pruned != 1 || len(res.Sessions) != 0 {
+		t.Errorf("pruned=%d sessions=%d, want 1 and 0", res.Pruned, len(res.Sessions))
+	}
+	if left, _ := os.ReadDir(filepath.Join(state, "sessions")); len(left) != 0 {
+		t.Errorf("session files left: %v", left)
+	}
+}
+
+func TestProcessWithoutWaitReportsBusy(t *testing.T) {
+	state := t.TempDir()
+	lock, err := os.OpenFile(filepath.Join(state, "process.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	unlock, err := fslock.Lock(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	_, err = Process(ProcessOptions{LogPath: filepath.Join(state, "events.jsonl"), StateDir: state, Now: t0})
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("err = %v, want ErrBusy", err)
+	}
+}

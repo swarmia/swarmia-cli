@@ -160,9 +160,9 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 | Bash snapshots | ✅ done (`internal/snapshot`; `changes` on the finishing event's record) |
 | Lock abstraction (Windows-ready) | ✅ done; Windows compiles in CI, untested, not shipped |
 | Matcher (locate + line classes) | ✅ done (`internal/attribution`, v0.1.0) |
-| Lazy commit scan + pushed-only rule | ❌ |
-| Pending store + retention | ❌ |
-| Background worker | ❌ |
+| Lazy commit scan + pushed-only rule | ✅ done (pushed flag per commit; delivery filters) |
+| Pending store + retention | ✅ done (`sessions/` store, 30-day retention) |
+| Background worker | 🟡 basic: detached `process --background` on SessionEnd / log ≥ 8 MB, single-run lock; delivery will hook in here |
 | Config (repo + user), token resolution, prompt opt-out | ❌ |
 | Secret redaction | ❌ |
 | HTTPS sender | ❌ |
@@ -179,7 +179,8 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 4. ✅ **Local report** (done 2026-10-06): `swarmia-cli report` (+ `--json` draft
    payload). Also pulled forward from M8: `install --scope local|user` for
    personal setups (dogfooding in the monorepo).
-5. **Pending store, lazy scan, pushed-only rule, rewrite handling.**
+5. ✅ **Session store, retention, rewrite handling** (done 2026-10-06): see
+   "Findings from milestone 5".
 6. **Config + redaction:** repo/user config, token resolution, prompt opt-out,
    secret scanner.
 7. **Delivery:** background worker, HTTPS sender (needs the monorepo endpoint).
@@ -240,6 +241,22 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
   agent. Files > 1 MB and binary files are skipped.
 - **Latency:** 35 ms per Pre+Post pair here, 139 ms in the monorepo, dominated by
   `git status`. Option later: use fsmonitor when the repo has it configured.
+
+## Findings from milestone 5
+
+- **Compaction:** folding the raw log into per-session records drops whole-file
+  payloads: this repo's 2.0 MB log became 312 KB. `report` with cached
+  attribution: 0.07 s.
+- **Rewrite handling falls out of recomputation:** candidates are commits
+  reachable from refs, so amended/rebased commits disappear and replacements
+  match. Attribution is cached per session by (matcher version, edit count,
+  candidate SHAs); pushed flags refresh every run.
+- **Dedup:** identical records within a batch are folded once (fixes double
+  logging from overlapping hooks). Not across batches: a crash between saving
+  sessions and truncating the log would fold that batch twice.
+- **Worker:** `log-hook` launches `process --background` detached (setsid) on
+  SessionEnd or when the log reaches 8 MB; a lock file keeps it single-run.
+  Sessions that never end are still folded via the size trigger.
 
 ## Still open
 

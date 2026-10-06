@@ -157,17 +157,17 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 		t.Fatalf("got %d sessions, want 1", len(sessions))
 	}
 	s := sessions[0]
-	if s.Model != "claude-test" || len(s.Prompts) != 1 || s.Edits != 3 {
-		t.Errorf("session metadata: model=%q prompts=%d edits=%d", s.Model, len(s.Prompts), s.Edits)
+	if s.Model != "claude-test" || len(s.Prompts) != 1 || len(s.Edits) != 3 {
+		t.Errorf("session metadata: model=%q prompts=%d edits=%d", s.Model, len(s.Prompts), len(s.Edits))
 	}
-	if want := 5 + 4 + 3; s.AILines != want { // new.go has 4 non-blank lines
-		t.Errorf("AILines = %d, want %d", s.AILines, want)
+	if want := 5 + 4 + 3; s.AILines() != want { // new.go has 4 non-blank lines
+		t.Errorf("AILines = %d, want %d", s.AILines(), want)
 	}
 
-	if len(s.Commits) != 1 {
-		t.Fatalf("commits = %+v; want only %s (not %s, the teammate's, or pre-session ones)", s.Commits, first[:7], second[:7])
+	if len(s.Commits()) != 1 {
+		t.Fatalf("commits = %+v; want only %s (not %s, the teammate's, or pre-session ones)", s.Commits(), first[:7], second[:7])
 	}
-	c := s.Commits[0]
+	c := s.Commits()[0]
 	if c.SHA != first || !c.Pushed {
 		t.Errorf("commit %s pushed=%v, want %s pushed", c.SHA[:7], c.Pushed, first[:7])
 	}
@@ -183,7 +183,7 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 		t.Errorf("attribution = %v, want %v", got, want)
 	}
 	// The agent's app.go lines are 11–15 in the commit.
-	if lines := c.Files[0].Lines; lines[0].Line != 11 || lines[len(lines)-1].Line != 15 {
+	if lines := c.Files[0].Lines; lines[0].Start != 11 || lines[len(lines)-1].End != 15 {
 		t.Errorf("app.go lines = %v, want 11..15", lines)
 	}
 	if c.Survived() != 4+4 {
@@ -196,7 +196,7 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(all[0].Commits); n != 1 {
+	if n := len(all[0].Commits()); n != 1 {
 		t.Errorf("without author filter: %d commits, want 1", n)
 	}
 }
@@ -211,7 +211,7 @@ func TestAILinesExcludesSelfReplacedLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := sessions[0].AILines; got != 2 {
+	if got := sessions[0].AILines(); got != 2 {
 		t.Errorf("AILines = %d, want 2 (secondVersion + keep)", got)
 	}
 }
@@ -253,10 +253,10 @@ func TestBuildAttributesShellCommandChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := sessions[0]
-	if s.Edits != 1 || s.ShellEdits != 1 || s.AILines != 2 {
-		t.Errorf("edits=%d shell=%d ailines=%d, want 1, 1, 2", s.Edits, s.ShellEdits, s.AILines)
+	if len(s.Edits) != 1 || s.ShellEdits() != 1 || s.AILines() != 2 {
+		t.Errorf("edits=%d shell=%d ailines=%d, want 1, 1, 2", len(s.Edits), s.ShellEdits(), s.AILines())
 	}
-	if len(s.Commits) != 1 || s.Commits[0].SHA != sha || s.Commits[0].Survived() != 2 {
-		t.Errorf("commits = %+v, want %s with 2 lines", s.Commits, sha[:7])
+	if len(s.Commits()) != 1 || s.Commits()[0].SHA != sha || s.Commits()[0].Survived() != 2 {
+		t.Errorf("commits = %+v, want %s with 2 lines", s.Commits(), sha[:7])
 	}
 }

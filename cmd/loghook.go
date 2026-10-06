@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/swarmia/swarmia-cli/internal/events"
+	"github.com/swarmia/swarmia-cli/internal/fslock"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/snapshot"
 )
@@ -94,7 +95,13 @@ func runLogHook(stdin io.Reader) error {
 		return fmt.Errorf("encoding record: %w", err)
 	}
 	line = append(line, '\n')
-	return appendLine(path, line)
+	if err := appendLine(path, line); err != nil {
+		return err
+	}
+	if shouldProcess(payload, path) {
+		startBackgroundProcess(path)
+	}
+	return nil
 }
 
 // appendLine appends a single pre-serialized line under an exclusive file lock,
@@ -114,7 +121,7 @@ func appendLine(path string, line []byte) error {
 	}
 	defer f.Close()
 
-	unlock, err := lockFile(f)
+	unlock, err := fslock.Lock(f)
 	if err != nil {
 		return fmt.Errorf("locking %s: %w", path, err)
 	}
@@ -208,4 +215,17 @@ func snapshotShellCommand(repo gitrepo.Repo, payload []byte, dir string) []event
 		return out
 	}
 	return nil
+}
+
+// shouldProcess decides when to fold the log in the background: when a session
+// ends, and whenever the log has grown large (long-running sessions).
+func shouldProcess(payload []byte, logPath string) bool {
+	var p struct {
+		HookEventName string `json:"hook_event_name"`
+	}
+	if json.Unmarshal(payload, &p) == nil && p.HookEventName == "SessionEnd" {
+		return true
+	}
+	fi, err := os.Stat(logPath)
+	return err == nil && fi.Size() >= backgroundLogSize
 }
