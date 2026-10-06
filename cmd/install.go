@@ -264,6 +264,7 @@ func ensureClaudeHooks(doc map[string]any, logHook string) int {
 		{"UserPromptSubmit", "", logHook, "log-hook"},
 		{"PreToolUse", "*", logHook, "log-hook"},
 		{"PostToolUse", "*", logHook, "log-hook"},
+		{"PostToolUseFailure", "*", logHook, "log-hook"},
 		{"SessionStart", "", logHook, "log-hook"},
 		{"SessionEnd", "", logHook, "log-hook"},
 		{"Stop", "", logHook, "log-hook"},

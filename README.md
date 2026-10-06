@@ -113,7 +113,20 @@ commits and `branch` is empty when HEAD is detached. The git state is read from
 per event.
 
 It is a **passive** logger: it always exits 0 and writes nothing to stdout, so it
-can never block or interfere with the tool call that triggered it. Concurrent
+can never block or interfere with the tool call that triggered it.
+
+**Shell commands.** Agents also change files through Bash (`sed`, codegen,
+scripts, heredocs), which their edit-tool payloads don't show. So around each
+Bash call `log-hook` snapshots the worktree: before the command it records the
+dirty files (copying their content into the state directory), and when the
+command finishes — `PostToolUse` or `PostToolUseFailure` — it diffs what changed
+and stores the result as `changes` on that event's record. Only lines the
+command *authored* are kept: lines it merely reformatted (`prettier --write`) or
+restored from git (`git stash`, `checkout`, `pull`) are excluded, by requiring a
+line's normalized text to occur more often afterwards than in the file before
+the command or in HEAD. This costs one `git status` per hook (≈70 ms in a
+14k-file repository); files larger than 1 MB and binary files are skipped.
+Human edits made while a command runs are indistinguishable from the command's. Concurrent
 invocations are serialized with a file lock, so parallel tool calls and
 subagents can't corrupt the log.
 
@@ -161,9 +174,8 @@ How it decides:
 - **pushed / local** shows whether a remote-tracking branch contains the commit.
   Only pushed commits will ever be sent.
 
-Not yet covered: changes the agent makes through shell commands (`sed`,
-codegen, scripts) rather than its edit tools, and lines that moved to another
-file (renames).
+Edits include changes shell commands made (shown as "via shell"; see
+`log-hook`). Not yet covered: lines that moved to another file (renames).
 
 ### `state-dir`
 
@@ -244,6 +256,7 @@ internal/
   attribution/     matches agent edits to committed files, line by line
                    (golden cases from real sessions in testdata/golden)
   report/          groups the log into sessions and attributes them to commits
+  snapshot/        captures what shell commands changed in the worktree
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)
   platforms/       one binary-only package per os/arch (@swarmia/cli-<os>-<arch>)

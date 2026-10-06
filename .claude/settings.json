@@ -9,6 +9,9 @@
     "PostToolUse": [
       { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
     ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    ],
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
     ],

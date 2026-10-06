@@ -13,6 +13,7 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
+	"github.com/swarmia/swarmia-cli/internal/snapshot"
 )
 
 var (
@@ -76,23 +77,23 @@ func runLogHook(stdin io.Reader) error {
 		event = encoded
 	}
 
+	path, err := eventsPath(logFile)
+	if err != nil {
+		return fmt.Errorf("resolving log file: %w", err)
+	}
 	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Event: event}
 	// Best-effort: an unreadable repo state must not stop the event being logged.
 	if repo, err := gitrepo.Find(projectDir()); err == nil {
 		if st, err := repo.ReadState(); err == nil {
 			rec.Git = &events.Git{Root: repo.Root, Head: st.Head, Branch: st.Branch}
 		}
+		rec.Changes = snapshotShellCommand(repo, payload, filepath.Join(filepath.Dir(path), "snapshots"))
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding record: %w", err)
 	}
 	line = append(line, '\n')
-
-	path, err := eventsPath(logFile)
-	if err != nil {
-		return fmt.Errorf("resolving log file: %w", err)
-	}
 	return appendLine(path, line)
 }
 
@@ -154,4 +155,47 @@ func projectHasLogHook(dir string) bool {
 		}
 	}
 	return false
+}
+
+// snapshotShellCommand brackets a Bash tool call: before it runs, it snapshots
+// the worktree's dirty files; when it finishes (successfully or not), it returns
+// what the command authored. Edits through the agent's own edit tools are in
+// their payloads already, so only Bash needs this. Errors just mean no changes
+// are recorded — logging the event matters more.
+func snapshotShellCommand(repo gitrepo.Repo, payload []byte, dir string) []events.FileChange {
+	var p struct {
+		HookEventName string `json:"hook_event_name"`
+		ToolName      string `json:"tool_name"`
+		ToolUseID     string `json:"tool_use_id"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.ToolName != "Bash" || p.ToolUseID == "" {
+		return nil
+	}
+	store := snapshot.Store{Dir: dir}
+	switch p.HookEventName {
+	case "PreToolUse":
+		store.Prune(time.Now())
+		if snap, err := store.Take(repo); err == nil {
+			_ = store.Save(p.ToolUseID, snap)
+		}
+	case "PostToolUse", "PostToolUseFailure":
+		pre, ok := store.Load(p.ToolUseID)
+		if !ok {
+			return nil
+		}
+		changes, err := store.Changes(repo, pre)
+		if err != nil {
+			return nil
+		}
+		var out []events.FileChange
+		for _, c := range changes {
+			fc := events.FileChange{Path: c.Path}
+			for _, h := range c.Hunks {
+				fc.Hunks = append(fc.Hunks, h.Encode())
+			}
+			out = append(out, fc)
+		}
+		return out
+	}
+	return nil
 }

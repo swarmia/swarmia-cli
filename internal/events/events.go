@@ -14,6 +14,16 @@ type Record struct {
 	LoggedAt string          `json:"logged_at"`     // RFC 3339, UTC
 	Git      *Git            `json:"git,omitempty"` // omitted outside a repo
 	Event    json.RawMessage `json:"event"`         // the hook payload, verbatim
+	// Changes holds what a shell command authored in the working tree, on the
+	// record of the hook event that ended it (see internal/snapshot).
+	Changes []FileChange `json:"changes,omitempty"`
+}
+
+// FileChange is one file a shell command changed: hunks in diff-style lines,
+// "+" for lines it authored, " " for context.
+type FileChange struct {
+	Path  string     `json:"path"`
+	Hunks [][]string `json:"hunks"`
 }
 
 // Git is the project's repository position when the event was logged.

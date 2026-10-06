@@ -60,7 +60,7 @@ func TestInstallFreshCreatesConfig(t *testing.T) {
 
 	doc := readSettings(t, repo)
 	// Every managed event carries the log-hook command.
-	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "Stop"} {
+	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionStart", "SessionEnd", "Stop"} {
 		if !contains(commandsFor(t, doc, ev), "swarmia-cli log-hook") {
 			t.Errorf("%s missing log-hook; got %v", ev, commandsFor(t, doc, ev))
 		}
@@ -385,12 +385,12 @@ func TestInstallCompletesPartialSwarmiaInstall(t *testing.T) {
 	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(out.Bytes(), []byte("added 1 hook")) {
-		t.Errorf("expected exactly 1 hook added (Stop), got: %s", out.String())
+	if !bytes.Contains(out.Bytes(), []byte("added 2 hook")) {
+		t.Errorf("expected exactly 2 hooks added (Stop, PostToolUseFailure), got: %s", out.String())
 	}
 
 	doc := readSettings(t, repo)
-	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "Stop"} {
+	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionStart", "SessionEnd", "Stop"} {
 		if cmds := commandsFor(t, doc, ev); len(cmds) != 1 || cmds[0] != "swarmia-cli log-hook" {
 			t.Errorf("%s = %v, want a single, un-duplicated log-hook", ev, cmds)
 		}
@@ -526,7 +526,7 @@ func TestInstallUserScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "/opt/bin/swarmia-cli log-hook --skip-if-project-hooks"
-	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "Stop"} {
+	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionStart", "SessionEnd", "Stop"} {
 		if got := commandsFor(t, doc, ev); !reflect.DeepEqual(got, []string{want}) {
 			t.Errorf("%s = %v, want [%s]", ev, got, want)
 		}

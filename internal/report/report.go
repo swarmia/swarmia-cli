@@ -35,6 +35,9 @@ type Session struct {
 	Prompts   []Prompt
 	Tools     []Tool
 	Edits     int
+	// ShellEdits is how many of Edits are changes shell commands made, found
+	// by snapshotting the worktree around them.
+	ShellEdits int
 	// AILines counts the non-blank lines the agent wrote that were still in the
 	// files when the session's last edit to each file was made — lines it wrote
 	// and then replaced itself don't count.
@@ -99,6 +102,7 @@ const clockSlack = 2 * time.Second
 type edit struct {
 	at time.Time
 	attribution.Edit
+	viaShell bool // made by a shell command, found by snapshot diff
 }
 
 // Build groups the records into sessions, newest first, and attributes each
@@ -127,6 +131,11 @@ func Build(recs []events.Record, opts Options) ([]Session, error) {
 		s := &sessions[i]
 		edits := editsBySession[s.ID]
 		s.Edits = len(edits)
+		for _, e := range edits {
+			if e.viaShell {
+				s.ShellEdits++
+			}
+		}
 		s.AILines = aiLinesAtEnd(edits)
 		s.Commits = attribute(r, edits, commits)
 	}
@@ -179,7 +188,7 @@ func group(recs []events.Record, fallbackRoot string) ([]Session, map[string][]e
 			}
 		case "UserPromptSubmit":
 			s.Prompts = append(s.Prompts, Prompt{At: at, Text: p.Prompt})
-		case "PostToolUse":
+		case "PostToolUse", "PostToolUseFailure":
 			s.Tools = append(s.Tools, Tool{At: at, Name: p.ToolName, File: p.ToolInput.FilePath, Command: p.ToolInput.Command})
 			root := fallbackRoot
 			if rec.Git != nil && rec.Git.Root != "" {
@@ -187,6 +196,13 @@ func group(recs []events.Record, fallbackRoot string) ([]Session, map[string][]e
 			}
 			if e, ok := attribution.ClaudeEdit(rec.Event, root); ok {
 				edits[p.SessionID] = append(edits[p.SessionID], edit{at: at, Edit: e})
+			}
+			for _, fc := range rec.Changes { // what a shell command authored
+				e := attribution.Edit{Path: fc.Path}
+				for _, h := range fc.Hunks {
+					e.Hunks = append(e.Hunks, attribution.DecodeHunk(h))
+				}
+				edits[p.SessionID] = append(edits[p.SessionID], edit{at: at, Edit: e, viaShell: true})
 			}
 		}
 	}

@@ -226,3 +226,37 @@ func TestRanges(t *testing.T) {
 		t.Errorf("Ranges = %v, want %v", got, want)
 	}
 }
+
+// Lines a shell command wrote (recorded as changes on the record that ended
+// it) are attributed like the agent's own edits.
+func TestBuildAttributesShellCommandChanges(t *testing.T) {
+	f := newFixture(t)
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	raw, _ := json.Marshal(map[string]any{
+		"hook_event_name": "PostToolUse", "session_id": "sess-1", "tool_name": "Bash",
+		"tool_input": map[string]any{"command": "./codegen.sh"},
+	})
+	f.recs = append(f.recs, events.Record{
+		LoggedAt: t0.Format(time.RFC3339),
+		Git:      &events.Git{Root: f.root},
+		Event:    raw,
+		Changes: []events.FileChange{{Path: "gen/api.go", Hunks: [][]string{
+			{"+package gen", "+", "+func Generated() string { return \"generated value\" }"},
+		}}},
+	})
+	sha := f.commit(t0.Add(time.Minute), "me@example.com", "codegen", map[string]string{
+		"gen/api.go": "package gen\n\nfunc Generated() string { return \"generated value\" }\n",
+	})
+
+	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sessions[0]
+	if s.Edits != 1 || s.ShellEdits != 1 || s.AILines != 2 {
+		t.Errorf("edits=%d shell=%d ailines=%d, want 1, 1, 2", s.Edits, s.ShellEdits, s.AILines)
+	}
+	if len(s.Commits) != 1 || s.Commits[0].SHA != sha || s.Commits[0].Survived() != 2 {
+		t.Errorf("commits = %+v, want %s with 2 lines", s.Commits, sha[:7])
+	}
+}

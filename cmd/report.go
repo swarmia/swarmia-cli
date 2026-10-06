@@ -115,7 +115,11 @@ func writeSessionText(out io.Writer, s report.Session) {
 		model = s.Agent
 	}
 	fmt.Fprintf(out, "Session %s  %s  %s → %s\n", shortID(s.ID), model, local(s.StartedAt), s.EndedAt.Local().Format("15:04"))
-	fmt.Fprintf(out, "  %d prompt(s), %d edit(s), %d AI line(s) at session end\n", len(s.Prompts), s.Edits, s.AILines)
+	shell := ""
+	if s.ShellEdits > 0 {
+		shell = fmt.Sprintf(" (%d via shell)", s.ShellEdits)
+	}
+	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), s.Edits, shell, s.AILines)
 	if len(s.Commits) == 0 {
 		if s.AILines > 0 {
 			fmt.Fprintln(out, "  not committed yet")

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swarmia/swarmia-cli/internal/events"
 )
 
 // lockFile must exclude a second opener of the same file until released; that
@@ -113,5 +116,39 @@ func TestLogHookSkipIfProjectHooks(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("didn't log in a project without its own hooks: %v", err)
+	}
+}
+
+// A Bash tool call is bracketed: PreToolUse snapshots the worktree and the
+// finishing event (here a failure) records what the command authored.
+func TestLogHookRecordsShellCommandChanges(t *testing.T) {
+	repo := initRepo(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", repo)
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+
+	bash := func(event string) string {
+		return `{"hook_event_name":"` + event + `","session_id":"s","tool_name":"Bash","tool_use_id":"toolu_42","tool_input":{"command":"./gen.sh"}}`
+	}
+	if err := runLogHook(strings.NewReader(bash("PreToolUse"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "gen.go"), []byte("package gen\n\nfunc Generated() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runLogHook(strings.NewReader(bash("PostToolUseFailure"))); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := events.ReadFile(path)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("got %d records, %v", len(recs), err)
+	}
+	if recs[0].Changes != nil {
+		t.Errorf("PreToolUse record has changes: %+v", recs[0].Changes)
+	}
+	want := []events.FileChange{{Path: "gen.go", Hunks: [][]string{{"+package gen", "+", "+func Generated() {}"}}}}
+	if !reflect.DeepEqual(recs[1].Changes, want) {
+		t.Errorf("changes = %+v, want %+v", recs[1].Changes, want)
 	}
 }
