@@ -11,6 +11,10 @@ import (
 type Edit struct {
 	Path  string
 	Hunks []Hunk
+	// After is the whole file once the edit was applied, when the payload
+	// carries enough to rebuild it (AfterKnown).
+	After      string
+	AfterKnown bool
 }
 
 type claudeReplacement struct {
@@ -76,9 +80,11 @@ func ClaudeEdit(payload []byte, root string) (Edit, bool) {
 			before = *resp.OriginalFile
 		}
 		edit.Hunks = diffHunks(before, *in.Content)
+		edit.After, edit.AfterKnown = *in.Content, true
 	case resp.OriginalFile != nil:
 		if after, ok := applyReplacements(*resp.OriginalFile, edits); ok {
 			edit.Hunks = diffHunks(*resp.OriginalFile, after)
+			edit.After, edit.AfterKnown = after, true
 			break
 		}
 		fallthrough

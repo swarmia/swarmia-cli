@@ -7,9 +7,10 @@ Coding agents like Claude Code, Codex, and Copilot expose activity through
 hooks. `swarmia-cli` registers as a hook, records what the agent does into a
 local log, and (in future increments) links that activity to your git history.
 
-> **Status:** early. Today the CLI can set up its hooks (`install`) and log
-> Claude Code hook events locally (`log-hook`). Local commit matching and
-> delivery to Swarmia are on the roadmap.
+> **Status:** early. Today the CLI can set up its hooks (`install`), log Claude
+> Code hook events locally (`log-hook`), and show which committed lines came
+> from agent sessions (`report`). Delivery to Swarmia is on the roadmap; nothing
+> is sent anywhere yet.
 
 ## Installation
 
@@ -103,6 +104,48 @@ The log file is chosen in this order:
 2. `$SWARMIA_LOG_FILE`
 3. `events.jsonl` in the repository's [state directory](#state-dir)
 
+### `report`
+
+Matches recent agent sessions in the event log to the commits their edits
+landed in, and prints what each session contributed:
+
+```sh
+swarmia-cli report               # the 5 most recent sessions
+swarmia-cli report --limit 0     # all of them
+swarmia-cli report --session 7999d991
+swarmia-cli report --json        # the draft payload delivery would send
+```
+
+```
+Session 7999d991  claude-opus-4-8  2026-10-06 16:43 → 17:00
+  2 prompt(s), 10 edit(s), 1698 AI line(s) at session end
+  59e69c6  local   Add line-level matcher for attributing agent edits to commi…
+      internal/attribution/align.go                 339 line(s)  (318 exact, 2 normalized, 19 modified)
+      internal/attribution/normalize.go              77 line(s)
+  960 of 1698 AI line(s) committed unchanged or reformatted (56%)
+```
+
+How it decides:
+
+- **Candidate commits** are non-merge commits on any branch, made after the
+  session's edits, that touch an edited file and are authored by your git
+  `user.email` (`--all-authors` lifts that filter).
+- **A line counts for a commit only if that commit introduced it** (relative to
+  its parent), so later commits that merely carry the agent's lines along get
+  nothing.
+- **Classes:** `exact`; `normalized` — only a formatter changed it (whitespace,
+  quotes, trailing commas, line wrapping); `modified` — recognisably the agent's
+  line, edited by a human.
+- **AI lines at session end** counts the agent's non-blank lines still present
+  after its last edit to each file; lines it wrote and then replaced itself
+  don't count.
+- **pushed / local** shows whether a remote-tracking branch contains the commit.
+  Only pushed commits will ever be sent.
+
+Not yet covered: changes the agent makes through shell commands (`sed`,
+codegen, scripts) rather than its edit tools, and lines that moved to another
+file (renames).
+
 ### `state-dir`
 
 Local state lives **outside the repository**, so it never shows up in
@@ -173,6 +216,7 @@ cmd/
   loghook.go       the log-hook command (captures hook payloads)
   paths.go         project dir, state dir and log-file resolution
   statedir.go      the state-dir command
+  report.go        the report command
   lock_*.go        per-OS exclusive file locking
   version.go       version command + build metadata
 internal/
@@ -180,6 +224,7 @@ internal/
   gitrepo/         finds the enclosing repo and reads HEAD without spawning git
   attribution/     matches agent edits to committed files, line by line
                    (golden cases from real sessions in testdata/golden)
+  report/          groups the log into sessions and attributes them to commits
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)
   platforms/       one binary-only package per os/arch (@swarmia/cli-<os>-<arch>)
