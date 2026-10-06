@@ -1,0 +1,12 @@
+path: Makefile
+
+hunk 1: 8/10 added lines survived
+    15 exact      | # npm platform packages: <dir>:<GOOS>:<GOARCH>. The <dir> uses Node's
+    16 exact      | # platform-arch naming (process.platform-process.arch), which the launcher in
+    17 exact      | # npm/cli/bin/swarmia-cli maps to the @swarmia/cli-<dir> package.
+    20 exact      | NPM_PLATFORMS := \
+    21 exact      | 	darwin-arm64:darwin:arm64 \
+    22 exact      | 	darwin-x64:darwin:amd64 \
+    23 exact      | 	linux-arm64:linux:arm64 \
+    24 modified   | 	linux-x64:linux:amd64
+    26 exact      | .PHONY: all build install test vet fmt tidy clean npm-binaries

@@ -1,0 +1,11 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/repo/cmd/paths.go",
+    "content": "package cmd\n\nimport (\n    \"os\"\n    \"path/filepath\"\n)\n\n// projectDir is the directory the CLI operates against: $CLAUDE_PROJECT_DIR when\n// set (Claude Code exports it to hook commands), otherwise the current working\n// directory. It is both where .swarmia/events.jsonl lives and the git repo that\n// process-logs writes refs into.\nfunc projectDir() string {\n    if base := os.Getenv(\"CLAUDE_PROJECT_DIR\"); base != \"\" {\n        return base\n    }\n    if cwd, err := os.Getwd(); err == nil {\n        return cwd\n    }\n    return \"\"\n}\n\n// eventsPath resolves the JSONL log file, first match wins: an explicit flag\n// value, then $SWARMIA_LOG_FILE, then <project>/.swarmia/events.jsonl. Shared by\n// log-hook (writer) and process-logs (reader) so both agree on the location.\nfunc eventsPath(flagVal string) string {\n    if flagVal != \"\" {\n        return flagVal\n    }\n    if env := os.Getenv(\"SWARMIA_LOG_FILE\"); env != \"\" {\n        return env\n    }\n    return filepath.Join(projectDir(), \".swarmia\", \"events.jsonl\")\n}\n"
+  },
+  "tool_response": {
+    "originalFile": null
+  }
+}

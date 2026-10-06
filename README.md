@@ -176,6 +176,9 @@ cmd/
   statedir.go      the state-dir command
   lock_*.go        per-OS exclusive file locking
   version.go       version command + build metadata
+internal/
+  attribution/     matches agent edits to committed files, line by line
+                   (golden cases from real sessions in testdata/golden)
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)
   platforms/       one binary-only package per os/arch (@swarmia/cli-<os>-<arch>)

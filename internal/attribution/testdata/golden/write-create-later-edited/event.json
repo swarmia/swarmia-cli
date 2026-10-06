@@ -1,0 +1,11 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/repo/npm/cli/package.json",
+    "content": "{\n  \"name\": \"@swarmia/cli\",\n  \"version\": \"0.1.0\",\n  \"description\": \"Swarmia Agent CLI \u2014 captures local AI-agent activity so AI-generated code can be attributed to the commits it lands in.\",\n  \"bin\": {\n    \"swarmia-cli\": \"bin/swarmia-cli\"\n  },\n  \"files\": [\n    \"bin/\"\n  ],\n  \"optionalDependencies\": {\n    \"@swarmia/cli-darwin-arm64\": \"0.1.0\",\n    \"@swarmia/cli-darwin-x64\": \"0.1.0\",\n    \"@swarmia/cli-linux-arm64\": \"0.1.0\",\n    \"@swarmia/cli-linux-x64\": \"0.1.0\",\n    \"@swarmia/cli-win32-x64\": \"0.1.0\"\n  },\n  \"engines\": {\n    \"node\": \">=16\"\n  },\n  \"repository\": {\n    \"type\": \"git\",\n    \"url\": \"git+https://github.com/swarmia/swarmia-cli.git\"\n  },\n  \"license\": \"UNLICENSED\"\n}\n"
+  },
+  "tool_response": {
+    "originalFile": null
+  }
+}

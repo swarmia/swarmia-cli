@@ -1,0 +1,33 @@
+path: cmd/paths.go
+
+hunk 1: 30/30 added lines survived
+     1 exact      | package cmd
+     3 exact      | import (
+     4 normalized | 	"os"
+     5 normalized | 	"path/filepath"
+     6 exact      | )
+     8 exact      | // projectDir is the directory the CLI operates against: $CLAUDE_PROJECT_DIR when
+     9 exact      | // set (Claude Code exports it to hook commands), otherwise the current working
+    10 exact      | // directory. It is both where .swarmia/events.jsonl lives and the git repo that
+    11 exact      | // process-logs writes refs into.
+    12 exact      | func projectDir() string {
+    13 normalized | 	if base := os.Getenv("CLAUDE_PROJECT_DIR"); base != "" {
+    14 normalized | 		return base
+    15 normalized | 	}
+    16 normalized | 	if cwd, err := os.Getwd(); err == nil {
+    17 normalized | 		return cwd
+    18 normalized | 	}
+    19 normalized | 	return ""
+    20 exact      | }
+    22 exact      | // eventsPath resolves the JSONL log file, first match wins: an explicit flag
+    23 exact      | // value, then $SWARMIA_LOG_FILE, then <project>/.swarmia/events.jsonl. Shared by
+    24 exact      | // log-hook (writer) and process-logs (reader) so both agree on the location.
+    25 exact      | func eventsPath(flagVal string) string {
+    26 normalized | 	if flagVal != "" {
+    27 normalized | 		return flagVal
+    28 normalized | 	}
+    29 normalized | 	if env := os.Getenv("SWARMIA_LOG_FILE"); env != "" {
+    30 normalized | 		return env
+    31 normalized | 	}
+    32 normalized | 	return filepath.Join(projectDir(), ".swarmia", "events.jsonl")
+    33 exact      | }

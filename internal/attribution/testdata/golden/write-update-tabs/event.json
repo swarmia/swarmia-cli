@@ -1,0 +1,11 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/repo/cmd/root.go",
+    "content": "package cmd\n\nimport (\n\t\"os\"\n\n\t\"github.com/spf13/cobra\"\n)\n\nvar rootCmd = &cobra.Command{\n\tUse:   \"swarmia-cli\",\n\tShort: \"swarmia-cli is the command-line interface for Swarmia\",\n\tLong: \"swarmia-cli is the command-line interface for Swarmia.\\n\\n\" +\n\t\t\"It captures local AI-agent activity so AI-generated code can be attributed to\\n\" +\n\t\t\"the commits it lands in. See `swarmia-cli log-hook`.\",\n\t// No Run/RunE: with subcommands present, cobra prints help when invoked bare.\n\tSilenceUsage: true,\n}\n\n// Execute runs the root command and exits non-zero on error.\nfunc Execute() {\n\tif err := rootCmd.Execute(); err != nil {\n\t\tos.Exit(1)\n\t}\n}\n"
+  },
+  "tool_response": {
+    "originalFile": "package cmd\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\n\t\"github.com/spf13/cobra\"\n)\n\nvar name string\n\nvar rootCmd = &cobra.Command{\n\tUse:   \"swarmia-cli\",\n\tShort: \"swarmia-cli is the command-line interface for Swarmia\",\n\tLong:  \"swarmia-cli is the command-line interface for Swarmia.\\n\\nIt captures local AI-agent activity so AI-generated code can be attributed to\\nthe commits it lands in. See `swarmia-cli log-hook`.\",\n\tRunE: func(cmd *cobra.Command, args []string) error {\n\t\t_, err := fmt.Fprintf(cmd.OutOrStdout(), \"Hello, %s!\\n\", name)\n\t\treturn err\n\t},\n}\n\n// Execute runs the root command and exits non-zero on error.\nfunc Execute() {\n\tif err := rootCmd.Execute(); err != nil {\n\t\tos.Exit(1)\n\t}\n}\n\nfunc init() {\n\trootCmd.Flags().StringVar(&name, \"name\", \"world\", \"who to greet\")\n}\n"
+  }
+}

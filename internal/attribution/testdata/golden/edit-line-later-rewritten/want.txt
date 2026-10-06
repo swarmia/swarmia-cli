@@ -1,0 +1,7 @@
+path: npm/cli/bin/swarmia-cli
+
+hunk 1: 1/1 added lines survived
+    14 exact      | // Windows is not supported yet (the CLI's file locking is POSIX-only).
+
+hunk 2: 0/1 added lines survived
+    45 modified   |     return require.resolve(`${pkg}/bin/swarmia-cli`, { paths: resolutionBases() })

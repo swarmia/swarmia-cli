@@ -1,0 +1,8 @@
+path: cmd/root.go
+
+hunk 1: 5/5 added lines survived
+    12 exact      | 	Long: "swarmia-cli is the command-line interface for Swarmia.\n\n" +
+    13 exact      | 		"It captures local AI-agent activity so AI-generated code can be attributed to\n" +
+    14 exact      | 		"the commits it lands in. See `swarmia-cli log-hook`.",
+    15 exact      | 	// No Run/RunE: with subcommands present, cobra prints help when invoked bare.
+    16 exact      | 	SilenceUsage: true,

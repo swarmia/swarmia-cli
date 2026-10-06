@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+'use strict'
+
+// Thin launcher for the @swarmia/cli npm package. The actual CLI is a Go binary
+// shipped per platform as an optional dependency (@swarmia/cli-<platform>-<arch>).
+// npm installs only the package matching the host's os/cpu; this script resolves
+// that binary and runs it, passing through argv, stdin/stdout/stderr, and the exit
+// code unchanged — stdin passthrough matters because `log-hook` reads its payload
+// from stdin.
+
+const { spawnSync } = require('child_process')
+const path = require('path')
+
+// Windows is not supported yet (the CLI's file locking is POSIX-only).
+const SUPPORTED = new Set([
+  'darwin-arm64',
+  'darwin-x64',
+  'linux-arm64',
+  'linux-x64',
+])
+
+// Bases to resolve the platform package from. __dirname handles the common
+// (copied) npm install; process.cwd() and the invocation path handle installs
+// that symlink packages (pnpm, `file:` deps) where resolving from this script's
+// realpath would miss the consumer's node_modules — hooks run with the project
+// root as cwd, so its node_modules is found there.
+function resolutionBases() {
+  const bases = [__dirname, process.cwd()]
+  if (process.argv[1]) {
+    bases.push(path.dirname(process.argv[1]))
+  }
+  return bases
+}
+
+function resolveBinary() {
+  const key = `${process.platform}-${process.arch}`
+  if (!SUPPORTED.has(key)) {
+    throw new Error(
+      `swarmia-cli: unsupported platform ${key}. ` +
+        `Supported: ${[...SUPPORTED].join(', ')}.`
+    )
+  }
+  const pkg = `@swarmia/cli-${key}`
+  try {
+    return require.resolve(`${pkg}/bin/swarmia-cli`, { paths: resolutionBases() })
+  } catch {
+    throw new Error(
+      `swarmia-cli: the platform package ${pkg} is not installed.\n` +
+        `It ships as an optional dependency and should install automatically.\n` +
+        `Reinstall with optional dependencies enabled (e.g. 'npm install', not '--no-optional').`
+    )
+  }
+}
+
+let binary
+try {
+  binary = resolveBinary()
+} catch (err) {
+  process.stderr.write(`${err.message}\n`)
+  process.exit(1)
+}
+
+const result = spawnSync(binary, process.argv.slice(2), { stdio: 'inherit' })
+
+if (result.error) {
+  process.stderr.write(`swarmia-cli: failed to run ${binary}: ${result.error.message}\n`)
+  process.exit(1)
+}
+// Preserve the child's exit code; treat signal termination as failure.
+process.exit(typeof result.status === 'number' ? result.status : 1)

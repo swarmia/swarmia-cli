@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/repo/Makefile",
+    "old_string": ".PHONY: all build install test vet fmt tidy clean\n\nall: build ## Build the binary (default)",
+    "new_string": "# npm platform packages: <dir>:<GOOS>:<GOARCH>. The <dir> uses Node's\n# platform-arch naming (process.platform-process.arch), which the launcher in\n# npm/cli/bin/swarmia-cli maps to the @swarmia/cli-<dir> package.\nNPM_PLATFORMS := \\\n\tdarwin-arm64:darwin:arm64 \\\n\tdarwin-x64:darwin:amd64 \\\n\tlinux-arm64:linux:arm64 \\\n\tlinux-x64:linux:amd64 \\\n\twin32-x64:windows:amd64\n\n.PHONY: all build install test vet fmt tidy clean npm-binaries\n\nall: build ## Build the binary (default)",
+    "replace_all": false
+  },
+  "tool_response": {
+    "originalFile": "BINARY := swarmia-cli\nPKG    := github.com/swarmia/swarmia-cli\n\n# Version metadata, injected into the binary at build time. Overridable, e.g.\n# `make build VERSION=1.2.3`. Defaults derive from git.\nVERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)\nCOMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)\nDATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)\n\nLDFLAGS := -s -w \\\n\t-X $(PKG)/cmd.version=$(VERSION) \\\n\t-X $(PKG)/cmd.commit=$(COMMIT) \\\n\t-X $(PKG)/cmd.date=$(DATE)\n\n.PHONY: all build install test vet fmt tidy clean\n\nall: build ## Build the binary (default)\n\nbuild: ## Compile the binary into ./$(BINARY)\n\tgo build -ldflags \"$(LDFLAGS)\" -o $(BINARY) .\n\ninstall: ## Install the binary into $(go env GOPATH)/bin\n\tgo install -ldflags \"$(LDFLAGS)\" .\n\ntest: ## Run the test suite\n\tgo test ./...\n\nvet: ## Run go vet\n\tgo vet ./...\n\nfmt: ## Format all Go source in place\n\tgofmt -l -w .\n\ntidy: ## Tidy go.mod / go.sum\n\tgo mod tidy\n\nclean: ## Remove build artifacts\n\trm -f $(BINARY)\n"
+  }
+}

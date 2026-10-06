@@ -1,0 +1,28 @@
+path: npm/cli/package.json
+
+hunk 1: 25/26 added lines survived
+     1 exact      | {
+     2 exact      |   "name": "@swarmia/cli",
+     3 exact      |   "version": "0.1.0",
+     4 exact      |   "description": "Swarmia Agent CLI — captures local AI-agent activity so AI-generated code can be attributed to the commits it lands in.",
+     5 exact      |   "bin": {
+     6 exact      |     "swarmia-cli": "bin/swarmia-cli"
+     7 exact      |   },
+     8 exact      |   "files": [
+     9 exact      |     "bin/"
+    10 exact      |   ],
+    11 exact      |   "optionalDependencies": {
+    12 exact      |     "@swarmia/cli-darwin-arm64": "0.1.0",
+    13 exact      |     "@swarmia/cli-darwin-x64": "0.1.0",
+    14 exact      |     "@swarmia/cli-linux-arm64": "0.1.0",
+    15 normalized |     "@swarmia/cli-linux-x64": "0.1.0"
+    16 exact      |   },
+    17 exact      |   "engines": {
+    18 exact      |     "node": ">=16"
+    19 exact      |   },
+    20 exact      |   "repository": {
+    21 exact      |     "type": "git",
+    22 exact      |     "url": "git+https://github.com/swarmia/swarmia-cli.git"
+    23 exact      |   },
+    24 exact      |   "license": "UNLICENSED"
+    25 exact      | }
