@@ -81,10 +81,10 @@ installing, reload hooks with `/hooks` in Claude Code (or start a fresh session)
 
 Reads a Claude Code hook payload from stdin and appends it to a JSONL log, one
 event per line, wrapped with a capture timestamp and the project's git position
-(HEAD commit and branch) at that moment:
+(worktree root, HEAD commit and branch) at that moment:
 
 ```json
-{"logged_at":"2026-07-10T19:02:37Z","git":{"head":"ec37b5d…","branch":"main"},"event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
+{"logged_at":"2026-07-10T19:02:37Z","git":{"root":"/src/app","head":"ec37b5d…","branch":"main"},"event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
 ```
 
 `git` is omitted outside a repository; `head` is empty on a branch with no
@@ -172,11 +172,12 @@ cmd/
   install.go       the install command (wires hooks into detected agents)
   loghook.go       the log-hook command (captures hook payloads)
   paths.go         project dir, state dir and log-file resolution
-  gitdir.go        locates the enclosing repo's git dirs without spawning git
   statedir.go      the state-dir command
   lock_*.go        per-OS exclusive file locking
   version.go       version command + build metadata
 internal/
+  events/          the local event log format (written by log-hook)
+  gitrepo/         finds the enclosing repo and reads HEAD without spawning git
   attribution/     matches agent edits to committed files, line by line
                    (golden cases from real sessions in testdata/golden)
 npm/

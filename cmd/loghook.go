@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/swarmia/swarmia-cli/internal/events"
+	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 )
 
 var logFile string
@@ -40,15 +43,6 @@ func init() {
 	rootCmd.AddCommand(logHookCmd)
 }
 
-// hookRecord is the envelope written per line: a capture timestamp, the
-// project's git position at that moment (omitted outside a repo), and the
-// original payload nested verbatim.
-type hookRecord struct {
-	LoggedAt string          `json:"logged_at"`
-	Git      *gitState       `json:"git,omitempty"`
-	Event    json.RawMessage `json:"event"`
-}
-
 func runLogHook(stdin io.Reader) error {
 	payload, err := io.ReadAll(stdin)
 	if err != nil {
@@ -74,10 +68,12 @@ func runLogHook(stdin io.Reader) error {
 		event = encoded
 	}
 
-	rec := hookRecord{LoggedAt: time.Now().UTC().Format(time.RFC3339), Event: event}
+	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Event: event}
 	// Best-effort: an unreadable repo state must not stop the event being logged.
-	if st, err := readGitState(projectDir()); err == nil {
-		rec.Git = &st
+	if repo, err := gitrepo.Find(projectDir()); err == nil {
+		if st, err := repo.ReadState(); err == nil {
+			rec.Git = &events.Git{Root: repo.Root, Head: st.Head, Branch: st.Branch}
+		}
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {

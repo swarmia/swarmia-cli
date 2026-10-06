@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 )
 
 // projectDir is the directory the CLI operates against: $CLAUDE_PROJECT_DIR when
@@ -61,8 +63,8 @@ func stateBaseDir() (string, error) {
 // worktrees of a clone share state. Outside a git repo it falls back to the
 // directory itself, so sessions there are still captured.
 func repoKey(dir string) string {
-	if _, common, err := gitDirs(dir); err == nil {
-		return common
+	if repo, err := gitrepo.Find(dir); err == nil {
+		return repo.CommonDir
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		if resolved, err := filepath.EvalSymlinks(abs); err == nil {

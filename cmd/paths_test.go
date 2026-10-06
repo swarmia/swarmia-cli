@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/swarmia/swarmia-cli/internal/events"
 )
 
 // git runs a git command in dir with a fixed identity, failing the test on error.
@@ -37,54 +40,18 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
-func TestGitDirsPlainRepoAndSubdir(t *testing.T) {
-	repo := initRepo(t)
-	sub := filepath.Join(repo, "a", "b")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, start := range []string{repo, sub} {
-		gitDir, common, err := gitDirs(start)
-		if err != nil {
-			t.Fatalf("gitDirs(%s): %v", start, err)
-		}
-		want := filepath.Join(repo, ".git")
-		if gitDir != want || common != want {
-			t.Errorf("gitDirs(%s) = (%s, %s), want both %s", start, gitDir, common, want)
-		}
-	}
-}
-
-// A linked worktree has its own gitDir but shares the main repo's common dir,
-// and therefore its state directory.
-func TestGitDirsLinkedWorktreeSharesCommonDir(t *testing.T) {
+// Worktrees of one clone share a state directory.
+func TestRepoStateDirSharedByWorktrees(t *testing.T) {
 	repo := initRepo(t)
 	wt := filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-wt")
 	git(t, repo, "worktree", "add", "-q", wt, "-b", "feature")
 	t.Cleanup(func() { os.RemoveAll(wt) })
-
-	gitDir, common, err := gitDirs(wt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(repo, ".git"); common != want {
-		t.Errorf("common = %s, want %s", common, want)
-	}
-	if want := filepath.Join(repo, ".git", "worktrees", filepath.Base(wt)); gitDir != want {
-		t.Errorf("gitDir = %s, want %s", gitDir, want)
-	}
 
 	t.Setenv("SWARMIA_STATE_DIR", t.TempDir())
 	a, _ := repoStateDir(repo)
 	b, _ := repoStateDir(wt)
 	if a != b {
 		t.Errorf("worktree state dir %s differs from main repo's %s", b, a)
-	}
-}
-
-func TestGitDirsOutsideRepo(t *testing.T) {
-	if _, _, err := gitDirs(t.TempDir()); err != errNotGitRepo {
-		t.Errorf("err = %v, want errNotGitRepo", err)
 	}
 }
 
@@ -131,5 +98,28 @@ func TestEventsPathResolution(t *testing.T) {
 	}
 	if got, _ := eventsPath("/tmp/flag.jsonl"); got != "/tmp/flag.jsonl" {
 		t.Errorf("flag override = %s", got)
+	}
+}
+
+func TestRunLogHookRecordsGitState(t *testing.T) {
+	repo := initRepo(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", repo)
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+
+	if err := runLogHook(strings.NewReader(`{"hook_event_name":"PostToolUse"}`)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec events.Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	want := events.Git{Root: repo, Head: git(t, repo, "rev-parse", "HEAD"), Branch: "main"}
+	if rec.Git == nil || *rec.Git != want {
+		t.Errorf("git = %+v, want %+v", rec.Git, want)
 	}
 }
