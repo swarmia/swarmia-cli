@@ -8,7 +8,7 @@ npm/platforms/*/bin/
 # npm dependencies (from local packaging tests)
 node_modules/
 
-# Captured hook events (local only)
+# Captured hook events from older versions (state now lives outside the repo)
 .swarmia/
 
 # Personal, machine-specific Claude Code config

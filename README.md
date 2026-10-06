@@ -95,8 +95,28 @@ The log file is chosen in this order:
 
 1. `--file <path>`
 2. `$SWARMIA_LOG_FILE`
-3. `$CLAUDE_PROJECT_DIR/.swarmia/events.jsonl` (falls back to the current
-   directory if `$CLAUDE_PROJECT_DIR` is unset)
+3. `events.jsonl` in the repository's [state directory](#state-dir)
+
+### `state-dir`
+
+Local state lives **outside the repository**, so it never shows up in
+`git status` and survives `git clean -fdx`. Each repository gets its own
+directory, keyed by its git common dir, so all worktrees of a clone share one:
+
+| OS | Location |
+|---|---|
+| macOS | `~/Library/Application Support/swarmia/repos/<id>/` |
+| Linux | `$XDG_STATE_HOME/swarmia/repos/<id>/` (default `~/.local/state/…`) |
+| Windows (not shipped yet) | `%LocalAppData%\swarmia\repos\<id>\` |
+
+`<id>` is a short hash; a `repo.json` inside names the repository. Files are
+owner-only (`0600`), since they contain prompts and code. Override the base
+directory with `$SWARMIA_STATE_DIR`. Print the current repository's directory
+with:
+
+```sh
+swarmia-cli state-dir
+```
 
 ## Setting up the Claude Code hook
 
@@ -112,11 +132,14 @@ make build
 ```
 
 Then reload hooks with `/hooks` inside Claude Code (or start a fresh session).
-Events will stream into `.swarmia/events.jsonl`:
+Events will stream into the repository's state directory:
 
 ```sh
-tail -f .swarmia/events.jsonl
+tail -f "$(swarmia-cli state-dir)/events.jsonl"
 ```
+
+Earlier versions logged to `.swarmia/events.jsonl` inside the repository; that
+directory is no longer used and can be deleted.
 
 To set this up in another repository, run [`swarmia-cli install`](#install) there
 instead of copying the block by hand — it detects the agent and writes the right
@@ -142,7 +165,10 @@ cmd/
   root.go          cobra root command
   install.go       the install command (wires hooks into detected agents)
   loghook.go       the log-hook command (captures hook payloads)
-  paths.go         shared log-file / project-dir resolution
+  paths.go         project dir, state dir and log-file resolution
+  gitdir.go        locates the enclosing repo's git dirs without spawning git
+  statedir.go      the state-dir command
+  lock_*.go        per-OS exclusive file locking
   version.go       version command + build metadata
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)

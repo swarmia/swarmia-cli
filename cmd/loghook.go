@@ -81,7 +81,11 @@ func runLogHook(stdin io.Reader) error {
 	}
 	line = append(line, '\n')
 
-	return appendLine(eventsPath(logFile), line)
+	path, err := eventsPath(logFile)
+	if err != nil {
+		return fmt.Errorf("resolving log file: %w", err)
+	}
+	return appendLine(path, line)
 }
 
 // appendLine appends a single pre-serialized line under an exclusive file lock,
@@ -89,12 +93,13 @@ func runLogHook(stdin io.Reader) error {
 // interleaved or corrupted lines.
 func appendLine(path string, line []byte) error {
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
 	}
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// Owner-only: the log holds prompts and code from agent sessions.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", path, err)
 	}
