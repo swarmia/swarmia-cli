@@ -30,6 +30,7 @@ type Payload struct {
 	AuthorEmail     string    `json:"author_email,omitempty"`
 	StartedAt       time.Time `json:"started_at"`
 	EndedAt         time.Time `json:"ended_at"`
+	Ended           bool      `json:"ended"`
 	Prompts         []Prompt  `json:"prompts"`
 	PromptsWithheld bool      `json:"prompts_withheld"`
 	Tools           []Tool    `json:"tools"`
@@ -73,7 +74,7 @@ func Build(s *report.Session, ctx Context) Payload {
 		SessionID: s.ID, Agent: s.Agent, Model: s.Model,
 		MatcherVersion: attribution.Version, CLIVersion: ctx.CLIVersion,
 		Repo: ctx.Repo, AuthorEmail: ctx.AuthorEmail,
-		StartedAt: s.StartedAt, EndedAt: s.EndedAt,
+		StartedAt: s.StartedAt, EndedAt: s.EndedAt, Ended: s.Ended,
 		Prompts: []Prompt{}, PromptsWithheld: !ctx.Prompts,
 		Tools: []Tool{}, Commits: []Commit{},
 		AILines: s.AILines(),

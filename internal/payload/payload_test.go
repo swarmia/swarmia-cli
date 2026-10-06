@@ -45,6 +45,9 @@ func TestBuildAppliesPrivacyRules(t *testing.T) {
 	if want := []Commit{{SHA: "pushed1", Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}; !reflect.DeepEqual(p.Commits, want) {
 		t.Errorf("commits = %+v, want only the pushed one", p.Commits)
 	}
+	if p.Ended {
+		t.Error("session wasn't ended")
+	}
 	if p.AILines != 5 || p.AILinesKept != 3 || p.MatcherVersion != attribution.Version {
 		t.Errorf("counts: generated=%d committed=%d version=%q", p.AILines, p.AILinesKept, p.MatcherVersion)
 	}
