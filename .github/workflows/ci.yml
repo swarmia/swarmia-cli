@@ -10,7 +10,13 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Linux and macOS are the shipped platforms; macOS has its own code paths
+    # (state directory location, file locking, detached background runs).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +35,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+
       - name: Vet
         run: go vet ./...
 
@@ -36,7 +45,10 @@ jobs:
         run: go build ./...
 
       - name: Cross-build for Windows (not shipped yet; keeps it compiling)
+        if: matrix.os == 'ubuntu-latest'
         run: GOOS=windows GOARCH=amd64 go vet ./... && GOOS=windows GOARCH=amd64 go build ./...
 
+      # The race detector matters here: hooks run concurrently and share files
+      # through locks, and processing runs in a detached background process.
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
