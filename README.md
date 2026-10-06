@@ -58,16 +58,35 @@ the current repository (currently Claude Code — detected by a `.claude`
 directory):
 
 ```sh
-swarmia-cli install            # add hooks to detected agents
-swarmia-cli install --dry-run  # preview without writing
+swarmia-cli install                 # add hooks to detected agents
+swarmia-cli install --dry-run       # preview without writing
+swarmia-cli install --scope user    # just for you, in every project
 ```
+
+`--scope` picks where the hooks go:
+
+| Scope | File | Who / where |
+|---|---|---|
+| `project` (default) | `.claude/settings.json` | everyone working in the repo (it's committed) |
+| `local` | `.claude/settings.local.json` | just you, in this checkout (gitignored by Claude Code convention) |
+| `user` | `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) | just you, in every project — including new git worktrees, which don't get a checkout's untracked `settings.local.json` |
+
+User-scope hooks run `log-hook --skip-if-project-hooks`, so in a repository
+that wires swarmia-cli itself (like this one) events aren't logged twice.
 
 It adds the same wiring this repo uses — `log-hook` on prompts, all tool use, and
 session lifecycle. It is **idempotent** (hooks already present are left alone) and
 preserves any unrelated settings and hooks. Hooks for the removed `process-logs`
 subcommand, written by earlier versions, are cleaned up.
 
-The command the hooks use to invoke `swarmia-cli` is auto-detected, in order:
+For `local` and `user` scope, hooks invoke the swarmia-cli that ran `install`, by
+absolute path — handy for trying a development build in another repository:
+
+```sh
+make build && ./swarmia-cli install --dir ../other-repo --scope local
+```
+
+For `project` scope the command is auto-detected, in order:
 
 1. a `swarmia-cli` binary at the repo root → `${CLAUDE_PROJECT_DIR}/swarmia-cli`
    (handy during local development)

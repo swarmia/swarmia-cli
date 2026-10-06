@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -482,5 +483,63 @@ func TestInstallPreservesUnmanagedHooksAndTopLevelKeys(t *testing.T) {
 	}
 	if !contains(commandsFor(t, doc, "SessionEnd"), "swarmia-cli log-hook") {
 		t.Errorf("our hooks were not added alongside the existing config")
+	}
+}
+
+// Local scope writes the gitignored settings.local.json and leaves the shared
+// settings.json alone.
+func TestInstallLocalScope(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{"model": "opus"})
+	shared, _ := os.ReadFile(filepath.Join(repo, ".claude", "settings.json"))
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeLocal}); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(repo, ".claude", "settings.json")); !bytes.Equal(shared, after) {
+		t.Errorf("shared settings.json changed:\n%s", after)
+	}
+	local, err := readJSONObject(filepath.Join(repo, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := commandsFor(t, local, "PreToolUse"); !reflect.DeepEqual(got, []string{"/opt/bin/swarmia-cli log-hook"}) {
+		t.Errorf("local PreToolUse = %v", got)
+	}
+}
+
+// User scope writes Claude Code's user settings, works in a repo without a
+// .claude directory, and marks its hooks to stand down in projects that have
+// their own.
+func TestInstallUserScope(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	repo := t.TempDir() // no .claude here
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeUser}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := readJSONObject(filepath.Join(configDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/opt/bin/swarmia-cli log-hook --skip-if-project-hooks"
+	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "Stop"} {
+		if got := commandsFor(t, doc, ev); !reflect.DeepEqual(got, []string{want}) {
+			t.Errorf("%s = %v, want [%s]", ev, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".claude")); err == nil {
+		t.Error("user-scope install created a .claude dir in the repo")
+	}
+}
+
+// Without --binary, personal scopes point at this binary by absolute path.
+func TestExecutableRefIsAbsolute(t *testing.T) {
+	ref, _ := executableRef()
+	if !filepath.IsAbs(strings.Trim(ref, "'")) {
+		t.Errorf("executableRef = %q, want an absolute path", ref)
 	}
 }

@@ -15,7 +15,10 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 )
 
-var logFile string
+var (
+	logFile               string
+	logSkipIfProjectHooks bool
+)
 
 var logHookCmd = &cobra.Command{
 	Use:   "log-hook",
@@ -40,10 +43,15 @@ var logHookCmd = &cobra.Command{
 
 func init() {
 	logHookCmd.Flags().StringVar(&logFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
+	logHookCmd.Flags().BoolVar(&logSkipIfProjectHooks, strings.TrimPrefix(skipIfProjectHooksFlag, "--"), false,
+		"do nothing if the project's own Claude Code settings run swarmia-cli log-hook (set by user-scope installs)")
 	rootCmd.AddCommand(logHookCmd)
 }
 
 func runLogHook(stdin io.Reader) error {
+	if logSkipIfProjectHooks && projectHasLogHook(projectDir()) {
+		return nil // the project's own hook logs this event
+	}
 	payload, err := io.ReadAll(stdin)
 	if err != nil {
 		return fmt.Errorf("reading stdin: %w", err)
@@ -115,4 +123,35 @@ func appendLine(path string, line []byte) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
+}
+
+// projectHasLogHook reports whether the project's Claude Code settings (shared
+// or local) already run swarmia-cli log-hook, without our user-scope flag.
+func projectHasLogHook(dir string) bool {
+	for _, name := range []string{"settings.json", "settings.local.json"} {
+		data, err := os.ReadFile(filepath.Join(dir, ".claude", name))
+		if err != nil {
+			continue
+		}
+		var doc map[string]any
+		if json.Unmarshal(data, &doc) != nil {
+			continue
+		}
+		hooks, _ := doc["hooks"].(map[string]any)
+		for _, groups := range hooks {
+			gs, _ := groups.([]any)
+			for _, g := range gs {
+				gm, _ := g.(map[string]any)
+				for _, h := range asSlice(gm, "hooks") {
+					hm, _ := h.(map[string]any)
+					cmd, _ := hm["command"].(string)
+					if strings.Contains(cmd, binaryName) && strings.Contains(cmd, "log-hook") &&
+						!strings.Contains(cmd, skipIfProjectHooksFlag) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }

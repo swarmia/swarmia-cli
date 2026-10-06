@@ -86,3 +86,32 @@ func TestRunLogHookWrapsPayload(t *testing.T) {
 		t.Errorf("unexpected record: %s", data)
 	}
 }
+
+// A user-scope hook stands down when the project wires log-hook itself, so the
+// event isn't logged twice; elsewhere it logs as usual.
+func TestLogHookSkipIfProjectHooks(t *testing.T) {
+	logSkipIfProjectHooks = true
+	t.Cleanup(func() { logSkipIfProjectHooks = false })
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+
+	withHooks := t.TempDir()
+	writeSettings(t, withHooks, map[string]any{"hooks": map[string]any{
+		"Stop": []any{grp("", "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook")},
+	}})
+	t.Setenv("CLAUDE_PROJECT_DIR", withHooks)
+	if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("logged although the project has its own log-hook")
+	}
+
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("didn't log in a project without its own hooks: %v", err)
+	}
+}

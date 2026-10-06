@@ -18,7 +18,25 @@ var (
 	installDir    string
 	installBinary string
 	installDryRun bool
+	installScopeF string
 )
+
+// installScope says which settings file the hooks go into.
+type installScope string
+
+const (
+	// scopeProject is the repo's shared, committed settings: hooks for everyone.
+	scopeProject installScope = "project"
+	// scopeLocal is the repo's personal, gitignored settings.
+	scopeLocal installScope = "local"
+	// scopeUser is the user's settings: every project on this machine, including
+	// worktrees that lack the repo's untracked local settings.
+	scopeUser installScope = "user"
+)
+
+// skipIfProjectHooksFlag makes a user-scope log-hook stand down in projects
+// that wire swarmia-cli themselves, so events aren't logged twice.
+const skipIfProjectHooksFlag = "--skip-if-project-hooks"
 
 var installCmd = &cobra.Command{
 	Use:   "install",
@@ -28,17 +46,30 @@ var installCmd = &cobra.Command{
 		"each one's settings — the same log-hook wiring this repo uses.\n\n" +
 		"It is idempotent: hooks already present are left alone, and unrelated settings and\n" +
 		"hooks are preserved. Hooks for subcommands that no longer exist (process-logs) are\n" +
-		"removed. The command used to invoke swarmia-cli in the hooks is\n" +
-		"auto-detected: a swarmia-cli binary at the repo root is preferred (handy for local\n" +
-		"development), then an npm dependency in node_modules/.bin, then a swarmia-cli on\n" +
-		"your $PATH. Override with --binary.",
+		"removed.\n\n" +
+		"--scope picks the settings file:\n" +
+		"  project  .claude/settings.json — committed, so hooks for everyone (default)\n" +
+		"  local    .claude/settings.local.json — just you, in this checkout\n" +
+		"  user     ~/.claude/settings.json — just you, in every project and worktree;\n" +
+		"           stands down in projects that have their own swarmia-cli hooks\n\n" +
+		"For project scope the command used to invoke swarmia-cli is auto-detected: a\n" +
+		"swarmia-cli binary at the repo root (handy for local development), then an npm\n" +
+		"dependency in node_modules/.bin, then a swarmia-cli on your $PATH. For local and\n" +
+		"user scope it is the absolute path of the swarmia-cli running this install.\n" +
+		"Override with --binary.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir := installDir
 		if dir == "" {
 			dir = projectDir()
 		}
-		return runInstall(cmd.OutOrStdout(), dir, installOpts{binaryRef: installBinary, dryRun: installDryRun})
+		scope := installScope(installScopeF)
+		switch scope {
+		case scopeProject, scopeLocal, scopeUser:
+		default:
+			return fmt.Errorf("unknown --scope %q (want project, local or user)", installScopeF)
+		}
+		return runInstall(cmd.OutOrStdout(), dir, installOpts{binaryRef: installBinary, dryRun: installDryRun, scope: scope})
 	},
 }
 
@@ -46,21 +77,24 @@ func init() {
 	installCmd.Flags().StringVar(&installDir, "dir", "", "repository directory to install into (default: $CLAUDE_PROJECT_DIR or cwd)")
 	installCmd.Flags().StringVar(&installBinary, "binary", "", "override the auto-detected command used to invoke swarmia-cli in hooks")
 	installCmd.Flags().BoolVar(&installDryRun, "dry-run", false, "report what would change without writing anything")
+	installCmd.Flags().StringVar(&installScopeF, "scope", string(scopeProject), "where to install: project, local or user")
 	rootCmd.AddCommand(installCmd)
 }
 
 type installOpts struct {
 	binaryRef string
 	dryRun    bool
+	scope     installScope // "" means project
 }
 
-// agentConfig describes one supported coding agent: how to tell it is used in a
-// repo and how to add our hooks to its settings. New agents (Codex, Cursor, ...)
-// plug in by appending to supportedAgents.
+// agentConfig describes one supported coding agent: where its settings for a
+// scope live (ok is false when the agent isn't used there) and how to add our
+// hooks to them. New agents (Codex, Cursor, ...) plug in by appending to
+// supportedAgents.
 type agentConfig struct {
-	name    string
-	detect  func(repoDir string) bool
-	install func(repoDir, binRef string, dryRun bool) (res hookChanges, path string, err error)
+	name         string
+	settingsPath func(repoDir string, scope installScope) (path string, ok bool)
+	install      func(path, hookCommand string, dryRun bool) (hookChanges, error)
 }
 
 // hookChanges counts what an install did (or, in a dry run, would do) to one
@@ -73,24 +107,37 @@ type hookChanges struct {
 var supportedAgents = []agentConfig{claudeCodeAgent}
 
 func runInstall(out io.Writer, repoDir string, opts installOpts) error {
+	scope := opts.scope
+	if scope == "" {
+		scope = scopeProject
+	}
 	binRef, source := opts.binaryRef, "--binary override"
 	if binRef == "" {
-		binRef, source = detectBinaryRef(repoDir)
+		if scope == scopeProject {
+			binRef, source = detectBinaryRef(repoDir)
+		} else {
+			binRef, source = executableRef()
+		}
 	}
-	fmt.Fprintf(out, "Hook command: %s (%s)\n", binRef, source)
+	hookCommand := binRef + " log-hook"
+	if scope == scopeUser {
+		hookCommand += " " + skipIfProjectHooksFlag
+	}
+	fmt.Fprintf(out, "Hook command: %s (%s)\n", hookCommand, source)
 
 	detected := 0
 	for _, ag := range supportedAgents {
-		if !ag.detect(repoDir) {
+		path, ok := ag.settingsPath(repoDir, scope)
+		if !ok {
 			fmt.Fprintf(out, "%s: not detected, skipping\n", ag.name)
 			continue
 		}
 		detected++
-		res, path, err := ag.install(repoDir, binRef, opts.dryRun)
+		res, err := ag.install(path, hookCommand, opts.dryRun)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ag.name, err)
 		}
-		rel := relPath(repoDir, path)
+		rel := displayPath(repoDir, path)
 		if res.added == 0 && res.removed == 0 {
 			fmt.Fprintf(out, "%s (%s): already configured\n", ag.name, rel)
 			continue
@@ -131,38 +178,86 @@ func detectBinaryRef(repoDir string) (ref, source string) {
 	return binaryName, "not found; assuming it will be on $PATH"
 }
 
+// executableRef is the absolute path of the running swarmia-cli, shell-quoted
+// if needed: personal installs (local, user scope) point straight at the binary
+// that installed them, so it needn't be on $PATH.
+func executableRef() (ref, source string) {
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		return binaryName, "can't resolve this binary's path; assuming swarmia-cli is on $PATH"
+	}
+	if strings.ContainsAny(exe, " '\"\\$`") {
+		exe = "'" + strings.ReplaceAll(exe, "'", `'\''`) + "'"
+	}
+	return exe, "this swarmia-cli binary"
+}
+
+// displayPath shows path relative to repoDir when inside it, else with the home
+// directory abbreviated to ~.
+func displayPath(repoDir, path string) string {
+	if rel, err := filepath.Rel(repoDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if rel, err := filepath.Rel(home, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.Join("~", rel)
+		}
+	}
+	return path
+}
+
+// claudeConfigDir is Claude Code's user configuration directory.
+func claudeConfigDir() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
+}
+
 // --- Claude Code -----------------------------------------------------------
 
 var claudeCodeAgent = agentConfig{
 	name: "Claude Code",
-	detect: func(repoDir string) bool {
-		return dirExists(filepath.Join(repoDir, ".claude"))
+	settingsPath: func(repoDir string, scope installScope) (string, bool) {
+		switch scope {
+		case scopeUser:
+			dir, err := claudeConfigDir()
+			return filepath.Join(dir, "settings.json"), err == nil
+		case scopeLocal:
+			return filepath.Join(repoDir, ".claude", "settings.local.json"), dirExists(filepath.Join(repoDir, ".claude"))
+		default:
+			return filepath.Join(repoDir, ".claude", "settings.json"), dirExists(filepath.Join(repoDir, ".claude"))
+		}
 	},
-	install: func(repoDir, binRef string, dryRun bool) (hookChanges, string, error) {
-		path := filepath.Join(repoDir, ".claude", "settings.json")
+	install: func(path, hookCommand string, dryRun bool) (hookChanges, error) {
 		doc, err := readJSONObject(path)
 		if err != nil {
-			return hookChanges{}, path, err
+			return hookChanges{}, err
 		}
 		res := hookChanges{
 			removed: removeObsoleteHooks(doc),
-			added:   ensureClaudeHooks(doc, binRef),
+			added:   ensureClaudeHooks(doc, hookCommand),
 		}
 		if (res.added > 0 || res.removed > 0) && !dryRun {
 			if err := writeJSONObject(path, doc); err != nil {
-				return hookChanges{}, path, err
+				return hookChanges{}, err
 			}
 		}
-		return res, path, nil
+		return res, nil
 	},
 }
 
 // ensureClaudeHooks adds the Swarmia hook set to a parsed settings document,
 // returning how many entries were newly added. It mirrors the config this repo
 // ships: log-hook on prompts, all tool use, and session lifecycle.
-func ensureClaudeHooks(doc map[string]any, binRef string) int {
-	logHook := binRef + " log-hook"
-
+func ensureClaudeHooks(doc map[string]any, logHook string) int {
 	specs := []struct {
 		event, matcher, command, subcmd string
 	}{
@@ -375,11 +470,4 @@ func isExecutable(path string) bool {
 func dirExists(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
-}
-
-func relPath(base, path string) string {
-	if rel, err := filepath.Rel(base, path); err == nil {
-		return rel
-	}
-	return path
 }
