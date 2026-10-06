@@ -7,10 +7,9 @@ Coding agents like Claude Code, Codex, and Copilot expose activity through
 hooks. `swarmia-cli` registers as a hook, records what the agent does into a
 local log, and (in future increments) links that activity to your git history.
 
-> **Status:** early. Today the CLI can set up its hooks (`install`), log Claude
-> Code hook events to a local JSONL file (`log-hook`), and store them per session
-> in git refs (`process-logs`). Encryption, remote sync automation, and commit
-> matching are on the roadmap.
+> **Status:** early. Today the CLI can set up its hooks (`install`) and log
+> Claude Code hook events locally (`log-hook`). Local commit matching and
+> delivery to Swarmia are on the roadmap.
 
 ## Installation
 
@@ -63,8 +62,9 @@ swarmia-cli install --dry-run  # preview without writing
 ```
 
 It adds the same wiring this repo uses — `log-hook` on prompts, all tool use, and
-session lifecycle, plus `process-logs` on `SessionEnd`. It is **idempotent** (hooks
-already present are left alone) and preserves any unrelated settings and hooks.
+session lifecycle. It is **idempotent** (hooks already present are left alone) and
+preserves any unrelated settings and hooks. Hooks for the removed `process-logs`
+subcommand, written by earlier versions, are cleaned up.
 
 The command the hooks use to invoke `swarmia-cli` is auto-detected, in order:
 
@@ -98,42 +98,11 @@ The log file is chosen in this order:
 3. `$CLAUDE_PROJECT_DIR/.swarmia/events.jsonl` (falls back to the current
    directory if `$CLAUDE_PROJECT_DIR` is unset)
 
-### `process-logs`
-
-Takes the events captured by `log-hook`, groups them by session, and stores each
-session's events into a git ref named `refs/ai-sessions/<session_id>`:
-
-```sh
-swarmia-cli process-logs
-```
-
-- **Git plumbing only.** It writes objects and updates refs directly; it never
-  touches the working tree, index, or `HEAD`, so nothing shows up in `git status`.
-- **One ref per session.** The server enumerates `refs/ai-sessions/*`. Inspect one
-  with `git cat-file -p refs/ai-sessions/<session_id>:events.jsonl`.
-- **Accumulates.** Each run appends the new events to the session's ref (a new
-  commit chained onto the previous one), so a session that keeps going after its
-  logs were shipped keeps updating the same ref.
-- **Rotates.** After a successful store the local `events.jsonl` is emptied; if a
-  store fails, the unstored events are put back so the next run retries.
-- **Never blocks.** Like `log-hook` it always exits 0, so it is safe to wire into a
-  hook. It is meant for a periodic or lifecycle hook (e.g. session end), not every
-  tool call.
-- **Does not push by default.** Pushing the refs to a remote is left to you (run
-  `git push` yourself). Pass `--push` (with `--remote`, default `origin`) to also
-  push each stored ref; push failures are logged and non-fatal.
-
-Flags: `--file` (input path, same resolution as `log-hook`), `--push`, `--remote`,
-`--keep` (don't empty the log after storing — for debugging).
-
 ## Setting up the Claude Code hook
 
 `swarmia-cli` ships a ready-made hook configuration in
 [`.claude/settings.json`](.claude/settings.json). It registers `log-hook` for
-prompts, all tool use, and session lifecycle events, and runs `process-logs` on
-`SessionEnd` to store the session's events into `refs/ai-sessions/*`. (Because the
-log persists across sessions and `process-logs` groups by session, one session's
-`SessionEnd` also flushes any events a previous session left behind.)
+prompts, all tool use, and session lifecycle events.
 
 **Build the binary first** — the config invokes `${CLAUDE_PROJECT_DIR}/swarmia-cli`,
 so the compiled binary must exist at the repo root:
@@ -173,7 +142,6 @@ cmd/
   root.go          cobra root command
   install.go       the install command (wires hooks into detected agents)
   loghook.go       the log-hook command (captures hook payloads)
-  processlogs.go   the process-logs command (stores events in refs/ai-sessions/*)
   paths.go         shared log-file / project-dir resolution
   version.go       version command + build metadata
 npm/

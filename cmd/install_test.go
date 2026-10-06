@@ -64,10 +64,9 @@ func TestInstallFreshCreatesConfig(t *testing.T) {
 			t.Errorf("%s missing log-hook; got %v", ev, commandsFor(t, doc, ev))
 		}
 	}
-	// SessionEnd also ships the logs, and log-hook comes before process-logs.
-	se := commandsFor(t, doc, "SessionEnd")
-	if len(se) != 2 || se[0] != "swarmia-cli log-hook" || se[1] != "swarmia-cli process-logs" {
-		t.Errorf("SessionEnd = %v, want [log-hook, process-logs]", se)
+	// Exactly one hook per event: log-hook only.
+	if se := commandsFor(t, doc, "SessionEnd"); len(se) != 1 {
+		t.Errorf("SessionEnd = %v, want just log-hook", se)
 	}
 	// PreToolUse uses the "*" matcher.
 	hooks := doc["hooks"].(map[string]any)
@@ -346,8 +345,7 @@ func TestInstallCoexistsWithDifferentMatcher(t *testing.T) {
 	}
 }
 
-// The user's own SessionEnd hook is kept, and our two commands are appended in
-// order (log-hook then process-logs).
+// The user's own SessionEnd hook is kept, and our log-hook is appended after it.
 func TestInstallMergesUserSessionEndHook(t *testing.T) {
 	repo := t.TempDir()
 	writeSettings(t, repo, map[string]any{
@@ -362,15 +360,14 @@ func TestInstallMergesUserSessionEndHook(t *testing.T) {
 	}
 
 	se := commandsFor(t, readSettings(t, repo), "SessionEnd")
-	want := []string{"notify-done", "swarmia-cli log-hook", "swarmia-cli process-logs"}
+	want := []string{"notify-done", "swarmia-cli log-hook"}
 	if !reflect.DeepEqual(se, want) {
 		t.Errorf("SessionEnd = %v, want %v", se, want)
 	}
 }
 
-// An older/partial Swarmia install (log-hook everywhere, but process-logs missing
-// from SessionEnd) is completed by adding exactly the missing hook, with no
-// duplication of the ones already present.
+// A partial Swarmia install (log-hook missing from some events) is completed by
+// adding exactly the missing hooks, with no duplication of the ones present.
 func TestInstallCompletesPartialSwarmiaInstall(t *testing.T) {
 	repo := t.TempDir()
 	writeSettings(t, repo, map[string]any{
@@ -380,7 +377,6 @@ func TestInstallCompletesPartialSwarmiaInstall(t *testing.T) {
 			"PostToolUse":      []any{grp("*", "swarmia-cli log-hook")},
 			"SessionStart":     []any{grp("", "swarmia-cli log-hook")},
 			"SessionEnd":       []any{grp("", "swarmia-cli log-hook")},
-			"Stop":             []any{grp("", "swarmia-cli log-hook")},
 		},
 	})
 
@@ -389,18 +385,61 @@ func TestInstallCompletesPartialSwarmiaInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(out.Bytes(), []byte("added 1 hook")) {
-		t.Errorf("expected exactly 1 hook added (process-logs), got: %s", out.String())
+		t.Errorf("expected exactly 1 hook added (Stop), got: %s", out.String())
 	}
 
 	doc := readSettings(t, repo)
-	if se := commandsFor(t, doc, "SessionEnd"); len(se) != 2 ||
-		se[0] != "swarmia-cli log-hook" || se[1] != "swarmia-cli process-logs" {
-		t.Errorf("SessionEnd = %v, want [log-hook, process-logs]", se)
-	}
-	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "Stop"} {
+	for _, ev := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "Stop"} {
 		if cmds := commandsFor(t, doc, ev); len(cmds) != 1 || cmds[0] != "swarmia-cli log-hook" {
 			t.Errorf("%s = %v, want a single, un-duplicated log-hook", ev, cmds)
 		}
+	}
+}
+
+// Configs written by older versions wire `process-logs`, which no longer exists.
+// Install removes it (however the binary is referenced) and leaves the user's
+// hooks in the same group alone; a group holding only obsolete hooks disappears.
+func TestInstallRemovesObsoleteProcessLogsHook(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{
+		"hooks": map[string]any{
+			"SessionEnd": []any{
+				map[string]any{"hooks": []any{
+					map[string]any{"type": "command", "command": "notify-done"},
+					map[string]any{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook"},
+					map[string]any{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli process-logs"},
+				}},
+			},
+			"Stop": []any{grp("", "swarmia-cli process-logs --push")},
+		},
+	})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("removed 2 obsolete hook(s)")) {
+		t.Errorf("expected 2 obsolete hooks removed, got: %s", out.String())
+	}
+
+	doc := readSettings(t, repo)
+	se := commandsFor(t, doc, "SessionEnd")
+	want := []string{"notify-done", "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook"}
+	if !reflect.DeepEqual(se, want) {
+		t.Errorf("SessionEnd = %v, want %v", se, want)
+	}
+	// Stop lost its process-logs-only group and got a fresh log-hook group.
+	if st := commandsFor(t, doc, "Stop"); !reflect.DeepEqual(st, []string{"swarmia-cli log-hook"}) {
+		t.Errorf("Stop = %v, want [swarmia-cli log-hook]", st)
+	}
+
+	// Re-running is a no-op.
+	out.Reset()
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("already configured")) {
+		t.Errorf("second install should be a no-op, got: %s", out.String())
 	}
 }
 
@@ -441,7 +480,7 @@ func TestInstallPreservesUnmanagedHooksAndTopLevelKeys(t *testing.T) {
 	if !contains(commandsFor(t, doc, "PreCompact"), "snapshot") {
 		t.Errorf("unmanaged PreCompact hook lost")
 	}
-	if !contains(commandsFor(t, doc, "SessionEnd"), "swarmia-cli process-logs") {
+	if !contains(commandsFor(t, doc, "SessionEnd"), "swarmia-cli log-hook") {
 		t.Errorf("our hooks were not added alongside the existing config")
 	}
 }

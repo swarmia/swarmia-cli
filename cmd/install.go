@@ -25,9 +25,10 @@ var installCmd = &cobra.Command{
 	Short: "Install Swarmia hooks into supported coding agents found in this repo",
 	Long: "install detects which supported coding agents are configured in this repository\n" +
 		"(currently Claude Code, via a .claude directory) and adds the Swarmia hooks to\n" +
-		"each one's settings — the same log-hook and process-logs wiring this repo uses.\n\n" +
+		"each one's settings — the same log-hook wiring this repo uses.\n\n" +
 		"It is idempotent: hooks already present are left alone, and unrelated settings and\n" +
-		"hooks are preserved. The command used to invoke swarmia-cli in the hooks is\n" +
+		"hooks are preserved. Hooks for subcommands that no longer exist (process-logs) are\n" +
+		"removed. The command used to invoke swarmia-cli in the hooks is\n" +
 		"auto-detected: a swarmia-cli binary at the repo root is preferred (handy for local\n" +
 		"development), then an npm dependency in node_modules/.bin, then a swarmia-cli on\n" +
 		"your $PATH. Override with --binary.",
@@ -59,7 +60,14 @@ type installOpts struct {
 type agentConfig struct {
 	name    string
 	detect  func(repoDir string) bool
-	install func(repoDir, binRef string, dryRun bool) (added int, path string, err error)
+	install func(repoDir, binRef string, dryRun bool) (res hookChanges, path string, err error)
+}
+
+// hookChanges counts what an install did (or, in a dry run, would do) to one
+// agent's settings.
+type hookChanges struct {
+	added   int
+	removed int
 }
 
 var supportedAgents = []agentConfig{claudeCodeAgent}
@@ -78,19 +86,24 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			continue
 		}
 		detected++
-		added, path, err := ag.install(repoDir, binRef, opts.dryRun)
+		res, path, err := ag.install(repoDir, binRef, opts.dryRun)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ag.name, err)
 		}
 		rel := relPath(repoDir, path)
-		switch {
-		case added == 0:
+		if res.added == 0 && res.removed == 0 {
 			fmt.Fprintf(out, "%s (%s): already configured\n", ag.name, rel)
-		case opts.dryRun:
-			fmt.Fprintf(out, "%s (%s): would add %d hook(s)\n", ag.name, rel, added)
-		default:
-			fmt.Fprintf(out, "%s (%s): added %d hook(s)\n", ag.name, rel, added)
+			continue
 		}
+		verb := "added"
+		if opts.dryRun {
+			verb = "would add"
+		}
+		msg := fmt.Sprintf("%s %d hook(s)", verb, res.added)
+		if res.removed > 0 {
+			msg += fmt.Sprintf(", removed %d obsolete hook(s)", res.removed)
+		}
+		fmt.Fprintf(out, "%s (%s): %s\n", ag.name, rel, msg)
 	}
 
 	if detected == 0 {
@@ -125,29 +138,30 @@ var claudeCodeAgent = agentConfig{
 	detect: func(repoDir string) bool {
 		return dirExists(filepath.Join(repoDir, ".claude"))
 	},
-	install: func(repoDir, binRef string, dryRun bool) (int, string, error) {
+	install: func(repoDir, binRef string, dryRun bool) (hookChanges, string, error) {
 		path := filepath.Join(repoDir, ".claude", "settings.json")
 		doc, err := readJSONObject(path)
 		if err != nil {
-			return 0, path, err
+			return hookChanges{}, path, err
 		}
-		added := ensureClaudeHooks(doc, binRef)
-		if added > 0 && !dryRun {
+		res := hookChanges{
+			removed: removeObsoleteHooks(doc),
+			added:   ensureClaudeHooks(doc, binRef),
+		}
+		if (res.added > 0 || res.removed > 0) && !dryRun {
 			if err := writeJSONObject(path, doc); err != nil {
-				return 0, path, err
+				return hookChanges{}, path, err
 			}
 		}
-		return added, path, nil
+		return res, path, nil
 	},
 }
 
 // ensureClaudeHooks adds the Swarmia hook set to a parsed settings document,
 // returning how many entries were newly added. It mirrors the config this repo
-// ships: log-hook on prompts, all tool use, and session lifecycle, plus
-// process-logs on SessionEnd to store the session's events in git.
+// ships: log-hook on prompts, all tool use, and session lifecycle.
 func ensureClaudeHooks(doc map[string]any, binRef string) int {
 	logHook := binRef + " log-hook"
-	processLogs := binRef + " process-logs"
 
 	specs := []struct {
 		event, matcher, command, subcmd string
@@ -157,7 +171,6 @@ func ensureClaudeHooks(doc map[string]any, binRef string) int {
 		{"PostToolUse", "*", logHook, "log-hook"},
 		{"SessionStart", "", logHook, "log-hook"},
 		{"SessionEnd", "", logHook, "log-hook"},
-		{"SessionEnd", "", processLogs, "process-logs"},
 		{"Stop", "", logHook, "log-hook"},
 	}
 
@@ -209,6 +222,78 @@ func ensureHook(doc map[string]any, event, matcher, command, subcmd string) bool
 	}
 	hooks[event] = append(arr, group)
 	return true
+}
+
+// obsoleteSubcommands are swarmia-cli subcommands that earlier versions wired
+// into hooks but that no longer exist; install strips them so agents don't keep
+// invoking an unknown command.
+var obsoleteSubcommands = []string{"process-logs"}
+
+// removeObsoleteHooks deletes swarmia-cli hooks for obsoleteSubcommands from
+// every event, dropping groups and events left empty. Returns how many hooks it
+// removed.
+func removeObsoleteHooks(doc map[string]any) int {
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	removed := 0
+	for event, v := range hooks {
+		arr, ok := v.([]any)
+		if !ok {
+			continue
+		}
+		before := removed
+		var keptGroups []any
+		for _, g := range arr {
+			gm, ok := g.(map[string]any)
+			if !ok {
+				keptGroups = append(keptGroups, g)
+				continue
+			}
+			var kept []any
+			for _, h := range asSlice(gm, "hooks") {
+				if isObsoleteHook(h) {
+					removed++
+					continue
+				}
+				kept = append(kept, h)
+			}
+			if len(kept) == 0 && len(asSlice(gm, "hooks")) > 0 {
+				continue // the group held only obsolete hooks
+			}
+			if kept != nil {
+				gm["hooks"] = kept
+			}
+			keptGroups = append(keptGroups, gm)
+		}
+		if removed == before {
+			continue // nothing obsolete here; leave the event exactly as it was
+		}
+		if len(keptGroups) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = keptGroups
+		}
+	}
+	return removed
+}
+
+func isObsoleteHook(h any) bool {
+	hm, ok := h.(map[string]any)
+	if !ok {
+		return false
+	}
+	cmd, _ := hm["command"].(string)
+	if !strings.Contains(cmd, binaryName) {
+		return false
+	}
+	for _, sub := range obsoleteSubcommands {
+		if strings.Contains(cmd, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func groupHasSwarmia(group map[string]any, subcmd string) bool {
