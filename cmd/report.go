@@ -154,11 +154,11 @@ func writeSessionText(out io.Writer, s *report.Session) {
 func deliveryState(s *report.Session) string {
 	switch d := s.Delivery; {
 	case d == nil:
-		return "not delivered yet"
+		return "not sent yet"
 	case d.Rejected != "":
 		return "rejected by Swarmia: " + d.Rejected
 	default:
-		return "delivered " + d.SentAt.Local().Format("2006-01-02 15:04")
+		return "sent " + d.SentAt.Local().Format("2006-01-02 15:04")
 	}
 }
 

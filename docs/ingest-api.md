@@ -2,8 +2,15 @@
 
 This is the contract between `swarmia-cli` (the client, this repository) and the
 ingest service that receives its data (the `hook` service). It describes exactly
-what the client sends today and what it expects back, and what the server is
+what the client sends today, what it expects back, and what Swarmia is
 responsible for doing with it.
+
+**The endpoint is asynchronous.** `hook` authenticates nothing beyond what it
+can check cheaply, forwards each request to a Pub/Sub queue, and answers `2xx`.
+Validation, the repository check, storage and attribution joining happen
+downstream, after the client has its answer. So a `2xx` means *received*, not
+*accepted*: the client can't learn that a session was rejected. (A way to check
+that is planned — see "Future: delivery status".)
 
 - **Base URL:** `https://hook.swarmia.com/cli` (clients can override it with the
   `endpoint` setting, e.g. to test against a local server).
@@ -51,7 +58,8 @@ the client can't prevent: a developer may paste code into a prompt.
   version of a session came from a request with a later `sent_at`, ignore the
   incoming one (still answer `accepted`).
 - **Batching.** One request carries 1–25 sessions and at most ~4 MB of JSON
-  before compression. Sessions in a batch are independent; answer for each.
+  before compression. Sessions in a batch are independent: the consumer must
+  process (and reject) each on its own, never fail the batch as a whole.
 - **Sessions belong to one repository.** A session's `repo` is the repository the
   agent worked in. (One agent session in one repository maps to one payload.)
 
@@ -208,53 +216,41 @@ Display them as-is. Never try to reverse them.
 
 ## Response
 
-### 200 OK — per-session results
+### 2xx — received
 
-The server returns `200` whenever it could authenticate the request and parse
-the body, even if it rejects some (or all) sessions:
+`hook` answers `202 Accepted` (any `2xx` works) once the request is queued. The
+body is ignored; send none.
 
-```json
-{
-  "results": [
-    { "session_id": "7999d991-42b2-47e9-932e-224855021364", "status": "accepted" },
-    { "session_id": "0b3c2f6e-1111-4222-8333-944455556666", "status": "rejected", "error": "repository not in organization" }
-  ]
-}
-```
+The client then marks every session in the batch as sent, and sends each again
+only when its payload changes. Whether the consumer later stored or rejected a
+session is invisible to the client.
 
-| Field | Type | Description |
+> **Forward compatibility.** If a `2xx` body ever carries per-session results —
+> `{"results": [{"session_id": "…", "status": "accepted" | "rejected", "error": "…"}]}`
+> — the client honours them: a `rejected` session isn't retried until it
+> changes (its `error` is shown in `swarmia-cli report`), and a session left out
+> of the list is retried on the next run. The current asynchronous `hook`
+> doesn't return this, and doesn't need to.
+
+### Errors — the whole request
+
+`hook` can only fail a request as a whole, for problems it notices before
+queueing. Everything else (an unknown repository, an invalid session) is the
+consumer's business and doesn't reach the client.
+
+| Status | When `hook` might return it | Client behaviour |
 |---|---|---|
-| `results` | array | One entry per session in the request (order doesn't matter). |
-| `results[].session_id` | string | Echoes the session's id. |
-| `results[].status` | string | `accepted` (stored, or deliberately ignored as stale) or `rejected`. |
-| `results[].error` | string, optional | For `rejected`: a short human-readable reason. The CLI shows it to the developer (`swarmia-cli report`), so keep it meaningful and free of internal detail. |
-
-Client behaviour:
-
-- `accepted`: marked delivered; resent only when the payload changes.
-- `rejected`: marked rejected with the reason; **not retried until the payload
-  changes**. Use it for permanent, per-session problems.
-- A session missing from `results`: treated as not delivered and retried on the
-  next run. Use this (omit it) for transient per-session failures.
-
-Suggested rejection reasons: `repository not in organization`,
-`repository unknown` (empty `repo`), `invalid payload: <field>`,
-`session too large`.
-
-### Error statuses — the whole request
-
-| Status | Meaning | Client behaviour |
-|---|---|---|
-| `400` | Body isn't valid gzip/JSON, or `schema_version` unsupported. | Backs off exponentially (1 min doubling, max 6 h) and retries. Prefer `200` with per-session rejections for per-session problems. |
-| `401` | Missing, malformed, unknown or revoked token. | Pauses delivery for 6 hours. |
-| `403` | Valid token that may not submit (e.g. organization lacks the feature, token disabled). | Pauses delivery for 6 hours. |
-| `413` | Request too large. | Splits the batch in half and retries; a single session that still gets `413` is marked rejected ("payload too large") and not retried until it changes. |
+| `400` | The body isn't gzip/JSON, or `schema_version` is unsupported — if `hook` checks. | Backs off exponentially (1 min doubling, max 6 h) and retries. |
+| `401` / `403` | The token is missing, malformed, or — if `hook` can look it up cheaply — unknown/revoked. | Pauses delivery for 6 hours. |
+| `413` | Request too large (`hook` or a proxy in front of it). | Splits the batch in half and retries; a single session that still gets `413` is not retried until it changes. |
 | `429` | Rate limited. | Waits for `Retry-After` (seconds) if given, else backs off exponentially. |
-| `5xx` | Server error or unavailable. | Waits for `Retry-After` if given, else backs off exponentially. |
+| `5xx` | `hook` couldn't queue the request. | Waits for `Retry-After` if given, else backs off exponentially. |
 
-The error body may be plain text or JSON; the client only logs its first ~200
-characters. Network errors and timeouts (the client waits 30 s) back off like
-`5xx`.
+None of these are required beyond `2xx` for success and `5xx` when queueing
+fails; the client copes with any of them. The error body is only logged (first
+~200 characters). Network errors and timeouts (the client waits 30 s) back off
+like `5xx`. Because the client retries after timeouts, the same payload can be
+queued twice — consumers must be idempotent (upserts make that free).
 
 ## Authentication and tokens
 
@@ -277,29 +273,44 @@ characters. Network errors and timeouts (the client waits 30 s) back off like
 |---|---|---|
 | Sessions per request | ≤ 25 | Accept ≥ 25; `413` beyond its limit. |
 | Request size (uncompressed JSON) | ≤ 4 MB, except a single session can exceed it | Accept ≥ 8 MB decompressed; refuse more with `413`. Guard against decompression bombs (cap while decompressing). |
-| Session size | Usually < 100 KB; long sessions with many prompts can reach a few MB | Reject absurd sizes per session (`rejected`, `session too large`). |
+| Session size | Usually < 100 KB; long sessions with many prompts can reach a few MB | Consumer drops absurd sizes per session (and records why). |
 | Request rate | One request per batch per background run; background runs happen at session ends | Rate limit per token; answer `429` with `Retry-After`. |
 
 ## Server responsibilities
 
-1. **Authenticate** the token → organization. `401`/`403` as above.
-2. **Validate each session independently** and answer for each. Required:
-   `session_id`, `agent`, `matcher_version`, `started_at`, `ended_at`, and the
-   arrays. Unknown fields must be ignored (the client may add fields without
-   bumping `schema_version`).
+### `hook` (receiver)
+
+1. Decompress (with a size cap) and, if cheap, check the body parses and has
+   a supported `schema_version` → else `400`.
+2. Check the `Authorization` header is present and well-formed → else `401`.
+   Looking the token up is optional here; the consumer must do it either way.
+3. Publish the request — body plus the token (or the organization it resolves
+   to) and `sent_at` — to the queue, and answer `202`. Fail with `5xx` only if
+   publishing fails.
+4. Rate limit per token (`429` with `Retry-After`).
+
+### Consumer (downstream of the queue)
+
+1. **Authenticate** the token → organization; drop messages with unknown or
+   revoked tokens.
+2. **Validate each session independently.** Required: `session_id`, `agent`,
+   `matcher_version`, `started_at`, `ended_at`, and the arrays. Ignore unknown
+   fields (the client may add fields without bumping `schema_version`). An
+   invalid session never invalidates the rest of the batch.
 3. **Check the repository belongs to the organization.** Match `repo` against
-   the organization's connected repositories (GitHub/GitLab integration). Reject
-   sessions for other repositories with `repository not in organization`; this
-   is also what stops junk sent with a leaked token, and keeps developers'
-   personal projects out. Empty `repo` → `repository unknown`.
+   the organization's connected repositories (GitHub/GitLab integration) and
+   drop sessions for others. This is what stops junk sent with a leaked token,
+   and keeps developers' personal projects out. Drop sessions with an empty
+   `repo`. Record why sessions were dropped, per token — that is what the
+   planned delivery status endpoint would report.
 4. **Upsert** by (organization, `session_id`), replacing the stored payload,
-   unless the stored version came from a later `sent_at`.
+   unless the stored version came from a later `sent_at`. Duplicate messages are
+   expected.
 5. **Map the developer**: `author_email` → Swarmia identity, as for commits.
 6. **Join attribution with commits.**
    - Commits are pushed, but the webhook for a push may arrive after the session
      payload, and a pushed commit can still be force-pushed away. Store
-     attribution for unknown SHAs and resolve it when the commit shows up; don't
-     reject the session.
+     attribution for unknown SHAs and resolve it when the commit shows up.
    - Line numbers refer to the file as of that commit.
    - **Squash and rebase merges:** the commits attributed are the developer's
      own (pushed branch) commits. When a PR is squash-merged, the merge commit
@@ -318,6 +329,18 @@ characters. Network errors and timeouts (the client waits 30 s) back off like
 9. **Never expect code.** If you need code for analysis (e.g. to show an "AI
    blame" view), fetch it from the Git provider at display time using the SHA,
    path and line ranges.
+
+## Future: delivery status
+
+Because `hook` is asynchronous, the client can't tell whether its sessions were
+stored or dropped (unknown repository, revoked token, invalid payload). A
+separate, synchronous endpoint on `https://app.swarmia.com/` is planned for that:
+called with the same write-only token, it would answer — per session id the
+client sent, or summarised for the token — whether the session was received and
+stored, or dropped and why. It must not return any session content, since the
+token may be public. The CLI would surface the answer in `swarmia-cli report`
+and `swarmia-cli config`. Not part of v1; the request format above doesn't
+depend on it.
 
 ## Example exchange
 
@@ -371,10 +394,7 @@ User-Agent: swarmia-cli/0.4.0
 Response:
 
 ```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{ "results": [ { "session_id": "e2e5c1d0-5f7a-4c1e-9d2b-3a4b5c6d7e8f", "status": "accepted" } ] }
+HTTP/1.1 202 Accepted
 ```
 
 ## JSON Schema
@@ -458,30 +478,8 @@ Request body (after decompression):
 }
 ```
 
-Response body (200):
-
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hook.swarmia.com/cli/schemas/sessions-response-v1.json",
-  "type": "object",
-  "required": ["results"],
-  "properties": {
-    "results": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["session_id", "status"],
-        "properties": {
-          "session_id": { "type": "string" },
-          "status": { "enum": ["accepted", "rejected"] },
-          "error": { "type": "string" }
-        }
-      }
-    }
-  }
-}
-```
+The response body is ignored (see "Forward compatibility" under Response for
+the optional per-session format the client would honour).
 
 ## Versioning
 

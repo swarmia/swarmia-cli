@@ -61,8 +61,7 @@ var processCmd = &cobra.Command{
 			fmt.Fprintf(cmd.OutOrStdout(), "folded %d event(s); %d session(s) stored; %d pruned\n",
 				res.Folded, len(res.Sessions), res.Pruned)
 			if delivered.Sent > 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "delivered %d session(s): %d accepted, %d rejected\n",
-					delivered.Sent, delivered.Accepted, delivered.Rejected)
+				fmt.Fprintf(cmd.OutOrStdout(), "sent %d session(s) to Swarmia\n", delivered.Sent)
 			}
 		}
 		return nil

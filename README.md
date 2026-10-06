@@ -246,9 +246,11 @@ throttling and backoff. `send --dry-run` only counts what would go.
   token. The server keeps the latest version of each session.
 - A session is sent again only when its payload changes — it continued, or a
   commit was pushed — and at most every 15 minutes while it's still going.
-- The server answers per session; a rejected session isn't retried until it
-  changes. Failures back off (exponentially, honouring `Retry-After`; six hours
-  for an unusable token), and nothing is lost meanwhile.
+- The endpoint is asynchronous: it queues what it receives and answers `2xx`,
+  so "sent" means received, not processed — the CLI can't see whether Swarmia
+  later stored or dropped a session (a status endpoint is planned). Failures
+  back off (exponentially, honouring `Retry-After`; six hours for an unusable
+  token), and nothing is lost meanwhile.
 
 The ingest API is specified in [docs/ingest-api.md](docs/ingest-api.md).
 

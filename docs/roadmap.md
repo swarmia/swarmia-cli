@@ -58,6 +58,7 @@ code we don't need.
 | D10 | Secret redaction | **Own layered redactor** (revised from "full scanner") | Embedding gitleaks cost +5 MB and ~200 modules and caught 1 of 4 sample secrets. Instead: provider token formats, private keys, URL/connection-string/`curl -u` passwords, secret-looking assignments, high-entropy strings; applied to prompts and commands. |
 | D15 | Shell commands in payload | **Keep structure, strip code** | Heredoc bodies, inline interpreter scripts and quoted strings > 120 chars replaced by placeholders, then redacted; capped at 1000 chars. Repo root, home dir and user name masked in all free text. |
 | D16 | Endpoint | **`https://hook.swarmia.com/cli`** default, overridable | Server side lives in the `hook` repo. |
+| D17 | Ingest feedback | **Asynchronous: `2xx` = received** | `hook` forwards requests to Pub/Sub and answers `202`; validation, the repo-in-org check and storage happen downstream, so the client gets no per-session results and few error codes (`5xx`/`429`, maybe `400`/`401`/`413`). The client marks a batch sent on any `2xx` and still honours a per-session results body if one ever appears. **Planned:** a synchronous endpoint on `https://app.swarmia.com/` where the CLI, using the same write-only token, can check whether its sessions were received and stored or dropped (and why) — without exposing any session content, since the token may be public. Surfaced in `report`/`config` when it exists. |
 | D11 | Windows | **Later, but design for it now** | Abstract file locking (flock) and paths behind small interfaces; keep state dir resolution OS-aware. |
 | D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. |
 | D13 | Local state location | **User state dir**: `~/.local/state/swarmia/<repo-id>/` (macOS: `~/Library/Application Support/swarmia/…`) | Never in `git status`, survives `git clean -fdx`, same for global and per-repo installs. Replaces in-repo `.swarmia/`. `<repo-id>` = hash of the common git dir so worktrees share state. |
@@ -168,6 +169,7 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 | Config (repo + user), token resolution, prompt opt-out | ✅ done (`internal/config`, `swarmia-cli config`) |
 | Secret redaction | ✅ done (`internal/redact`; payload builder in `internal/payload`) |
 | HTTPS sender | ✅ done (`internal/deliver`, `swarmia-cli send`; API in `docs/ingest-api.md`) |
+| Delivery status check | ❌ needs the planned app.swarmia.com endpoint (D17) |
 | Other agents | ❌ |
 
 ## Milestones
@@ -186,8 +188,11 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 6. ✅ **Config + redaction** (done 2026-10-06): see D10, D15, D16 and
    "Findings from milestone 6".
 7. ✅ **Delivery** (done 2026-10-06, client side): full-payload upserts to
-   `POST <endpoint>/sessions`, per-session results, backoff. Server: `hook`
-   repo, per `docs/ingest-api.md`.
+   `POST <endpoint>/sessions`, `2xx` = received (D17), backoff. Server: `hook`
+   repo (asynchronous, Pub/Sub), per `docs/ingest-api.md`.
+7b. **Delivery status:** once app.swarmia.com offers the status endpoint (D17),
+   show per-session stored/dropped state in `report` and token problems in
+   `config`.
 8. **Global install** (D2) + MDM docs.
 9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
 

@@ -161,10 +161,11 @@ func TestRejectedSessionsAreNotRetriedUntilChanged(t *testing.T) {
 	}
 }
 
-// A session the server didn't answer for is retried on the next run.
+// If the server does return per-session results, a session it left out is
+// retried on the next run.
 func TestMissingResultIsRetried(t *testing.T) {
 	srv := newServer(t)
-	srv.reply = func(req Request, w http.ResponseWriter) { json.NewEncoder(w).Encode(Response{}) }
+	srv.reply = func(req Request, w http.ResponseWriter) { w.Write([]byte(`{"results":[]}`)) }
 	a := sess("a", true)
 	o := srv.opts(t, now)
 	Deliver([]*report.Session{a}, o)
@@ -269,5 +270,19 @@ func TestForceIgnoresBackoffAndThrottle(t *testing.T) {
 	o.Force, o.Now = true, now.Add(time.Second)
 	if out, err := Deliver([]*report.Session{a}, o); err != nil || out.Accepted != 1 {
 		t.Errorf("forced send: %+v %v", out, err)
+	}
+}
+
+// The asynchronous endpoint answers with a bare 202: every session in the
+// batch counts as received.
+func TestBare2xxMarksBatchReceived(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusAccepted, http.StatusNoContent} {
+		srv := newServer(t)
+		srv.reply = func(req Request, w http.ResponseWriter) { w.WriteHeader(status) }
+		a, b := sess("a", true), sess("b", true)
+		out, err := Deliver([]*report.Session{a, b}, srv.opts(t, now))
+		if err != nil || out.Accepted != 2 || a.Delivery == nil || b.Delivery == nil {
+			t.Errorf("HTTP %d: out=%+v err=%v", status, out, err)
+		}
 	}
 }

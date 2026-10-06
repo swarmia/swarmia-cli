@@ -55,8 +55,11 @@ var sendCmd = &cobra.Command{
 			fmt.Fprintf(out, "%d session(s) would be sent to %s (see `swarmia-cli report --json`)\n", pending, cfg.Endpoint)
 			return nil
 		}
-		fmt.Fprintf(out, "sent %d session(s) to %s: %d accepted, %d rejected\n",
-			outcome.Sent, cfg.Endpoint, outcome.Accepted, outcome.Rejected)
+		fmt.Fprintf(out, "sent %d session(s) to %s", outcome.Sent, cfg.Endpoint)
+		if outcome.Rejected > 0 {
+			fmt.Fprintf(out, " (%d rejected)", outcome.Rejected)
+		}
+		fmt.Fprintln(out)
 		return nil
 	},
 }

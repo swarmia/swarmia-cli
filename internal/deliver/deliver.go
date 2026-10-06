@@ -1,5 +1,9 @@
 // Package deliver sends session payloads to Swarmia's ingest endpoint.
 //
+// The endpoint is asynchronous: it queues what it receives and answers with a
+// bare 2xx, so success means "received", not "processed". (A 200 body with
+// per-session results is still honoured, should the endpoint ever return one.)
+//
 // Each session is sent as its complete current payload; the server keeps the
 // latest version per session. A session is sent again only when its payload
 // changes (more activity, a commit pushed), at most every MinResendInterval
@@ -50,7 +54,9 @@ type Request struct {
 	Sessions      []payload.Payload `json:"sessions"`
 }
 
-// Response is the body of a 200 reply: one result per session sent.
+// Response is an optional reply body with one result per session. The current
+// endpoint doesn't return it; a bare 2xx marks every session in the batch as
+// received.
 type Response struct {
 	Results []Result `json:"results"`
 }
@@ -238,12 +244,17 @@ func post(client *http.Client, opts Options, sessions []payload.Payload) ([]Resu
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	switch {
-	case resp.StatusCode == http.StatusOK:
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		var r Response
-		if err := json.Unmarshal(data, &r); err != nil {
-			return nil, &httpError{status: resp.StatusCode, msg: "invalid response body: " + err.Error()}
+		if json.Unmarshal(data, &r) == nil && r.Results != nil {
+			return r.Results, nil
 		}
-		return r.Results, nil
+		// No per-session answer: the whole batch was received.
+		results := make([]Result, len(sessions))
+		for i, p := range sessions {
+			results[i] = Result{SessionID: p.SessionID, Status: "accepted"}
+		}
+		return results, nil
 	case resp.StatusCode == http.StatusRequestEntityTooLarge:
 		return nil, errTooLarge
 	default:
