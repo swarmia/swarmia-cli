@@ -54,7 +54,7 @@ code we don't need.
 | D6 | Partial edits | **Line-level diff** | For each located hunk, classify every committed line: `exact` (identical to AI output), `normalized` (D7), or `modified`/`human`. Server gets per-line classes, applies its own thresholds. |
 | D7 | Formatting-only differences | **Count as AI**, tagged `normalized` | Normalization per the RFC (whitespace, blank/comment lines, trailing `,`/`;`, quote style). |
 | D8 | Git-ref storage | **Delete** `process-logs` / `refs/ai-sessions/*` | Remains in git history. |
-| D9 | Agents | Claude Code, then **Codex, Cursor, Copilot CLI, Gemini CLI** | Capture layer needs a per-agent payload normalizer (session id, tool names, edit shapes differ). Order within the four: TBD. |
+| D9 | Agents | Claude Code, then **Codex, Cursor, Copilot CLI, Gemini CLI** | Capture layer needs a per-agent payload normalizer (session id, tool names, edit shapes differ). Order within the four: TBD. Reference: git-ai's `agent-support/` and per-agent "presets" normalize hook JSON for 14 agents, including where each puts shell commands (`tool_input.command`, `toolInput.command`, `tool_input.cmd`, `cmd`, …); its docs cover installing in cloud agents (Claude on the web, Codex Cloud, Cursor Agent, Devin), where sandboxes block background sockets. |
 | D10 | Secret redaction | **Own layered redactor** (revised from "full scanner") | Embedding gitleaks cost +5 MB and ~200 modules and caught 1 of 4 sample secrets. Instead: provider token formats, private keys, URL/connection-string/`curl -u` passwords, secret-looking assignments, high-entropy strings; applied to prompts and commands. |
 | D15 | Shell commands in payload | **Keep structure, strip code** | Heredoc bodies, inline interpreter scripts and quoted strings > 120 chars replaced by placeholders, then redacted; capped at 1000 chars. Repo root, home dir and user name masked in all free text. |
 | D16 | Endpoint | **`https://hook.swarmia.com/cli`** default, overridable | Server side lives in the `hook` repo. |
@@ -196,6 +196,42 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 8. **Global install** (D2) + MDM docs.
 9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
 
+Added after reviewing git-ai (2026-10-06; see "Lessons from git-ai"), in
+suggested order:
+
+10. **Token usage and cost per session.** Hooks carry no token counts, but every
+    Claude Code payload has `transcript_path`. At session end (and
+    incrementally), read the agent's transcript and sum input/output/cache
+    tokens and cost per model; add them to the payload. Covers use case #6
+    (cost per commit/PR). git-ai ports its parsing and deduplication from
+    ccusage (MIT) for Claude Code and Codex. Payload fields are additive (no
+    schema bump); tell the `hook` consumer.
+11. **Reflog-based commit candidates.** Identify commits created on this
+    machine from the worktree's HEAD reflog (`commit:`, `commit (initial):`,
+    `commit (merge):` entries, corroborated by the branch reflog) instead of
+    relying only on `user.email`. Pulled, rebased and cherry-picked commits never
+    produce those entries; people with several emails are covered. Keep the
+    author filter as the fallback when the reflog has expired or is missing.
+12. **Shell edit fallback.** Snapshots miss commands that run in another repo or
+    worktree, files with coarse mtimes, and runs where Pre/Post didn't pair
+    up — git-ai saw the same in real usage. (a) Snapshot the repository of the
+    command's working directory, not only the project's. (b) Record every Bash
+    call's time window durably; when attributing a commit, give still-
+    unattributed lines in a file whose mtime/ctime falls within ±3 s of a
+    window to that session, tagged so it can be measured separately. Validate
+    against dogfood data ("via shell" counts, unattributed lines) first.
+13. **Attribution fuzzer.** A randomized harness that simulates agent edits,
+    human edits, formatter runs, shell codegen, amends, rebases and squashes
+    against real repositories, and measures matcher precision and recall per
+    class. Complements golden cases and dogfood data; runs in CI on a fixed
+    seed and longer locally. git-ai's `docs/attribution-fuzzer-spec.md` is a
+    reference.
+14. **"Unknown", not "human".** Lines the CLI can't attribute are *unknown*:
+    we have no evidence a human wrote them. Make that explicit in the payload
+    docs and in how Swarmia computes AI% (the denominator is attributed +
+    unknown lines, and unknown must not be reported as human). Later, optionally:
+    "known human" evidence from IDE extensions reporting saves, as git-ai does.
+
 ## Matcher notes (from milestone 2)
 
 - **Alignment instead of the RFC cascade.** One line-level Smith-Waterman local
@@ -275,6 +311,34 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 - **Local paths leaked** (19 mentions of the home directory, plus the user
   name encoded in Claude's scratchpad paths) until masking was added.
 - Prompts can still contain pasted code; redaction can't tell.
+
+## Lessons from git-ai (reviewed 2026-10-06)
+
+git-ai (`../git-ai`, Rust, v1.7.6) solves the same problem with opposite
+choices on two fronts; what it does well became milestones 10–14 and a D9 note.
+
+- **Evidence only, never similarity.** Agents call `git-ai checkpoint` when
+  they write files (including via Bash); a line is attributed only on that
+  evidence, carried across rewrites by git's own tree diffs. No false
+  positives from look-alike lines — but formatter output and anything the
+  checkpoints missed becomes "unknown". We match content after the fact, which
+  survives formatters (`normalized`) at a precision risk we should measure
+  (milestone 13).
+- **Exact history via trace2, no hooks or wrapper.** A daemon receives git's
+  trace2 events over a socket and uses reflog cursors to learn exactly which
+  commits each commit/rebase/cherry-pick produced, then migrates attribution
+  notes. Accurate, but costly: its spec lists several failed approaches and
+  needs a fuzzer to stay correct. We keep recompute-against-reachable-commits
+  plus server-side squash propagation; revisit if dogfood data shows
+  rebase/cherry-pick misattribution.
+- **Storage:** git notes (`refs/notes/ai`) for attribution, readable by anyone
+  with repo access; prompts in a local SQLite (or uploaded for paying teams).
+  We already chose HTTPS delivery and no git storage.
+- **Metrics agree with ours:** `ai_additions` (committed with AI attribution)
+  and `ai_accepted` (accepted without human edits) ≈ our exact+normalized vs
+  modified.
+- **Known human:** IDE extensions (VS Code, JetBrains, + others) report saved
+  files, so lines are AI / known human / unknown (milestone 14).
 
 ## Still open
 
