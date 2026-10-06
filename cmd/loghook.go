@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -101,10 +100,11 @@ func appendLine(path string, line []byte) error {
 	}
 	defer f.Close()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	unlock, err := lockFile(f)
+	if err != nil {
 		return fmt.Errorf("locking %s: %w", path, err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer unlock()
 
 	if _, err := f.Write(line); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)

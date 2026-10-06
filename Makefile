@@ -15,8 +15,8 @@ LDFLAGS := -s -w \
 # npm platform packages: <dir>:<GOOS>:<GOARCH>. The <dir> uses Node's
 # platform-arch naming (process.platform-process.arch), which the launcher in
 # npm/cli/bin/swarmia-cli maps to the @swarmia/cli-<dir> package.
-# Windows is intentionally excluded: the log file locking uses syscall.Flock
-# (POSIX only). Adding Windows needs a LockFileEx-based implementation first.
+# Windows is not shipped yet. It compiles (cmd/lock_windows.go uses LockFileEx)
+# and CI cross-builds it, but it is untested.
 NPM_PLATFORMS := \
 	darwin-arm64:darwin:arm64 \
 	darwin-x64:darwin:amd64 \
