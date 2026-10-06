@@ -543,3 +543,41 @@ func TestExecutableRefIsAbsolute(t *testing.T) {
 		t.Errorf("executableRef = %q, want an absolute path", ref)
 	}
 }
+
+// Installing into one of a project's settings files while the other already
+// logs events warns about double logging (but still installs).
+func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
+	repo := t.TempDir()
+	writeSettings(t, repo, map[string]any{"hooks": map[string]any{
+		"Stop": []any{grp("", "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook")},
+	}})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeLocal}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Warning: .claude/settings.json already runs swarmia-cli log-hook") {
+		t.Errorf("no duplicate warning; got:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".claude", "settings.local.json")); err != nil {
+		t.Errorf("local settings not written: %v", err)
+	}
+
+	// The reverse direction warns too; a clean project doesn't.
+	out.Reset()
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli", scope: scopeProject}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Warning: .claude/settings.local.json already runs") {
+		t.Errorf("no reverse warning; got:\n%s", out.String())
+	}
+	clean := t.TempDir()
+	os.Mkdir(filepath.Join(clean, ".claude"), 0o755)
+	out.Reset()
+	if err := runInstall(&out, clean, installOpts{binaryRef: "swarmia-cli", scope: scopeLocal}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Warning") {
+		t.Errorf("unexpected warning for a clean project:\n%s", out.String())
+	}
+}

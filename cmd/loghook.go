@@ -130,26 +130,36 @@ func appendLine(path string, line []byte) error {
 // or local) already run swarmia-cli log-hook, without our user-scope flag.
 func projectHasLogHook(dir string) bool {
 	for _, name := range []string{"settings.json", "settings.local.json"} {
-		data, err := os.ReadFile(filepath.Join(dir, ".claude", name))
-		if err != nil {
-			continue
+		if settingsRunLogHook(filepath.Join(dir, ".claude", name)) {
+			return true
 		}
-		var doc map[string]any
-		if json.Unmarshal(data, &doc) != nil {
-			continue
-		}
-		hooks, _ := doc["hooks"].(map[string]any)
-		for _, groups := range hooks {
-			gs, _ := groups.([]any)
-			for _, g := range gs {
-				gm, _ := g.(map[string]any)
-				for _, h := range asSlice(gm, "hooks") {
-					hm, _ := h.(map[string]any)
-					cmd, _ := hm["command"].(string)
-					if strings.Contains(cmd, binaryName) && strings.Contains(cmd, "log-hook") &&
-						!strings.Contains(cmd, skipIfProjectHooksFlag) {
-						return true
-					}
+	}
+	return false
+}
+
+// settingsRunLogHook reports whether a Claude Code settings file runs
+// swarmia-cli log-hook unconditionally (not as a user-scope hook that stands
+// down for project hooks).
+func settingsRunLogHook(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc map[string]any
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+	hooks, _ := doc["hooks"].(map[string]any)
+	for _, groups := range hooks {
+		gs, _ := groups.([]any)
+		for _, g := range gs {
+			gm, _ := g.(map[string]any)
+			for _, h := range asSlice(gm, "hooks") {
+				hm, _ := h.(map[string]any)
+				cmd, _ := hm["command"].(string)
+				if strings.Contains(cmd, binaryName) && strings.Contains(cmd, "log-hook") &&
+					!strings.Contains(cmd, skipIfProjectHooksFlag) {
+					return true
 				}
 			}
 		}

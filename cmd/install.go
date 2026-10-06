@@ -95,6 +95,9 @@ type agentConfig struct {
 	name         string
 	settingsPath func(repoDir string, scope installScope) (path string, ok bool)
 	install      func(path, hookCommand string, dryRun bool) (hookChanges, error)
+	// duplicates lists other settings files that already log this project's
+	// events, so installing into scope would log every event twice.
+	duplicates func(repoDir string, scope installScope) []string
 }
 
 // hookChanges counts what an install did (or, in a dry run, would do) to one
@@ -138,6 +141,10 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			return fmt.Errorf("%s: %w", ag.name, err)
 		}
 		rel := displayPath(repoDir, path)
+		for _, dup := range ag.duplicates(repoDir, scope) {
+			fmt.Fprintf(out, "Warning: %s already runs swarmia-cli log-hook for this project; with both, every event is logged twice. Remove the hooks from one of them.\n",
+				displayPath(repoDir, dup))
+		}
 		if res.added == 0 && res.removed == 0 {
 			fmt.Fprintf(out, "%s (%s): already configured\n", ag.name, rel)
 			continue
@@ -235,6 +242,19 @@ var claudeCodeAgent = agentConfig{
 		default:
 			return filepath.Join(repoDir, ".claude", "settings.json"), dirExists(filepath.Join(repoDir, ".claude"))
 		}
+	},
+	duplicates: func(repoDir string, scope installScope) []string {
+		if scope == scopeUser {
+			return nil // user-scope hooks stand down where a project has its own
+		}
+		other := "settings.local.json"
+		if scope == scopeLocal {
+			other = "settings.json"
+		}
+		if path := filepath.Join(repoDir, ".claude", other); settingsRunLogHook(path) {
+			return []string{path}
+		}
+		return nil
 	},
 	install: func(path, hookCommand string, dryRun bool) (hookChanges, error) {
 		doc, err := readJSONObject(path)
