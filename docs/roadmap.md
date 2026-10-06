@@ -55,7 +55,9 @@ code we don't need.
 | D7 | Formatting-only differences | **Count as AI**, tagged `normalized` | Normalization per the RFC (whitespace, blank/comment lines, trailing `,`/`;`, quote style). |
 | D8 | Git-ref storage | **Delete** `process-logs` / `refs/ai-sessions/*` | Remains in git history. |
 | D9 | Agents | Claude Code, then **Codex, Cursor, Copilot CLI, Gemini CLI** | Capture layer needs a per-agent payload normalizer (session id, tool names, edit shapes differ). Order within the four: TBD. |
-| D10 | Secret redaction | **Full scanner locally** (gitleaks/betterleaks-style ruleset, Go library) | Applied to every free-text field before sending: prompts, Bash commands, tool inputs. Larger binary accepted. |
+| D10 | Secret redaction | **Own layered redactor** (revised from "full scanner") | Embedding gitleaks cost +5 MB and ~200 modules and caught 1 of 4 sample secrets. Instead: provider token formats, private keys, URL/connection-string/`curl -u` passwords, secret-looking assignments, high-entropy strings; applied to prompts and commands. |
+| D15 | Shell commands in payload | **Keep structure, strip code** | Heredoc bodies, inline interpreter scripts and quoted strings > 120 chars replaced by placeholders, then redacted; capped at 1000 chars. Repo root, home dir and user name masked in all free text. |
+| D16 | Endpoint | **`https://hook.swarmia.com/cli`** default, overridable | Server side lives in the `hook` repo. |
 | D11 | Windows | **Later, but design for it now** | Abstract file locking (flock) and paths behind small interfaces; keep state dir resolution OS-aware. |
 | D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. |
 | D13 | Local state location | **User state dir**: `~/.local/state/swarmia/<repo-id>/` (macOS: `~/Library/Application Support/swarmia/…`) | Never in `git status`, survives `git clean -fdx`, same for global and per-repo installs. Replaces in-repo `.swarmia/`. `<repo-id>` = hash of the common git dir so worktrees share state. |
@@ -163,8 +165,8 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 | Lazy commit scan + pushed-only rule | ✅ done (pushed flag per commit; delivery filters) |
 | Pending store + retention | ✅ done (`sessions/` store, 30-day retention) |
 | Background worker | 🟡 basic: detached `process --background` on SessionEnd / log ≥ 8 MB, single-run lock; delivery will hook in here |
-| Config (repo + user), token resolution, prompt opt-out | ❌ |
-| Secret redaction | ❌ |
+| Config (repo + user), token resolution, prompt opt-out | ✅ done (`internal/config`, `swarmia-cli config`) |
+| Secret redaction | ✅ done (`internal/redact`; payload builder in `internal/payload`) |
 | HTTPS sender | ❌ |
 | Other agents | ❌ |
 
@@ -181,8 +183,8 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
    personal setups (dogfooding in the monorepo).
 5. ✅ **Session store, retention, rewrite handling** (done 2026-10-06): see
    "Findings from milestone 5".
-6. **Config + redaction:** repo/user config, token resolution, prompt opt-out,
-   secret scanner.
+6. ✅ **Config + redaction** (done 2026-10-06): see D10, D15, D16 and
+   "Findings from milestone 6".
 7. **Delivery:** background worker, HTTPS sender (needs the monorepo endpoint).
 8. **Global install** (D2) + MDM docs.
 9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
@@ -257,6 +259,15 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 - **Worker:** `log-hook` launches `process --background` detached (setsid) on
   SessionEnd or when the log reaches 8 MB; a lock file keeps it single-run.
   Sessions that never end are still folded via the size trigger.
+
+## Findings from milestone 6
+
+- On this session's real payload: 85 heredoc bodies, 2 inline scripts and 25
+  long strings stripped; no command retained code. The redactor's only hit in
+  133 real prompts/commands was a Claude tool-use id (now exempt).
+- **Local paths leaked** (19 mentions of the home directory, plus the user
+  name encoded in Claude's scratchpad paths) until masking was added.
+- Prompts can still contain pasted code; redaction can't tell.
 
 ## Still open
 

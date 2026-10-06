@@ -4,13 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
+	"github.com/swarmia/swarmia-cli/internal/config"
+	"github.com/swarmia/swarmia-cli/internal/gitrepo"
+	"github.com/swarmia/swarmia-cli/internal/payload"
 	"github.com/swarmia/swarmia-cli/internal/report"
 )
 
@@ -33,8 +39,10 @@ var reportCmd = &cobra.Command{
 		"edits, and are authored by your git user.email (--all-authors to include\n" +
 		"everyone). 'pushed' marks commits a remote-tracking branch contains; only those\n" +
 		"would ever be sent.\n\n" +
-		"--json prints the per-session payload that delivery will send (draft format;\n" +
-		"secret redaction is not applied yet). Nothing is sent by this command.",
+		"--json prints exactly what delivery would send for each session: pushed\n" +
+		"commits only, secrets redacted, commands stripped of heredoc bodies and inline\n" +
+		"scripts, prompts withheld if configuration opts out (see `swarmia-cli config`).\n" +
+		"Nothing is sent by this command.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runReport(cmd.OutOrStdout())
@@ -42,7 +50,7 @@ var reportCmd = &cobra.Command{
 }
 
 func init() {
-	reportCmd.Flags().BoolVar(&reportJSON, "json", false, "print the draft delivery payload as JSON")
+	reportCmd.Flags().BoolVar(&reportJSON, "json", false, "print exactly what delivery would send, as JSON")
 	reportCmd.Flags().IntVar(&reportLimit, "limit", 5, "show the N most recent sessions (0 = all)")
 	reportCmd.Flags().StringVar(&reportSession, "session", "", "show only the session with this id (or id prefix)")
 	reportCmd.Flags().BoolVar(&reportAllAuth, "all-authors", false, "consider commits by any author, not just your git user.email")
@@ -62,8 +70,7 @@ func runReport(out io.Writer) error {
 	sessions := selectSessions(res.Sessions)
 
 	if reportJSON {
-		email := gitOutput(repo.Root, "config", "--get", "user.email")
-		return writeReportJSON(out, sessions, gitOutput(repo.Root, "remote", "get-url", "origin"), email)
+		return writeReportJSON(out, sessions, repo)
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", opts.StateDir)
@@ -143,91 +150,33 @@ func classBreakdown(f report.File) string {
 	return "  (" + strings.Join(parts, ", ") + ")"
 }
 
-// payload is the draft per-session delivery format (see the roadmap). It is
-// printed for inspection only; nothing sends it yet.
-type payload struct {
-	SessionID      string           `json:"session_id"`
-	Agent          string           `json:"agent"`
-	Model          string           `json:"model,omitempty"`
-	MatcherVersion string           `json:"matcher_version"`
-	CLIVersion     string           `json:"cli_version"`
-	Repo           string           `json:"repo,omitempty"`
-	AuthorEmail    string           `json:"author_email,omitempty"`
-	StartedAt      time.Time        `json:"started_at"`
-	EndedAt        time.Time        `json:"ended_at"`
-	Prompts        []payloadPrompt  `json:"prompts"`
-	Tools          []payloadTool    `json:"tools"`
-	Commits        []payloadCommit  `json:"commits"`
-	AILines        int              `json:"ai_lines_generated"`
-	AILinesKept    int              `json:"ai_lines_committed"`
-	Unsent         *payloadUnsentNB `json:"_note,omitempty"`
-}
-
-type payloadPrompt struct {
-	At   time.Time `json:"at"`
-	Text string    `json:"text"`
-}
-
-type payloadTool struct {
-	At      time.Time `json:"at"`
-	Name    string    `json:"name"`
-	File    string    `json:"file,omitempty"`
-	Command string    `json:"command,omitempty"`
-}
-
-type payloadCommit struct {
-	SHA    string         `json:"sha"`
-	Path   string         `json:"path"`
-	Pushed bool           `json:"pushed"`
-	Lines  []report.Range `json:"lines"`
-}
-
-type payloadUnsentNB struct {
-	Text string `json:"text"`
-}
-
-func writeReportJSON(out io.Writer, sessions []*report.Session, remote, email string) error {
-	payloads := make([]payload, 0, len(sessions))
+// writeReportJSON prints the payloads delivery would send for the sessions —
+// the same builder, with redaction, prompt opt-out and the pushed-only rule.
+func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Repo) error {
+	cfg, err := config.Load(repo.Root)
+	if err != nil {
+		return err
+	}
+	ctx := payload.Context{
+		RepoRoot:    repo.Root,
+		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin")),
+		AuthorEmail: gitOutput(repo.Root, "config", "--get", "user.email"),
+		CLIVersion:  version,
+		Prompts:     cfg.Prompts,
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		ctx.Home, ctx.UserName = home, filepath.Base(home)
+	}
+	if u, err := user.Current(); err == nil {
+		ctx.UserName = u.Username
+	}
+	payloads := make([]payload.Payload, 0, len(sessions))
 	for _, s := range sessions {
-		p := payload{
-			SessionID: s.ID, Agent: s.Agent, Model: s.Model,
-			MatcherVersion: attribution.Version, CLIVersion: version,
-			Repo: repoSlug(remote), AuthorEmail: email,
-			StartedAt: s.StartedAt, EndedAt: s.EndedAt,
-			Prompts: []payloadPrompt{}, Tools: []payloadTool{}, Commits: []payloadCommit{},
-			AILines: s.AILines(),
-			Unsent:  &payloadUnsentNB{Text: "draft: not sent; prompts are not redacted yet; only pushed commits would be included"},
-		}
-		for _, pr := range s.Prompts {
-			p.Prompts = append(p.Prompts, payloadPrompt{At: pr.At, Text: pr.Text})
-		}
-		for _, t := range s.Tools {
-			p.Tools = append(p.Tools, payloadTool{At: t.At, Name: t.Name, File: t.File, Command: t.Command})
-		}
-		for _, c := range s.Commits() {
-			for _, f := range c.Files {
-				p.Commits = append(p.Commits, payloadCommit{SHA: c.SHA, Path: f.Path, Pushed: c.Pushed, Lines: f.Lines})
-			}
-			p.AILinesKept += c.Survived()
-		}
-		payloads = append(payloads, p)
+		payloads = append(payloads, payload.Build(s, ctx))
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payloads)
-}
-
-// repoSlug turns a remote URL into host/owner/name, e.g.
-// git@github.com:acme/app.git → github.com/acme/app.
-func repoSlug(remote string) string {
-	s := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
-	for _, prefix := range []string{"https://", "http://", "ssh://", "git://"} {
-		s = strings.TrimPrefix(s, prefix)
-	}
-	if at := strings.Index(s, "@"); at >= 0 {
-		s = s[at+1:]
-	}
-	return strings.Replace(s, ":", "/", 1)
 }
 
 func gitOutput(dir string, args ...string) string {

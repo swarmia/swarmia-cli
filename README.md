@@ -164,7 +164,7 @@ recent agent session contributed to which commits:
 swarmia-cli report               # the 5 most recent sessions
 swarmia-cli report --limit 0     # all of them
 swarmia-cli report --session 7999d991
-swarmia-cli report --json        # the draft payload delivery would send
+swarmia-cli report --json        # exactly what delivery would send
 ```
 
 ```
@@ -195,6 +195,45 @@ How it decides:
 
 Edits include changes shell commands made (shown as "via shell"; see
 `log-hook`). Not yet covered: lines that moved to another file (renames).
+
+### `config`
+
+Shows the effective configuration and where each value comes from:
+
+```
+token:     (not set — nothing will be sent)
+endpoint:  https://hook.swarmia.com/cli  (default)
+prompts:   shared  (default)
+```
+
+Settings are read (never written) from, most specific first: the environment
+(`SWARMIA_TOKEN`, `SWARMIA_ENDPOINT`, `SWARMIA_PROMPTS`), the user's
+`~/.config/swarmia/config.json`, and the repository's `.swarmia.json`, which a
+team may commit — its token can only submit data. Both files use
+`{"token": "…", "endpoint": "…", "prompts": false}`. Prompts are shared unless
+*any* layer sets `prompts` to false, so you can always withhold your own
+(`SWARMIA_PROMPTS=0`).
+
+### What leaves the machine
+
+Nothing is sent yet. When delivery lands it will send exactly what
+`report --json` prints, built with these rules:
+
+- **No source code.** Attribution is line ranges in pushed commits. Shell
+  commands keep their shape but lose heredoc bodies, inline interpreter scripts
+  (`python -c`, `node -e`, …) and quoted strings over 120 characters. Tool
+  output is never included.
+- **Secrets redacted** from prompts and commands: provider token formats
+  (GitHub, GitLab, Slack, AWS, Google, Stripe, OpenAI, Anthropic, npm, SendGrid,
+  JWTs), private keys, passwords in URLs, connection strings and `curl -u`,
+  values of secret-looking assignments, and long random-looking strings. Each
+  becomes `[REDACTED:<kind>]`.
+- **Local details masked:** the repository root becomes `<repo>`, your home
+  directory `~`, and your user name `<user>`; tool file paths are
+  repository-relative and dropped when outside it.
+- **Only pushed commits**, and prompts only if configuration allows them.
+
+Prompts can still contain code you pasted into them.
 
 ### `state-dir`
 
@@ -268,6 +307,7 @@ cmd/
   statedir.go      the state-dir command
   report.go        the report command
   process.go       the process command and the background launch from log-hook
+  config.go        the config command
   detach_*.go      starting the background run detached (per OS)
   version.go       version command + build metadata
 internal/
@@ -277,6 +317,9 @@ internal/
                    (golden cases from real sessions in testdata/golden)
   report/          folds the log into stored sessions and attributes them to commits
   fslock/          cross-process file locks (per OS)
+  config/          layered configuration (environment, user, repository)
+  redact/          secret redaction and code stripping for free text
+  payload/         builds what delivery sends, applying the privacy rules
   snapshot/        captures what shell commands changed in the worktree
 npm/
   cli/             the @swarmia/cli package (JS launcher + package.json)
