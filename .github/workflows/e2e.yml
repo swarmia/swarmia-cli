@@ -9,31 +9,66 @@ on:
     - cron: "17 3 * * *" # nightly
   workflow_dispatch:
     inputs:
-      claude_version:
-        description: "Claude Code version or npm dist-tag (latest, stable, 2.1.292, …)"
-        default: "latest"
+      agent:
+        description: "Agent to test"
+        type: choice
+        options: [all, claude-code, codex]
+        default: all
+      version:
+        description: "Version or npm dist-tag (empty: each agent's channels)"
+        default: ""
       model:
-        description: "Model for the agent (alias or full name)"
-        default: "sonnet"
+        description: "Model for the agent (empty: Claude Code sonnet, Codex's default)"
+        default: ""
 
 permissions:
   contents: read
-  id-token: write # workload identity federation with Anthropic
 
 jobs:
-  claude-code:
-    name: Claude Code ${{ matrix.version }}
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      # Nightly: each agent's newest release and its other channel (Claude
+      # Code's stable, Codex's alpha), which separates "the agent changed"
+      # from "we broke something". On demand: what was asked for.
+      - id: plan
+        env:
+          AGENT: ${{ inputs.agent || 'all' }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          case $VERSION in
+            *[!A-Za-z0-9._-]*) echo "::error::Invalid version: $VERSION"; exit 1 ;;
+          esac
+          entries=""
+          add() { entries="$entries{\"agent\":\"$1\",\"version\":\"$2\"},"; }
+          for agent in claude-code codex; do
+            [ "$AGENT" = all ] || [ "$AGENT" = "$agent" ] || continue
+            if [ -n "$VERSION" ]; then add "$agent" "$VERSION"; continue; fi
+            case $agent in
+              claude-code) add claude-code latest; add claude-code stable ;;
+              codex) add codex latest; add codex alpha ;;
+            esac
+          done
+          echo "matrix={\"include\":[${entries%,}]}" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    name: ${{ matrix.agent }} ${{ matrix.version }}
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        # Nightly: the newest release and the stable channel, which separates
-        # "Claude Code changed" from "we broke something". On demand: the one asked for.
-        version: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.claude_version) || '["latest","stable"]') }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # The Anthropic federation rule trusts only this environment's OIDC subject
-    # (repo:swarmia/swarmia-cli:environment:e2e), and the environment only
-    # allows the main branch, so no other branch or fork can spend tokens.
+    permissions:
+      contents: read
+      id-token: write # workload identity federation with Anthropic
+    # The environment holds the credentials and only allows protected
+    # branches. The Anthropic federation rule trusts only its OIDC subject
+    # (repo:swarmia/swarmia-cli:environment:e2e), so no other branch or fork
+    # can spend tokens.
     environment: e2e
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,20 +84,42 @@ jobs:
 
       - name: Run the end-to-end suite
         env:
+          E2E_AGENT: ${{ matrix.agent }}
           E2E_CLAUDE_VERSION: ${{ matrix.version }}
-          E2E_MODEL: ${{ inputs.model || 'sonnet' }}
+          E2E_CODEX_VERSION: ${{ matrix.version }}
+          E2E_MODEL: ${{ matrix.agent == 'claude-code' && (inputs.model || 'sonnet') || '' }}
+          E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && inputs.model || '' }}
           E2E_ARTIFACTS: ${{ runner.temp }}/e2e-artifacts
           E2E_REQUIRE_AUTH: "1"
-          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ matrix.agent == 'claude-code' && vars.ANTHROPIC_FEDERATION_RULE_ID || '' }}
           ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
           ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          # Only Codex runs get the key, and the suite hands it to the agent
+          # process alone.
+          OPENAI_API_KEY: ${{ matrix.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
         run: make e2e
+
+      # Artifacts are public. The suite scrubs every credential it knows of as
+      # it writes them; this checks again, independently, and withholds the
+      # artifacts if the key is in them anyway.
+      - name: Check artifacts for credentials
+        if: always()
+        env:
+          OPENAI_API_KEY: ${{ matrix.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
+          DIR: ${{ runner.temp }}/e2e-artifacts
+        run: |
+          [ -d "$DIR" ] || exit 0
+          if [ -n "$OPENAI_API_KEY" ] && grep -rqF -- "$OPENAI_API_KEY" "$DIR"; then
+            rm -rf "$DIR"
+            echo "::error::A credential reached the artifacts; they are not uploaded."
+            exit 1
+          fi
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: e2e-claude-code-${{ matrix.version }}
+          name: e2e-${{ matrix.agent }}-${{ matrix.version }}
           path: ${{ runner.temp }}/e2e-artifacts
           if-no-files-found: ignore
