@@ -87,6 +87,9 @@ func Build(s *report.Session, ctx Context) Payload {
 	if s.Usage != nil {
 		p.Usage = s.Usage.Totals()
 	}
+	if p.Model == "" {
+		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start
+	}
 	if ctx.Prompts {
 		for _, pr := range s.Prompts {
 			p.Prompts = append(p.Prompts, Prompt{At: pr.At, Text: ctx.maskLocal(redact.Text(pr.Text))})
@@ -141,10 +144,29 @@ func relativePath(root, path string) string {
 	return filepath.ToSlash(rel)
 }
 
+// mainModel is the model that made the most calls in the main session (not
+// its subagents), or "" without usage.
+func mainModel(totals []usage.Totals) string {
+	best, most := "", int64(0)
+	for _, t := range totals {
+		if !t.Subagent && t.Requests > most {
+			best, most = t.Model, t.Requests
+		}
+	}
+	return best
+}
+
 // RepoSlug turns a remote URL into host/owner/name, e.g.
-// git@github.com:acme/app.git → github.com/acme/app.
+// git@github.com:acme/app.git → github.com/acme/app. A remote on the local
+// filesystem (a path or file:// URL) gives "": it names no repository Swarmia
+// could know, and would reveal a local path.
 func RepoSlug(remote string) string {
-	s := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
+	remote = strings.TrimSpace(remote)
+	if remote == "" || strings.HasPrefix(remote, "/") || strings.HasPrefix(remote, ".") ||
+		strings.HasPrefix(remote, "~") || strings.HasPrefix(remote, "file:") || filepath.IsAbs(remote) {
+		return ""
+	}
+	s := strings.TrimSuffix(remote, ".git")
 	for _, prefix := range []string{"https://", "http://", "ssh://", "git://"} {
 		s = strings.TrimPrefix(s, prefix)
 	}

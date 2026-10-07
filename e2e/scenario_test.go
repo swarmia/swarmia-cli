@@ -112,9 +112,14 @@ func TestClaudeCode(t *testing.T) {
 				}
 			}
 		}
+		// Trivial lines (`}`, `});`) can't be told apart by text, so the
+		// oracle can't judge them; they're left out on both sides.
 		var tp, fp, fn int
 		for path, lines := range introduced {
 			for n, text := range lines {
+				if normalizeLine(text) == "" {
+					continue
+				}
 				_, got := attributed[path][n]
 				want := agentLines[normalizeLine(text)]
 				switch {
@@ -130,6 +135,9 @@ func TestClaudeCode(t *testing.T) {
 		}
 		for path, lines := range attributed {
 			for n := range lines {
+				if text, ok := introduced[path][n]; ok && normalizeLine(text) == "" {
+					continue
+				}
 				if _, ok := introduced[path][n]; !ok {
 					fp++
 					t.Logf("attributed a line the commit didn't introduce: %s:%d", path, n)

@@ -2,6 +2,8 @@ package payload
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/report"
+	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
 var at = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -74,6 +77,24 @@ func TestBuildMasksLocalPaths(t *testing.T) {
 	}
 }
 
+// Headless sessions don't report their model at start; the main session's
+// usage names it.
+func TestBuildFallsBackToTheUsageModel(t *testing.T) {
+	s := session()
+	s.Model = ""
+	s.TranscriptPath = ""
+	s.Usage = &usage.Tracker{}
+	tr := filepath.Join(t.TempDir(), "s.jsonl")
+	line := func(id, model string) string {
+		return `{"type":"assistant","requestId":"r` + id + `","message":{"id":"m` + id + `","model":"` + model + `","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	}
+	os.WriteFile(tr, []byte(line("1", "claude-small")+line("2", "claude-big")+line("3", "claude-big")), 0o600)
+	s.Usage.Update(tr)
+	if p := Build(s, Context{}); p.Model != "claude-big" {
+		t.Errorf("model = %q, want claude-big", p.Model)
+	}
+}
+
 func TestBuildWithholdsPrompts(t *testing.T) {
 	p := Build(session(), Context{RepoRoot: "/src/app", Prompts: false})
 	if len(p.Prompts) != 0 || !p.PromptsWithheld {
@@ -90,6 +111,10 @@ func TestRepoSlug(t *testing.T) {
 		"https://github.com/acme/app.git":             "github.com/acme/app",
 		"https://x-token:secret@github.com/acme/app":  "github.com/acme/app",
 		"ssh://git@gitlab.example.com/group/sub/repo": "gitlab.example.com/group/sub/repo",
+		"/tmp/e2e/origin.git":                         "",
+		"../origin":                                   "",
+		"file:///srv/git/app.git":                     "",
+		"":                                            "",
 	} {
 		if got := RepoSlug(in); got != want {
 			t.Errorf("RepoSlug(%q) = %q, want %q", in, got, want)
