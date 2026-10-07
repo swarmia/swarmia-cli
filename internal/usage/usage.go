@@ -63,24 +63,42 @@ func (t *Totals) add(o Totals) {
 	t.WebFetchRequests += o.WebFetchRequests
 }
 
+// Format is a transcript format: which agent wrote it.
+type Format int
+
+const (
+	ClaudeTranscript Format = iota // Claude Code's session transcript
+	CodexRollout                   // Codex's session rollout
+)
+
 // Tracker accumulates usage across a session's transcript files.
 type Tracker struct {
 	Files map[string]*fileState `json:"files"`
 }
 
 type fileState struct {
-	Offset  int64              `json:"offset"`
-	LastKey string             `json:"last_key,omitempty"`
-	Totals  map[string]*Totals `json:"totals,omitempty"`
-	// Codex: the model of the current turn, and the last cumulative total.
+	Offset int64              `json:"offset"`
+	Totals map[string]*Totals `json:"totals,omitempty"`
+	claudeState
+	codexState
+}
+
+// claudeState is the last response counted, whose further content blocks
+// repeat its usage.
+type claudeState struct {
+	LastKey string `json:"last_key,omitempty"`
+}
+
+// codexState is the model of the current turn, and the last cumulative total.
+type codexState struct {
 	Model     string      `json:"model,omitempty"`
 	LastTotal *codexUsage `json:"last_total,omitempty"`
 }
 
-// Update reads whatever was appended to the session's transcript (and its
-// subagents' transcripts) since the last call. A file that shrank was
-// rewritten, so it is re-read from the start.
-func (t *Tracker) Update(transcriptPath string) error {
+// Update reads whatever was appended to the session's transcript (and, for
+// Claude Code, its subagents' transcripts) since the last call. A file that
+// shrank was rewritten, so it is re-read from the start.
+func (t *Tracker) Update(format Format, transcriptPath string) error {
 	if !filepath.IsAbs(transcriptPath) || !strings.HasSuffix(transcriptPath, ".jsonl") {
 		return nil // not a transcript path we recognise
 	}
@@ -88,8 +106,10 @@ func (t *Tracker) Update(transcriptPath string) error {
 		t.Files = map[string]*fileState{}
 	}
 	files := []string{transcriptPath}
-	sub, _ := filepath.Glob(filepath.Join(strings.TrimSuffix(transcriptPath, ".jsonl"), "subagents", "*.jsonl"))
-	files = append(files, sub...)
+	if format == ClaudeTranscript {
+		sub, _ := filepath.Glob(filepath.Join(strings.TrimSuffix(transcriptPath, ".jsonl"), "subagents", "*.jsonl"))
+		files = append(files, sub...)
+	}
 	var firstErr error
 	for i, path := range files {
 		st := t.Files[path]
@@ -97,7 +117,7 @@ func (t *Tracker) Update(transcriptPath string) error {
 			st = &fileState{}
 			t.Files[path] = st
 		}
-		if err := st.read(path, i > 0); err != nil && firstErr == nil && !os.IsNotExist(err) {
+		if err := st.read(path, format, i > 0); err != nil && firstErr == nil && !os.IsNotExist(err) {
 			firstErr = err
 		}
 	}
@@ -159,8 +179,8 @@ type entry struct {
 	} `json:"message"`
 }
 
-// usageMarker prefilters lines before JSON parsing: most transcript lines are
-// tool results and attachments without usage. The others mark Codex's lines.
+// The markers prefilter lines before JSON parsing: most transcript lines are
+// tool results and attachments without usage.
 var (
 	usageMarker       = []byte(`"usage"`)
 	tokenCountMarker  = []byte(`"token_count"`)
@@ -188,25 +208,21 @@ type codexLine struct {
 	} `json:"payload"`
 }
 
-// codex folds in one rollout line if it's a turn context (the model) or a
-// token count (the cumulative usage), and reports whether it was a Codex line.
-func (st *fileState) codex(line []byte) bool {
+// codexLine folds in one rollout line if it's a turn context (the model) or a
+// token count (the cumulative usage).
+func (st *fileState) codexLine(line []byte) {
+	if !bytes.Contains(line, tokenCountMarker) && !bytes.Contains(line, turnContextMarker) {
+		return
+	}
 	var l codexLine
 	if json.Unmarshal(line, &l) != nil {
-		return false
+		return
 	}
-	switch l.Type {
-	case "turn_context":
-		if l.Payload.Model != "" {
-			st.Model = l.Payload.Model
-		}
-		return true
-	case "event_msg":
-	default:
-		return false // e.g. a Claude Code line that mentions token_count
+	if l.Type == "turn_context" && l.Payload.Model != "" {
+		st.Model = l.Payload.Model
 	}
-	if l.Payload.Type != "token_count" || l.Payload.Info == nil || l.Payload.Info.TotalTokenUsage == nil {
-		return true // e.g. a rate-limit update without usage
+	if l.Type != "event_msg" || l.Payload.Type != "token_count" || l.Payload.Info == nil || l.Payload.Info.TotalTokenUsage == nil {
+		return // e.g. a rate-limit update without usage
 	}
 	cur := *l.Payload.Info.TotalTokenUsage
 	last := codexUsage{}
@@ -217,7 +233,7 @@ func (st *fileState) codex(line []byte) bool {
 		last = codexUsage{} // the counter restarted
 	}
 	if cur == last {
-		return true // repeated, no new response
+		return // repeated, no new response
 	}
 	st.LastTotal = &cur
 	model := st.Model
@@ -231,7 +247,6 @@ func (st *fileState) codex(line []byte) bool {
 		OutputTokens:          cur.OutputTokens - last.OutputTokens,
 		ReasoningOutputTokens: cur.ReasoningOutputTokens - last.ReasoningOutputTokens}
 	st.addTotals(t)
-	return true
 }
 
 func (st *fileState) addTotals(t Totals) {
@@ -246,7 +261,7 @@ func (st *fileState) addTotals(t Totals) {
 	}
 }
 
-func (st *fileState) read(path string, subagent bool) error {
+func (st *fileState) read(path string, format Format, subagent bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -278,41 +293,47 @@ func (st *fileState) read(path string, subagent bool) error {
 		st.Totals = map[string]*Totals{}
 	}
 	for _, line := range bytes.Split(data[:end], []byte("\n")) {
-		if (bytes.Contains(line, tokenCountMarker) || bytes.Contains(line, turnContextMarker)) && st.codex(line) {
-			continue
-		}
-		if !bytes.Contains(line, usageMarker) {
-			continue
-		}
-		var e entry
-		if json.Unmarshal(line, &e) != nil || e.Type != "assistant" || e.Message.Usage == nil {
-			continue
-		}
-		key := e.Message.ID + ":" + e.RequestID
-		if key == st.LastKey {
-			continue // another content block of the same response
-		}
-		st.LastKey = key
-		if e.Message.Model == "" || strings.HasPrefix(e.Message.Model, "<") {
-			continue // e.g. <synthetic> placeholders for errors
-		}
-		u := e.Message.Usage
-		speed := u.Speed
-		if speed == "" {
-			speed = "standard" // older transcripts omit it; fast mode always sets it
-		}
-		t := Totals{Model: e.Message.Model, Speed: speed, Subagent: subagent, Requests: 1,
-			InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadInputTokens: u.CacheReadInputTokens}
-		if c := u.CacheCreation; c != nil {
-			t.CacheCreation5mInputTokens, t.CacheCreation1hInputTokens = c.Ephemeral5m, c.Ephemeral1h
+		if format == CodexRollout {
+			st.codexLine(line)
 		} else {
-			t.CacheCreation5mInputTokens = u.CacheCreationInputTokens // the default cache duration
+			st.claudeLine(line, subagent)
 		}
-		if s := u.ServerToolUse; s != nil {
-			t.WebSearchRequests, t.WebFetchRequests = s.WebSearchRequests, s.WebFetchRequests
-		}
-		st.addTotals(t)
 	}
 	st.Offset += int64(end + 1)
 	return nil
+}
+
+// claudeLine folds in one transcript line if it's an API response's usage.
+func (st *fileState) claudeLine(line []byte, subagent bool) {
+	if !bytes.Contains(line, usageMarker) {
+		return
+	}
+	var e entry
+	if json.Unmarshal(line, &e) != nil || e.Type != "assistant" || e.Message.Usage == nil {
+		return
+	}
+	key := e.Message.ID + ":" + e.RequestID
+	if key == st.LastKey {
+		return // another content block of the same response
+	}
+	st.LastKey = key
+	if e.Message.Model == "" || strings.HasPrefix(e.Message.Model, "<") {
+		return // e.g. <synthetic> placeholders for errors
+	}
+	u := e.Message.Usage
+	speed := u.Speed
+	if speed == "" {
+		speed = "standard" // older transcripts omit it; fast mode always sets it
+	}
+	t := Totals{Model: e.Message.Model, Speed: speed, Subagent: subagent, Requests: 1,
+		InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadInputTokens: u.CacheReadInputTokens}
+	if c := u.CacheCreation; c != nil {
+		t.CacheCreation5mInputTokens, t.CacheCreation1hInputTokens = c.Ephemeral5m, c.Ephemeral1h
+	} else {
+		t.CacheCreation5mInputTokens = u.CacheCreationInputTokens // the default cache duration
+	}
+	if s := u.ServerToolUse; s != nil {
+		t.WebSearchRequests, t.WebFetchRequests = s.WebSearchRequests, s.WebFetchRequests
+	}
+	st.addTotals(t)
 }

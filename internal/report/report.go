@@ -398,7 +398,9 @@ func UpdateUsage(sessions []*Session) {
 		if s.Usage == nil {
 			s.Usage = &usage.Tracker{}
 		}
-		_ = s.Usage.Update(s.TranscriptPath)
+		if ag := agent.Lookup(s.Agent); ag != nil {
+			_ = s.Usage.Update(ag.Transcript, s.TranscriptPath)
+		}
 	}
 }
 

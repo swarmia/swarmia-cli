@@ -12,6 +12,7 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/codex"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
+	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
 // Agent is one supported coding agent.
@@ -27,6 +28,9 @@ type Agent struct {
 	// has: in ConfigDir for project and local scope, in userDir for user scope.
 	hooksFiles map[Scope]string
 	userDir    func() (string, error)
+	// Transcript is the format of the agent's session transcripts, which
+	// hold its token usage.
+	Transcript usage.Format
 	// hooksAtRepoRoot is set for agents that run hooks in the session's working
 	// directory without saying where the project is: their project is the
 	// enclosing repository.
@@ -42,6 +46,7 @@ var ClaudeCode = &Agent{
 	ConfigDir:   ".claude",
 	hooksFiles:  map[Scope]string{ScopeProject: "settings.json", ScopeLocal: "settings.local.json", ScopeUser: "settings.json"},
 	userDir:     claudeConfigDir,
+	Transcript:  usage.ClaudeTranscript,
 	isEditTool:  attribution.IsClaudeEditTool,
 	isShellTool: func(name string) bool { return name == "Bash" },
 	edits: func(payload []byte, root string) []attribution.Edit {
@@ -58,6 +63,7 @@ var Codex = &Agent{
 	ConfigDir:       ".codex",
 	hooksFiles:      map[Scope]string{ScopeProject: codex.HooksFile, ScopeUser: codex.HooksFile},
 	userDir:         codex.Home,
+	Transcript:      usage.CodexRollout,
 	hooksAtRepoRoot: true,
 	isEditTool:      attribution.IsCodexPatchTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
