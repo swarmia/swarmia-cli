@@ -100,9 +100,11 @@ Artifacts (agent output streams, transcripts, swarmia-cli sessions, payloads, a
 
 `.github/workflows/e2e.yml`: nightly and on demand (pick the Claude Code
 version), matrix `latest` × `stable` on Ubuntu, with `id-token: write` for
-federation. It needs the organization's `ANTHROPIC_*` federation variables to be
-available to this repository, and the federation rule to accept this
-repository's OIDC subject.
+federation. The job runs in the `e2e` GitHub environment, which only `main` may
+deploy to and which holds the `ANTHROPIC_*` federation variables. The
+federation rule accepts only that environment's OIDC subject,
+`repo:swarmia/swarmia-cli:environment:e2e`, so pull requests, forks and other
+branches can't obtain Anthropic credentials.
 
 ## Phases
 

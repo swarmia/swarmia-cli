@@ -1,0 +1,5 @@
+# Changes here run code on maintainers' machines (Claude Code hooks) or in CI
+# with access to Anthropic credentials, so they need the owner's review.
+* @mutru
+/.claude/ @mutru
+/.github/ @mutru
