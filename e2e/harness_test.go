@@ -292,6 +292,7 @@ type agentRun struct {
 	SessionID  string
 	ToolUses   []string // tool names, in order
 	Result     string   // the result subtype, e.g. "success"
+	Message    string   // the result text (the agent's answer, or the error)
 	IsError    bool
 	CostUSD    float64
 	NumTurns   int
@@ -385,6 +386,7 @@ func parseStream(data []byte) agentRun {
 			}
 		case "result":
 			r.Result, _ = m["subtype"].(string)
+			r.Message, _ = m["result"].(string)
 			r.IsError, _ = m["is_error"].(bool)
 			r.CostUSD, _ = m["total_cost_usd"].(float64)
 			if n, ok := m["num_turns"].(float64); ok {

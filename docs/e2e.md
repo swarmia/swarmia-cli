@@ -91,7 +91,9 @@ snapshots:
 4. **Payload**: required fields present; a fake secret planted in the prompt
    comes out `[REDACTED:…]`; no temp paths or user names.
 5. **Inconclusive vs failed**: if the agent didn't do the task (the function is
-   missing), the run is skipped as inconclusive rather than failed.
+   missing), the run is skipped as inconclusive rather than failed. An agent
+   that got no model response at all (a failed token exchange, an API outage)
+   fails the run.
 
 Artifacts (agent output streams, transcripts, swarmia-cli sessions, payloads, a
 `metrics.json`) go to `E2E_ARTIFACTS` when set; CI uploads them.

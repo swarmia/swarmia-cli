@@ -363,6 +363,12 @@ func (e *env) agentStep(w *agentWork, step, sessionID, prompt string, resume boo
 		}
 	}
 	r := e.runAgent(step, sessionID, prompt, resume)
+	// An error without any model call cost means the agent never reached the
+	// model (failed token exchange, API outage): a failure, not an inconclusive
+	// run where the agent just didn't do the task.
+	if r.IsError && r.CostUSD == 0 {
+		e.t.Fatalf("%s: the agent got no model response: %s", step, r.Message)
+	}
 	for _, l := range changedLines(before, snapshotTree(e.t, e.repo)) {
 		w.add(l)
 	}
