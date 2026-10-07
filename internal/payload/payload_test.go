@@ -89,7 +89,7 @@ func TestBuildFallsBackToTheUsageModel(t *testing.T) {
 		return `{"type":"assistant","requestId":"r` + id + `","message":{"id":"m` + id + `","model":"` + model + `","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
 	}
 	os.WriteFile(tr, []byte(line("1", "claude-small")+line("2", "claude-big")+line("3", "claude-big")), 0o600)
-	s.Usage.Update(tr)
+	s.Usage.Update(usage.ClaudeTranscript, tr)
 	if p := Build(s, Context{}); p.Model != "claude-big" {
 		t.Errorf("model = %q, want claude-big", p.Model)
 	}

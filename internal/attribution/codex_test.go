@@ -69,7 +69,7 @@ func TestCodexEdits(t *testing.T) {
 		"cwd":             "/repo/pkg",
 		"tool_input":      map[string]any{"command": samplePatch},
 	})
-	edits := Edits(AgentCodex, payload, "/repo")
+	edits := CodexEdits(payload, "/repo")
 	if len(edits) != 3 {
 		t.Fatalf("edits = %#v", edits)
 	}
@@ -93,17 +93,17 @@ func TestCodexEdits(t *testing.T) {
 		t.Errorf("replaced = %q, want %q", replaced, want)
 	}
 
-	// Outside the repository, other tools, other events, other agents: nothing.
+	// Outside the repository, other tools, other agents: nothing.
 	outside, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "apply_patch",
 		"cwd": "/elsewhere", "tool_input": map[string]any{"command": samplePatch}})
 	shell, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash",
 		"cwd": "/repo", "tool_input": map[string]any{"command": "ls"}})
 	for name, p := range map[string][]byte{"outside": outside, "shell": shell} {
-		if e := Edits(AgentCodex, p, "/repo"); len(e) != 0 {
+		if e := CodexEdits(p, "/repo"); len(e) != 0 {
 			t.Errorf("%s: %#v", name, e)
 		}
 	}
-	if e := Edits(AgentClaudeCode, payload, "/repo"); len(e) != 0 {
+	if e, ok := ClaudeEdit(payload, "/repo"); ok {
 		t.Errorf("a Codex payload read as Claude Code's: %#v", e)
 	}
 }

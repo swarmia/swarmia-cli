@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/swarmia/swarmia-cli/internal/attribution"
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
@@ -50,15 +50,18 @@ func init() {
 	logHookCmd.Flags().StringVar(&logFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
 	logHookCmd.Flags().BoolVar(&logSkipIfProjectHooks, strings.TrimPrefix(skipIfProjectHooksFlag, "--"), false,
 		"do nothing if the project's own agent settings run swarmia-cli log-hook (set by user-scope installs)")
-	logHookCmd.Flags().StringVar(&logAgent, "agent", attribution.AgentClaudeCode, "the agent sending the payloads: claude-code or codex")
+	logHookCmd.Flags().StringVar(&logAgent, "agent", agent.ClaudeCode.Name, "the agent sending the payloads: claude-code or codex")
 	rootCmd.AddCommand(logHookCmd)
 }
 
 func runLogHook(stdin io.Reader) error {
-	if logAgent != attribution.AgentClaudeCode && logAgent != attribution.AgentCodex {
+	ag := agent.Lookup(logAgent)
+	if ag == nil {
 		return fmt.Errorf("unknown --agent %q", logAgent)
 	}
-	if logSkipIfProjectHooks && projectHasLogHook(logAgent, projectDir()) {
+	dir := projectDir()
+	repo, repoErr := gitrepo.Find(dir)
+	if logSkipIfProjectHooks && projectHasLogHook(ag, dir, repo.Root) {
 		return nil // the project's own hook logs this event
 	}
 	payload, err := io.ReadAll(stdin)
@@ -89,16 +92,14 @@ func runLogHook(stdin io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("resolving log file: %w", err)
 	}
-	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Event: event}
-	if logAgent != attribution.AgentClaudeCode {
-		rec.Agent = logAgent
-	}
+	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
+	ev, _ := ag.Parse(payload)
 	// Best-effort: an unreadable repo state must not stop the event being logged.
-	if repo, err := gitrepo.Find(projectDir()); err == nil {
+	if repoErr == nil {
 		if st, err := repo.ReadState(); err == nil {
 			rec.Git = &events.Git{Root: repo.Root, Head: st.Head, Branch: st.Branch}
 		}
-		rec.Changes = snapshotShellCommand(repo, payload, filepath.Join(filepath.Dir(path), "snapshots"))
+		rec.Changes = snapshotShellCommand(repo, ev, filepath.Join(filepath.Dir(path), "snapshots"))
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -108,7 +109,7 @@ func runLogHook(stdin io.Reader) error {
 	if err := appendLine(path, line); err != nil {
 		return err
 	}
-	if shouldProcess(payload, path) {
+	if shouldProcess(ev, path) {
 		startBackgroundProcess(path)
 	}
 	return nil
@@ -143,28 +144,21 @@ func appendLine(path string, line []byte) error {
 	return nil
 }
 
-// projectHasLogHook reports whether the project's own settings for the agent
-// (Claude Code's shared or local settings, Codex's hooks.json) already run
-// swarmia-cli log-hook, without our user-scope flag. Claude Code passes the
-// project directory; Codex runs hooks wherever the session is, so its project
-// is the enclosing repository.
-func projectHasLogHook(agent, dir string) bool {
-	if agent == attribution.AgentCodex {
-		repo, err := gitrepo.Find(dir)
-		return err == nil && settingsRunLogHook(filepath.Join(repo.Root, ".codex", "hooks.json"))
-	}
-	for _, name := range []string{"settings.json", "settings.local.json"} {
-		if settingsRunLogHook(filepath.Join(dir, ".claude", name)) {
+// projectHasLogHook reports whether the project's own hooks for the agent
+// already run swarmia-cli log-hook, without our user-scope flag.
+func projectHasLogHook(ag *agent.Agent, projectDir, repoRoot string) bool {
+	for _, path := range ag.ProjectHooksFiles(projectDir, repoRoot) {
+		if hooksFileRunsLogHook(path) {
 			return true
 		}
 	}
 	return false
 }
 
-// settingsRunLogHook reports whether a Claude Code settings file runs
+// hooksFileRunsLogHook reports whether an agent's settings or hooks file runs
 // swarmia-cli log-hook unconditionally (not as a user-scope hook that stands
 // down for project hooks).
-func settingsRunLogHook(path string) bool {
+func hooksFileRunsLogHook(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -179,10 +173,7 @@ func settingsRunLogHook(path string) bool {
 		for _, g := range gs {
 			gm, _ := g.(map[string]any)
 			for _, h := range asSlice(gm, "hooks") {
-				hm, _ := h.(map[string]any)
-				cmd, _ := hm["command"].(string)
-				if strings.Contains(cmd, binaryName) && strings.Contains(cmd, "log-hook") &&
-					!strings.Contains(cmd, skipIfProjectHooksFlag) {
+				if cmd := hookCommand(h); runsSwarmia(cmd, "log-hook") && !strings.Contains(cmd, skipIfProjectHooksFlag) {
 					return true
 				}
 			}
@@ -191,29 +182,24 @@ func settingsRunLogHook(path string) bool {
 	return false
 }
 
-// snapshotShellCommand brackets a Bash tool call: before it runs, it snapshots
+// snapshotShellCommand brackets a shell tool call: before it runs, it snapshots
 // the worktree's dirty files; when it finishes (successfully or not), it returns
 // what the command authored. Edits through the agent's own edit tools are in
-// their payloads already, so only Bash needs this. Errors just mean no changes
-// are recorded — logging the event matters more.
-func snapshotShellCommand(repo gitrepo.Repo, payload []byte, dir string) []events.FileChange {
-	var p struct {
-		HookEventName string `json:"hook_event_name"`
-		ToolName      string `json:"tool_name"`
-		ToolUseID     string `json:"tool_use_id"`
-	}
-	if json.Unmarshal(payload, &p) != nil || p.ToolName != "Bash" || p.ToolUseID == "" {
+// their payloads already, so only shell calls need this. Errors just mean no
+// changes are recorded — logging the event matters more.
+func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) []events.FileChange {
+	if !ev.Tool.Shell || ev.Tool.UseID == "" {
 		return nil
 	}
 	store := snapshot.Store{Dir: dir}
-	switch p.HookEventName {
+	switch ev.Name {
 	case "PreToolUse":
 		store.Prune(time.Now())
 		if snap, err := store.Take(repo); err == nil {
-			_ = store.Save(p.ToolUseID, snap)
+			_ = store.Save(ev.Tool.UseID, snap)
 		}
 	case "PostToolUse", "PostToolUseFailure":
-		pre, ok := store.Load(p.ToolUseID)
+		pre, ok := store.Load(ev.Tool.UseID)
 		if !ok {
 			return nil
 		}
@@ -236,11 +222,8 @@ func snapshotShellCommand(repo gitrepo.Repo, payload []byte, dir string) []event
 
 // shouldProcess decides when to fold the log in the background: when a session
 // ends, and whenever the log has grown large (long-running sessions).
-func shouldProcess(payload []byte, logPath string) bool {
-	var p struct {
-		HookEventName string `json:"hook_event_name"`
-	}
-	if json.Unmarshal(payload, &p) == nil && p.HookEventName == "SessionEnd" {
+func shouldProcess(ev agent.Event, logPath string) bool {
+	if ev.Name == "SessionEnd" {
 		return true
 	}
 	fi, err := os.Stat(logPath)

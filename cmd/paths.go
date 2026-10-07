@@ -13,7 +13,8 @@ import (
 
 // projectDir is the directory the CLI operates against: $CLAUDE_PROJECT_DIR when
 // set (Claude Code exports it to hook commands), otherwise the current working
-// directory.
+// directory (where Codex runs hooks: the session's, maybe below the repository
+// root).
 func projectDir() string {
 	if base := os.Getenv("CLAUDE_PROJECT_DIR"); base != "" {
 		return base

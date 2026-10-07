@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/codex"
 )
 
@@ -118,7 +119,7 @@ func TestInstallCodexTrust(t *testing.T) {
 func TestInstallCodexScopes(t *testing.T) {
 	repo := codexRepo(t)
 	var out bytes.Buffer
-	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeLocal}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: agent.ScopeLocal}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Codex: no local scope") {
@@ -128,7 +129,7 @@ func TestInstallCodexScopes(t *testing.T) {
 	// User scope: only when Codex's home exists.
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "missing"))
 	out.Reset()
-	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeUser}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: agent.ScopeUser}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Codex: not detected") {
@@ -136,7 +137,7 @@ func TestInstallCodexScopes(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeUser}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: agent.ScopeUser}); err != nil {
 		t.Fatal(err)
 	}
 	doc := codexHooks(t, filepath.Join(home, "hooks.json"))

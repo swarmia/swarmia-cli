@@ -6,27 +6,6 @@ import (
 	"strings"
 )
 
-// Agents, as recorded with each event.
-const (
-	AgentClaudeCode = "claude-code"
-	AgentCodex      = "codex"
-)
-
-// Edits extracts the file edits in one hook payload from an agent: the files
-// its edit tool changed inside root, and the hunks it wrote. Shell commands
-// aren't covered here: their changes come from working-tree snapshots.
-func Edits(agent string, payload []byte, root string) []Edit {
-	switch agent {
-	case AgentCodex:
-		return CodexEdits(payload, root)
-	default:
-		if e, ok := ClaudeEdit(payload, root); ok {
-			return []Edit{e}
-		}
-		return nil
-	}
-}
-
 // IsCodexPatchTool reports whether a Codex tool name is its file-editing
 // tool. apply_patch is the canonical name; Write and Edit are aliases Codex
 // accepts in hook matchers, and are taken as such should it report them.

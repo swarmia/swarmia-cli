@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
@@ -210,40 +211,18 @@ func sortedSessions(m map[string]*Session) []*Session {
 	return list
 }
 
-// hookPayload is the subset of Claude Code hook fields folding reads.
-type hookPayload struct {
-	HookEventName  string `json:"hook_event_name"`
-	SessionID      string `json:"session_id"`
-	TranscriptPath string `json:"transcript_path"`
-	Model          string `json:"model"`
-	Prompt         string `json:"prompt"`
-	ToolName       string `json:"tool_name"`
-	ToolInput      struct {
-		FilePath string     `json:"file_path"`
-		Command  textOrNone `json:"command"`
-	} `json:"tool_input"`
-}
-
-// textOrNone is a string field that agents may also send as something else
-// (an argv array, say), which reads as empty instead of failing the record.
-type textOrNone string
-
-func (t *textOrNone) UnmarshalJSON(data []byte) error {
-	var s string
-	if json.Unmarshal(data, &s) == nil {
-		*t = textOrNone(s)
-	}
-	return nil
-}
-
 // Fold merges records into sessions (keyed by id), creating sessions as
 // needed. Records identical to one already seen in the same call are skipped:
 // that's an event logged twice by overlapping hooks.
 func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot string) {
 	seen := map[string]bool{}
 	for _, rec := range recs {
-		var p hookPayload
-		if json.Unmarshal(rec.Event, &p) != nil || p.SessionID == "" {
+		ag := agent.OfRecord(rec.Agent)
+		if ag == nil {
+			continue // from a newer swarmia-cli
+		}
+		ev, ok := ag.Parse(rec.Event)
+		if !ok || ev.SessionID == "" {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, rec.LoggedAt)
@@ -255,14 +234,10 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		} else {
 			seen[key] = true
 		}
-		agent := rec.Agent
-		if agent == "" {
-			agent = attribution.AgentClaudeCode
-		}
-		s, ok := sessions[p.SessionID]
+		s, ok := sessions[ev.SessionID]
 		if !ok {
-			s = &Session{ID: p.SessionID, Agent: agent, StartedAt: at, AILinesByPath: map[string]int{}}
-			sessions[p.SessionID] = s
+			s = &Session{ID: ev.SessionID, Agent: ag.Name, StartedAt: at, AILinesByPath: map[string]int{}}
+			sessions[ev.SessionID] = s
 		}
 		if s.AILinesByPath == nil {
 			s.AILinesByPath = map[string]int{}
@@ -273,19 +248,19 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		if at.After(s.EndedAt) {
 			s.EndedAt = at
 		}
-		if p.TranscriptPath != "" {
-			s.TranscriptPath = p.TranscriptPath
+		if ev.TranscriptPath != "" {
+			s.TranscriptPath = ev.TranscriptPath
 		}
-		switch p.HookEventName {
+		switch ev.Name {
 		case "SessionStart":
-			if p.Model != "" {
-				s.Model = p.Model
+			if ev.Model != "" {
+				s.Model = ev.Model
 			}
 			s.Ended = false // resumed
 		case "UserPromptSubmit":
-			s.Prompts = append(s.Prompts, Prompt{At: at, Text: p.Prompt})
-			if s.Model == "" && p.Model != "" { // Codex sends the model with every event
-				s.Model = p.Model
+			s.Prompts = append(s.Prompts, Prompt{At: at, Text: ev.Prompt})
+			if s.Model == "" && ev.Model != "" { // Codex sends the model with every event
+				s.Model = ev.Model
 			}
 		case "SessionEnd":
 			s.Ended = true
@@ -294,13 +269,10 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 			if rec.Git != nil && rec.Git.Root != "" {
 				root = rec.Git.Root
 			}
-			edits := attribution.Edits(agent, rec.Event, root)
-			tool := Tool{At: at, Name: p.ToolName, File: p.ToolInput.FilePath, Command: string(p.ToolInput.Command)}
-			if agent == attribution.AgentCodex && attribution.IsCodexPatchTool(p.ToolName) {
-				tool.Command = "" // the patch itself, not a command
-				if len(edits) > 0 {
-					tool.File = filepath.Join(root, filepath.FromSlash(edits[0].Path))
-				}
+			edits := ag.Edits(rec.Event, root)
+			tool := Tool{At: at, Name: ev.Tool.Name, File: ev.Tool.File, Command: ev.Tool.Command}
+			if tool.File == "" && len(edits) > 0 { // e.g. a patch, which names its files inside
+				tool.File = filepath.Join(root, filepath.FromSlash(edits[0].Path))
 			}
 			s.Tools = append(s.Tools, tool)
 			for _, e := range edits {
@@ -426,7 +398,9 @@ func UpdateUsage(sessions []*Session) {
 		if s.Usage == nil {
 			s.Usage = &usage.Tracker{}
 		}
-		_ = s.Usage.Update(s.TranscriptPath)
+		if ag := agent.Lookup(s.Agent); ag != nil {
+			_ = s.Usage.Update(ag.Transcript, s.TranscriptPath)
+		}
 	}
 }
 

@@ -41,6 +41,16 @@ type claudeToolResponse struct {
 	OriginalFile *string `json:"originalFile"`
 }
 
+// IsClaudeEditTool reports whether a Claude Code tool name is one of its
+// file-editing tools, whose payloads ClaudeEdit reads.
+func IsClaudeEditTool(name string) bool {
+	switch name {
+	case "Write", "Edit", "MultiEdit":
+		return true
+	}
+	return false
+}
+
 // ClaudeEdit extracts the edit from a Claude Code hook payload. ok is false for
 // anything that isn't an Edit, MultiEdit or Write of a file inside root.
 //
