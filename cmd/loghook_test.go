@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 )
@@ -55,6 +56,38 @@ func TestLockFileExcludesSecondOpener(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("second lock not acquired after release")
 	}
+}
+
+// Committed hook commands run on binaries of every version in use: an older
+// binary must log the event, and exit 0, when a newer install added a flag it
+// doesn't know. A flag it can't parse must not fail the hook either.
+func TestLogHookToleratesFlagsFromOtherVersions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	t.Cleanup(func() {
+		logFile, logAgent, logSkipIfProjectHooks = "", agent.ClaudeCode.Name, false
+		rootCmd.SetArgs(nil)
+		rootCmd.SetIn(nil)
+	})
+	run := func(args ...string) {
+		t.Helper()
+		rootCmd.SetArgs(append([]string{"log-hook", "--file", path}, args...))
+		rootCmd.SetIn(strings.NewReader(`{"hook_event_name":"Stop","session_id":"s1"}`))
+		if err := rootCmd.Execute(); err != nil {
+			t.Errorf("log-hook %v: %v, want no error (exit 0)", args, err)
+		}
+	}
+
+	run("--from-the-future", "--with-value", "x", "--agent", "codex", "--and=this")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"agent":"codex"`)) || bytes.Count(data, []byte("\n")) != 1 {
+		t.Errorf("want one codex event despite unknown flags, got:\n%s", data)
+	}
+
+	run("--skip-if-project-hooks=maybe") // a known flag with a bad value
 }
 
 func TestRunLogHookWrapsPayload(t *testing.T) {

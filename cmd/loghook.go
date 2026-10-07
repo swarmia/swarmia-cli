@@ -37,6 +37,11 @@ var logHookCmd = &cobra.Command{
 	// our behalf; RunE always returns nil so a logging failure can't fail the hook.
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// Hook commands are committed to repositories, so binaries of different
+	// versions run them: a flag added later must not fail an older binary's
+	// hook on every event. Unknown flags are ignored; any other flag error is
+	// reported and the event skipped, still exiting 0.
+	FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := runLogHook(cmd.InOrStdin()); err != nil {
 			// Non-blocking: surface in the transcript but still exit 0.
@@ -51,6 +56,10 @@ func init() {
 	logHookCmd.Flags().BoolVar(&logSkipIfProjectHooks, strings.TrimPrefix(skipIfProjectHooksFlag, "--"), false,
 		"do nothing if the project's own agent settings run swarmia-cli log-hook (set by user-scope installs)")
 	logHookCmd.Flags().StringVar(&logAgent, "agent", agent.ClaudeCode.Name, "the agent sending the payloads: claude-code or codex")
+	logHookCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		fmt.Fprintf(os.Stderr, "swarmia-cli log-hook: %v\n", err)
+		return nil
+	})
 	rootCmd.AddCommand(logHookCmd)
 }
 
