@@ -37,7 +37,7 @@ var reportCmd = &cobra.Command{
 		"are attributed to it, each classed as exact, normalized (only reformatted) or\n" +
 		"modified (edited by a human).\n\n" +
 		"Commits are considered if they are on any branch, were made after the session's\n" +
-		"edits, and are yours: authored with your git user.email, or created on this\n" +
+		"edits, and are yours: authored with your git email, or created on this\n" +
 		"machine according to the reflog (--all-authors to include everyone). 'pushed' marks commits a remote-tracking branch contains; only those\n" +
 		"would ever be sent.\n\n" +
 		"--json prints exactly what delivery would send for each session: pushed\n" +
@@ -54,7 +54,7 @@ func init() {
 	reportCmd.Flags().BoolVar(&reportJSON, "json", false, "print exactly what delivery would send, as JSON")
 	reportCmd.Flags().IntVar(&reportLimit, "limit", 5, "show the N most recent sessions (0 = all)")
 	reportCmd.Flags().StringVar(&reportSession, "session", "", "show only the session with this id (or id prefix)")
-	reportCmd.Flags().BoolVar(&reportAllAuth, "all-authors", false, "consider commits by any author, not just your git user.email")
+	reportCmd.Flags().BoolVar(&reportAllAuth, "all-authors", false, "consider commits by any author, not just your git email")
 	reportCmd.Flags().StringVar(&reportFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
 	rootCmd.AddCommand(reportCmd)
 }
@@ -234,7 +234,7 @@ func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
 	ctx := payload.Context{
 		RepoRoot:    repo.Root,
 		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin")),
-		AuthorEmail: gitOutput(repo.Root, "config", "--get", "user.email"),
+		AuthorEmail: authorEmail(repo.Root),
 		CLIVersion:  version,
 		Prompts:     cfg.Prompts,
 	}
@@ -245,6 +245,20 @@ func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
 		ctx.UserName = u.Username
 	}
 	return ctx
+}
+
+// authorEmail is the email the developer's next commit in dir would carry:
+// $GIT_AUTHOR_EMAIL, else user.email (git var resolves it as git commit does).
+// It's "" when neither is set rather than the address git would guess from
+// the user and host names, which would only leak the hostname. The name is
+// set to a placeholder: it's unused, and git refuses a missing one too.
+func authorEmail(dir string) string {
+	ident := gitOutput(dir, "-c", "user.useConfigOnly=true", "-c", "user.name=-", "var", "GIT_AUTHOR_IDENT")
+	start, end := strings.LastIndexByte(ident, '<'), strings.LastIndexByte(ident, '>')
+	if start < 0 || end < start {
+		return ""
+	}
+	return ident[start+1 : end]
 }
 
 func gitOutput(dir string, args ...string) string {

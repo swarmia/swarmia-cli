@@ -101,7 +101,7 @@ func processOptions(logFlag string, byAuthor, wait bool) (report.ProcessOptions,
 		Now:      time.Now(),
 	}
 	if byAuthor {
-		opts.AuthorEmail = gitOutput(repo.Root, "config", "--get", "user.email")
+		opts.AuthorEmail = authorEmail(repo.Root)
 	}
 	return opts, repo, nil
 }

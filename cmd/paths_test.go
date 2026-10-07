@@ -123,3 +123,32 @@ func TestRunLogHookRecordsGitState(t *testing.T) {
 		t.Errorf("git = %+v, want %+v", rec.Git, want)
 	}
 }
+
+// The email sent with sessions, and used to recognise the developer's
+// commits, is the one their commits carry: $GIT_AUTHOR_EMAIL over user.email.
+// Without either it's empty, never git's guess from the user and host names.
+func TestAuthorEmail(t *testing.T) {
+	repo := initRepo(t)
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
+	os.Unsetenv("GIT_AUTHOR_EMAIL")
+	t.Setenv("EMAIL", "")
+	os.Unsetenv("EMAIL")
+
+	if got := authorEmail(repo); got != "" {
+		t.Errorf("unconfigured: %q, want none (not a guess)", got)
+	}
+	git(t, repo, "config", "user.email", "dev@example.com")
+	if got := authorEmail(repo); got != "dev@example.com" {
+		t.Errorf("user.email without user.name: %q, want dev@example.com", got)
+	}
+	git(t, repo, "config", "user.name", "Dev <Name>")
+	if got := authorEmail(repo); got != "dev@example.com" {
+		t.Errorf("user.email: %q, want dev@example.com", got)
+	}
+	t.Setenv("GIT_AUTHOR_EMAIL", "work@example.com")
+	if got := authorEmail(repo); got != "work@example.com" {
+		t.Errorf("GIT_AUTHOR_EMAIL: %q, want work@example.com", got)
+	}
+}
