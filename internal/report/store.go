@@ -18,6 +18,13 @@ import (
 // Retention is how long a session is kept after its last activity.
 const Retention = 30 * 24 * time.Hour
 
+// SessionFormat is the version of the session file format this binary writes
+// and reads. Binaries of different versions share a repository's state (every
+// worktree does, and each may have its own swarmia-cli), so bump it when an
+// older binary would lose or misread something in a new session file: older
+// binaries then leave such sessions, and their events, alone.
+const SessionFormat = 1
+
 // Store keeps one JSON file per session under Dir. Files are owner-only: they
 // hold prompts and the agent's code.
 type Store struct {
@@ -29,15 +36,18 @@ func (st Store) path(id string) string {
 }
 
 // List loads every stored session, newest first. Unreadable files are skipped.
-func (st Store) List() ([]*Session, error) {
+// Sessions stored by a newer swarmia-cli, in a format this one doesn't know,
+// aren't loaded but listed in newer by id, to be left alone.
+func (st Store) List() (sessions []*Session, newer map[string]bool, err error) {
 	entries, err := os.ReadDir(st.Dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	m := map[string]*Session{}
+	newer = map[string]bool{}
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -47,19 +57,25 @@ func (st Store) List() ([]*Session, error) {
 			continue
 		}
 		var s Session
-		if json.Unmarshal(data, &s) == nil && s.ID != "" {
-			m[s.ID] = &s
+		if json.Unmarshal(data, &s) != nil || s.ID == "" {
+			continue
 		}
+		if s.Format > SessionFormat {
+			newer[s.ID] = true
+			continue
+		}
+		m[s.ID] = &s
 	}
-	return sortedSessions(m), nil
+	return sortedSessions(m), newer, nil
 }
 
-// Save writes sessions atomically (temp file + rename).
+// Save writes sessions atomically (temp file + rename), in SessionFormat.
 func (st Store) Save(sessions ...*Session) error {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return err
 	}
 	for _, s := range sessions {
+		s.Format = SessionFormat
 		data, err := json.Marshal(s)
 		if err != nil {
 			return err
@@ -134,7 +150,7 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 	defer unlock()
 
 	st := Store{Dir: filepath.Join(opts.StateDir, "sessions")}
-	sessions, err := st.List()
+	sessions, newer, err := st.List()
 	if err != nil {
 		return res, err
 	}
@@ -142,7 +158,7 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 	for _, s := range sessions {
 		byID[s.ID] = s
 	}
-	if res.Folded, err = foldLog(opts.LogPath, st, byID, opts.FallbackRoot); err != nil {
+	if res.Folded, err = foldLog(opts.LogPath, st, byID, newer, opts.FallbackRoot); err != nil {
 		return res, err
 	}
 
@@ -165,7 +181,11 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 // concurrent hook appends land either in this batch or after it. A crash
 // between saving and truncating would fold that batch again on the next run
 // (records are deduplicated within a batch, not across).
-func foldLog(path string, st Store, byID map[string]*Session, fallbackRoot string) (int, error) {
+//
+// Records a newer swarmia-cli wrote, in a format this one doesn't know, and
+// records of sessions stored in a newer format (newer, by id) stay in the log,
+// byte for byte, for a newer swarmia-cli to fold.
+func foldLog(path string, st Store, byID map[string]*Session, newer map[string]bool, fallbackRoot string) (int, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -187,18 +207,32 @@ func foldLog(path string, st Store, byID map[string]*Session, fallbackRoot strin
 	if len(bytes.TrimSpace(data)) == 0 {
 		return 0, nil
 	}
-	recs, err := events.Read(bytes.NewReader(data))
-	if err != nil {
-		return 0, err
-	}
+	var recs []events.Record
+	var kept []byte
 	touched := map[string]bool{}
-	for _, rec := range recs {
+	for line := range bytes.Lines(data) {
+		rec, ok := events.Parse(line)
+		if !ok {
+			continue // a torn write
+		}
 		var p struct {
 			SessionID string `json:"session_id"`
 		}
-		if json.Unmarshal(rec.Event, &p) == nil && p.SessionID != "" {
+		json.Unmarshal(rec.Event, &p)
+		if rec.Newer() || newer[p.SessionID] {
+			kept = append(kept, line...)
+			if !bytes.HasSuffix(line, []byte("\n")) {
+				kept = append(kept, '\n')
+			}
+			continue
+		}
+		recs = append(recs, rec)
+		if p.SessionID != "" {
 			touched[p.SessionID] = true
 		}
+	}
+	if len(recs) == 0 {
+		return 0, nil // nothing this version can fold; leave the log as it is
 	}
 	Fold(byID, recs, fallbackRoot)
 	var changed []*Session
@@ -210,7 +244,15 @@ func foldLog(path string, st Store, byID map[string]*Session, fallbackRoot strin
 	if err := st.Save(changed...); err != nil {
 		return 0, err // the log is left intact; the next run retries
 	}
-	return len(recs), f.Truncate(0)
+	if err := f.Truncate(0); err != nil {
+		return 0, err
+	}
+	if len(kept) > 0 {
+		if _, err := f.WriteAt(kept, 0); err != nil {
+			return 0, err
+		}
+	}
+	return len(recs), nil
 }
 
 func processLock(stateDir string, wait bool) (func(), error) {
