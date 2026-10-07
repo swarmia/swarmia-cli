@@ -1,337 +1,309 @@
 # swarmia-cli
 
-The Swarmia Agent CLI captures local AI-agent activity so that AI-generated code
-can be reliably attributed to the commits it ends up in.
+The Swarmia Agent CLI answers a question coding-agent analytics can't: **which
+lines of which commits came from an AI coding agent, and from which session?**
 
-Coding agents like Claude Code, Codex, and Copilot expose activity through
-hooks. `swarmia-cli` registers as a hook, records what the agent does into a
-local log, and (in future increments) links that activity to your git history.
+It hooks into your coding agent (Claude Code today), records what the agent
+writes, works out on your machine which committed lines those edits became,
+and — once configured — sends Swarmia line numbers and session metadata.
+Never your source code.
 
-> **Status:** early. The CLI sets up its hooks (`install`), logs Claude Code
-> hook events locally (`log-hook`), attributes committed lines to agent sessions
-> (`process`, `report`), and delivers sessions to Swarmia (`send`) — but only
-> once a token is configured; without one nothing leaves the machine.
+> **Status:** early, but end-to-end tested against real Claude Code releases.
+> Claude Code is the only supported agent so far; Codex, Cursor, Copilot CLI
+> and Gemini CLI are planned. The npm package isn't published yet. Without a
+> token configured, nothing leaves your machine.
 
-## Installation
+## How it works
 
-### npm (as a dev dependency)
-
-```sh
-npm install --save-dev @swarmia/cli
+```
+coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
+                                                      │  (session end, in the background)
+                                                      ▼
+                     your git history ──▶ swarmia-cli process ──▶ per-session attribution
+                                                      │  (only with a token)
+                                                      ▼
+                                          Swarmia: line ranges + session metadata
 ```
 
-This gives the repo a `swarmia-cli` at `node_modules/.bin/swarmia-cli` — no global
-install needed, and `swarmia-cli install` detects it automatically. The package
-ships a tiny launcher plus a per-platform binary delivered as an optional
-dependency (macOS and Linux, arm64/x64); the right one installs for your host.
+1. **Capture.** On every prompt, tool call and session start/end, the agent
+   runs `swarmia-cli log-hook`, which appends the event to a log in a per-user
+   state directory. Edits made through the agent's edit tools are in the
+   events; edits made through shell commands (`sed`, codegen, scripts) are
+   found by snapshotting the working tree around each command.
+2. **Attribute.** When a session ends, a background `swarmia-cli process` folds
+   the log into a compact per-session record and matches the session's edits to
+   your commits, line by line: each committed line it introduced is `exact`,
+   `normalized` (only a formatter touched it) or `modified` (edited by a human).
+3. **Deliver.** If a Swarmia token is configured, changed sessions are sent:
+   line ranges in *pushed* commits, prompts (redacted), tool names and commands
+   (stripped of code), and token usage.
 
-### `go install`
+`swarmia-cli report` shows all of this locally, at any time.
+
+## Design principles
+
+### Privacy
+
+- **No source code leaves your machine.** Attribution is line numbers in
+  pushed commits; where code needs to be shown, Swarmia can read it from your
+  Git provider, which it's already connected to. Shell commands are sent with heredoc bodies, inline scripts and
+  long quoted strings removed. Tool output is never sent.
+- **Secrets are redacted** from prompts and commands before sending (provider
+  tokens, private keys, passwords in URLs and connection strings, secret-looking
+  assignments, random-looking strings), each becoming `[REDACTED:<kind>]`.
+- **Local details are masked:** the repository root becomes `<repo>`, your home
+  directory `~`, your user name `<user>`; file paths are repository-relative.
+- **You can withhold your prompts** (`SWARMIA_PROMPTS=0`), whatever the team's
+  configuration says.
+- **Nothing is sent without a token**, and only pushed commits are ever sent.
+  Local state lives outside your repositories, readable only by you.
+
+Prompts can still contain code you paste into them; redaction can't tell.
+
+### Never in the way
+
+- Hooks are passive: they always exit 0, never print to the agent, and take a
+  few milliseconds (≈70 ms around shell commands in a large repository, for the
+  snapshot). Everything heavier runs detached in the background.
+- Concurrent hooks are serialized with file locks; nothing is written into your
+  repository, git config or git hooks.
+- Delivery failures back off and retry; nothing is lost while the network or
+  Swarmia is unavailable.
+
+### Accurate, and honest about what it doesn't know
+
+- Matching runs locally, where both the agent's exact output and your committed
+  files are available. It survives formatters, line wrapping, small human
+  edits, moved code, amends, squashes and rebases.
+- A commit is only credited with lines **it introduced**, so later commits
+  that carry the agent's lines along get nothing.
+- Lines the CLI can't attribute are **unknown, not human**: a person may have
+  written them — or an agent session that wasn't recorded.
+
+### Tested against reality
+
+- **Unit and golden tests**, including cases recorded from real agent sessions.
+- **Two fuzzers** that track every line's true origin: one for the matcher
+  (human edits, formatter runs, moved code), one for the whole pipeline in real
+  git repositories (partial commits, amends, squashes, rebases onto a
+  teammate's commits). CI enforces minimum precision and recall.
+- **An end-to-end suite** ([docs/e2e.md](docs/e2e.md)) that runs real Claude
+  Code releases nightly on an open-source TypeScript repository: the agent
+  writes code, a script formats, tweaks, commits, rebases, squashes and
+  pushes, and the suite checks capture, attribution, token usage and payload
+  privacy against an independent oracle.
+
+## Using it
+
+### 1. Install the binary
 
 ```sh
-go install github.com/swarmia/swarmia-cli@latest
+go install github.com/swarmia/swarmia-cli@latest     # puts swarmia-cli in ~/go/bin
 ```
 
-This drops the `swarmia-cli` binary in `$(go env GOPATH)/bin` (usually
-`~/go/bin`). Make sure that directory is on your `$PATH`.
+Or from source: `git clone https://github.com/swarmia/swarmia-cli && cd
+swarmia-cli && make build` (Go 1.26+). An npm package (`@swarmia/cli`, as a
+repository devDependency) is on its way. macOS and Linux are supported.
 
-### From source
+### 2. Install the hooks
 
-```sh
-git clone https://github.com/swarmia/swarmia-cli.git
-cd swarmia-cli
-make build      # produces ./swarmia-cli with version metadata baked in
-```
+`swarmia-cli install` adds its hooks to the coding agents configured in a
+repository (Claude Code: a `.claude` directory). Pick a **scope**:
 
-Requires Go 1.26+. `make install` installs it onto your `$PATH` instead.
-
-## Usage
-
-```sh
-swarmia-cli --help
-swarmia-cli version
-```
-
-### `install`
-
-Sets up the Swarmia hooks in whatever supported coding agents are configured in
-the current repository (currently Claude Code — detected by a `.claude`
-directory):
-
-```sh
-swarmia-cli install                 # add hooks to detected agents
-swarmia-cli install --dry-run       # preview without writing
-swarmia-cli install --scope user    # just for you, in every project
-```
-
-`--scope` picks where the hooks go:
-
-| Scope | File | Who / where |
+| Scope | Writes to | Use it when |
 |---|---|---|
-| `project` (default) | `.claude/settings.json` | everyone working in the repo (it's committed) |
-| `local` | `.claude/settings.local.json` | just you, in this checkout (gitignored by Claude Code convention) |
-| `user` | `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) | just you, in every project — including new git worktrees, which don't get a checkout's untracked `settings.local.json` |
-
-User-scope hooks run `log-hook --skip-if-project-hooks`, so in a repository
-that wires swarmia-cli itself (like this one) events aren't logged twice.
-
-It adds the same wiring this repo uses — `log-hook` on prompts, all tool use, and
-session lifecycle. It is **idempotent** (hooks already present are left alone) and
-preserves any unrelated settings and hooks. Hooks for the removed `process-logs`
-subcommand, written by earlier versions, are cleaned up.
-
-For `local` and `user` scope, hooks invoke the swarmia-cli that ran `install`, by
-absolute path — handy for trying a development build in another repository:
+| `project` (default) | `.claude/settings.json` (committed) | the whole team should be tracked in this repository |
+| `local` | `.claude/settings.local.json` (gitignored) | you want it for yourself in one repository |
+| `user` | `~/.claude/settings.json` | you want it in every repository on this machine |
 
 ```sh
-make build && ./swarmia-cli install --dir ../other-repo --scope local
+swarmia-cli install                              # project scope, in the current repository
+swarmia-cli install --scope local                # just you, here
+swarmia-cli install --scope local --dir ../app   # just you, in another repository
+swarmia-cli install --dry-run                    # preview
 ```
 
-For `project` scope the command is auto-detected, in order:
+Things to know:
 
-1. a `swarmia-cli` binary at the repo root → `${CLAUDE_PROJECT_DIR}/swarmia-cli`
-   (handy during local development)
-2. an npm dependency at `node_modules/.bin/swarmia-cli` →
-   `${CLAUDE_PROJECT_DIR}/node_modules/.bin/swarmia-cli`
-3. otherwise a `swarmia-cli` on your `$PATH` → bare `swarmia-cli`
+- **`project`** hooks reference the CLI the way the repository provides it: a
+  `swarmia-cli` binary at the repository root (development), a
+  `node_modules/.bin/swarmia-cli` (npm devDependency), or one on `$PATH`.
+- **`local`** and **`user`** hooks point at the binary that ran `install`, by
+  absolute path — rebuilding it updates them.
+- **`local`** settings live in one checkout: new git worktrees don't get them,
+  so run `install --scope local --dir <worktree>` there too.
+- **`user`** scope captures every repository you open a coding agent in,
+  personal projects included. That stays local unless a token applies there —
+  but a token in your *user* config applies everywhere, and Swarmia only drops
+  repositories outside your organization after they've been sent. Prefer
+  `project` or `local` scope for work repositories.
+- `install` is idempotent, keeps your other settings and hooks, and warns if a
+  repository would end up with hooks in both of its settings files (every
+  event would be logged twice).
 
-Override it with `--binary`, and target another directory with `--dir`. After
-installing, reload hooks with `/hooks` in Claude Code (or start a fresh session).
+Reload hooks in Claude Code with `/hooks`, or start a new session.
 
-### `log-hook`
-
-Reads a Claude Code hook payload from stdin and appends it to a JSONL log, one
-event per line, wrapped with a capture timestamp and the project's git position
-(worktree root, HEAD commit and branch) at that moment:
-
-```json
-{"logged_at":"2026-07-10T19:02:37Z","git":{"root":"/src/app","head":"ec37b5d…","branch":"main"},"event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
-```
-
-`git` is omitted outside a repository; `head` is empty on a branch with no
-commits and `branch` is empty when HEAD is detached. The git state is read from
-`.git` files directly (no `git` process), so logging stays at a few milliseconds
-per event.
-
-It is a **passive** logger: it always exits 0 and writes nothing to stdout, so it
-can never block or interfere with the tool call that triggered it.
-
-**Shell commands.** Agents also change files through Bash (`sed`, codegen,
-scripts, heredocs), which their edit-tool payloads don't show. So around each
-Bash call `log-hook` snapshots the worktree: before the command it records the
-dirty files (copying their content into the state directory), and when the
-command finishes — `PostToolUse` or `PostToolUseFailure` — it diffs what changed
-and stores the result as `changes` on that event's record. Only lines the
-command *authored* are kept: lines it merely reformatted (`prettier --write`) or
-restored from git (`git stash`, `checkout`, `pull`) are excluded, by requiring a
-line's normalized text to occur more often afterwards than in the file before
-the command or in HEAD. This costs one `git status` per hook (≈70 ms in a
-14k-file repository); files larger than 1 MB and binary files are skipped.
-Human edits made while a command runs are indistinguishable from the command's. Concurrent
-invocations are serialized with a file lock, so parallel tool calls and
-subagents can't corrupt the log.
-
-The log file is chosen in this order:
-
-1. `--file <path>`
-2. `$SWARMIA_LOG_FILE`
-3. `events.jsonl` in the repository's [state directory](#state-dir)
-
-### `process`
-
-Brings the local session store up to date:
-
-- **Folds** the raw event log into one compact record per session under
-  `sessions/` in the state directory — prompts, tool calls and the extracted
-  edit hunks, without the bulky whole-file payloads (in practice ~6× smaller) —
-  and empties the log. Identical records logged twice are folded once.
-- **Attributes** each session's edits to commits (see `report`), storing the
-  result. It is recomputed only when the session's edits or candidate commits
-  change; commits that were amended or rebased away stop being reachable, so
-  they drop out and their replacements are matched. Pushed status is refreshed
-  every run.
-- **Prunes** sessions with no activity for 30 days.
-
-`log-hook` starts it in the background (detached, never delaying the agent) when
-a session ends or the log passes 8 MB, and `report` runs it before printing, so
-running it by hand is rarely needed. Only one run proceeds at a time.
-
-### `report`
-
-Brings the session store up to date (as `process` does) and prints what each
-recent agent session contributed to which commits:
+### 3. See what it captured
 
 ```sh
-swarmia-cli report               # the 5 most recent sessions
-swarmia-cli report --limit 0     # all of them
-swarmia-cli report --session 7999d991
-swarmia-cli report --json        # exactly what delivery would send
+swarmia-cli report                 # the 5 most recent sessions
+swarmia-cli report --limit 0       # all of them
+swarmia-cli report --json          # exactly what would be sent
 ```
 
 ```
 Session 7999d991  claude-opus-4-8  2026-10-06 16:43 → 17:00
-  2 prompt(s), 10 edit(s), 1698 AI line(s) at session end
-  59e69c6  local   Add line-level matcher for attributing agent edits to commi…
+  2 prompt(s), 10 edit(s) (3 via shell), 1698 AI line(s) at session end
+  277 model call(s): 100.3M input tokens (98% cache reads), 408k output
+  59e69c6  pushed  Add line-level matcher for attributing agent edits to commi…
       internal/attribution/align.go                 339 line(s)  (318 exact, 2 normalized, 19 modified)
       internal/attribution/normalize.go              77 line(s)
   960 of 1698 AI line(s) committed unchanged or reformatted (56%)
 ```
 
-How it decides:
+### 4. Send to Swarmia
 
-- **Candidate commits** are non-merge commits on any branch, made after the
-  session's edits, that touch an edited file and are yours: authored with your
-  git `user.email`, or — per the reflogs of your worktrees — created on this
-  machine (commits under another email, rebased picks, cherry-picks).
-  `--all-authors` lifts that filter.
-- **A line counts for a commit only if that commit introduced it** (relative to
-  its parent), so later commits that merely carry the agent's lines along get
-  nothing.
-- **Classes:** `exact`; `normalized` — only a formatter changed it (whitespace,
-  quotes, trailing commas, line wrapping); `modified` — recognisably the agent's
-  line, edited by a human.
-- **Unlisted lines are unknown, not human.** A commit's other lines may come
-  from a person, an unrecorded agent session, another file, or a missed shell
-  edit; the CLI has no evidence either way.
-- **AI lines at session end** counts the agent's non-blank lines still present
-  after its last edit to each file; lines it wrote and then replaced itself
-  don't count.
-- **pushed / local** shows whether a remote-tracking branch contains the commit.
-  Only pushed commits will ever be sent.
+Configure a token (from Swarmia; it looks like `swm_cli_…`). It is
+**write-only** — it can submit sessions for its organization and nothing else —
+so a team can commit it in `.swarmia.json` at the repository root, or you can
+keep it in `~/.config/swarmia/config.json`:
 
-Edits include changes shell commands made (shown as "via shell"; see
-`log-hook`). Not yet covered: lines that moved to another file (renames).
-
-### `config`
-
-Shows the effective configuration and where each value comes from:
-
-```
-token:     (not set — nothing will be sent)
-endpoint:  https://hook.swarmia.com/cli  (default)
-prompts:   shared  (default)
+```json
+{ "token": "swm_cli_…" }
 ```
 
-Settings are read (never written) from, most specific first: the environment
-(`SWARMIA_TOKEN`, `SWARMIA_ENDPOINT`, `SWARMIA_PROMPTS`), the user's
-`~/.config/swarmia/config.json`, and the repository's `.swarmia.json`, which a
-team may commit — its token can only submit data. Both files use
-`{"token": "…", "endpoint": "…", "prompts": false}`. Prompts are shared unless
-*any* layer sets `prompts` to false, so you can always withhold your own
-(`SWARMIA_PROMPTS=0`).
+Settings can also come from the environment: `SWARMIA_TOKEN`,
+`SWARMIA_ENDPOINT` (default `https://hook.swarmia.com/cli`), and
+`SWARMIA_PROMPTS=0` to withhold your prompts. The environment wins over your
+user file, which wins over the repository's. Check what applies:
 
-### What leaves the machine
+```sh
+swarmia-cli config
+```
 
-Nothing is sent without a token. With one, delivery sends exactly what
-`report --json` prints, built with these rules:
+From then on, sessions are sent in the background when they end, and again
+when they change (for instance when you push a commit). `swarmia-cli send`
+sends right away; `send --dry-run` shows how many would go.
 
-- **No source code.** Attribution is line ranges in pushed commits. Shell
-  commands keep their shape but lose heredoc bodies, inline interpreter scripts
-  (`python -c`, `node -e`, …) and quoted strings over 120 characters. Tool
-  output is never included.
-- **Secrets redacted** from prompts and commands: provider token formats
-  (Swarmia, GitHub, GitLab, Slack, AWS, Google, Stripe, OpenAI, Anthropic, npm,
-  SendGrid, JWTs), private keys, passwords in URLs, connection strings and `curl -u`,
-  values of secret-looking assignments, and long random-looking strings. Each
-  becomes `[REDACTED:<kind>]`.
-- **Local details masked:** the repository root becomes `<repo>`, your home
-  directory `~`, and your user name `<user>`; tool file paths are
-  repository-relative and dropped when outside it.
-- **Only pushed commits**, and prompts only if configuration allows them.
-- **Token usage** per model is read from the agent's transcript (usage fields
-  only — nothing else in the transcript is read or kept) and sent as counts;
-  Swarmia prices them.
+### Commands
 
-Prompts can still contain code you pasted into them.
+| Command | What it does |
+|---|---|
+| `install` | add hooks to the coding agents in a repository |
+| `report` | show recent sessions and the committed lines they produced |
+| `config` | show the effective configuration and where it comes from |
+| `send` | send changed sessions to Swarmia now |
+| `process` | fold the event log and attribute sessions (runs automatically) |
+| `state-dir` | print where this repository's local state lives |
+| `log-hook` | the hook itself; agents call it |
+| `version` | print version and build information |
 
-### `send`
+## Internals
 
-Delivers sessions to Swarmia. Background `process` runs (at session end) do
-this on their own once a token is configured; `send` does it now, ignoring
-throttling and backoff. `send --dry-run` only counts what would go.
+### Capture: `log-hook`
 
-- Each session is sent as its complete current payload (what `report --json`
-  prints) in a gzipped `POST <endpoint>/sessions` with the token as a bearer
-  token. The server keeps the latest version of each session.
-- A session is sent again only when its payload changes — it continued, or a
-  commit was pushed — and at most every 15 minutes while it's still going.
-- The endpoint checks each session's shape, queues it, and answers per
-  session: a rejected session (e.g. `repository unknown` without an `origin`
-  remote) isn't retried until it changes, and `report` shows why. Processing is
-  asynchronous, so "sent" means queued — the CLI can't see whether Swarmia later
-  stored or dropped a session (a status endpoint is planned). Failures back off
-  (exponentially, honouring `Retry-After`; six hours for an unusable token), and
-  nothing is lost meanwhile.
-- Tokens look like `swm_cli_` + 64 hex characters; `config` and `send` warn if
-  the configured one doesn't.
+Each hook payload is appended to `events.jsonl` in the repository's state
+directory, one record per line, with a timestamp and the repository's position
+— worktree root, HEAD commit and branch, read from `.git` files without
+spawning git:
 
-The ingest API is specified in [docs/ingest-api.md](docs/ingest-api.md).
+```json
+{"logged_at":"2026-07-10T19:02:37Z","git":{"root":"/src/app","head":"ec37b5d…","branch":"main"},"event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
+```
 
-### `state-dir`
+Around each Bash call, `log-hook` snapshots the worktree's dirty files before
+the command and, when it finishes (`PostToolUse` or `PostToolUseFailure`),
+diffs what changed and stores it as `changes` on that record. Only lines the
+command *authored* count: a line's normalized text must occur more often
+afterwards than in the file before the command or in HEAD, which excludes
+formatter runs over human code and content restored by git (`stash`,
+`checkout`, `pull`). Files over 1 MB and binary files are skipped; human edits
+saved while a command runs are indistinguishable from the command's.
 
-Local state lives **outside the repository**, so it never shows up in
-`git status` and survives `git clean -fdx`. Each repository gets its own
-directory, keyed by its git common dir, so all worktrees of a clone share one:
+The log file is `--file`, else `$SWARMIA_LOG_FILE`, else the state directory's
+`events.jsonl`. Appends are serialized with a file lock. User-scope hooks run
+`log-hook --skip-if-project-hooks`, standing down in repositories that have
+their own swarmia-cli hooks.
+
+### State directory
+
+Local state lives outside the repository, so it never shows up in `git status`
+and survives `git clean -fdx`. One directory per repository, keyed by its git
+common dir, so all worktrees of a clone share it:
 
 | OS | Location |
 |---|---|
 | macOS | `~/Library/Application Support/swarmia/repos/<id>/` |
 | Linux | `$XDG_STATE_HOME/swarmia/repos/<id>/` (default `~/.local/state/…`) |
-| Windows (not shipped yet) | `%LocalAppData%\swarmia\repos\<id>\` |
 
-`<id>` is a short hash; a `repo.json` inside names the repository. Files are
-owner-only (`0600`), since they contain prompts and code. Override the base
-directory with `$SWARMIA_STATE_DIR`. Print the current repository's directory
-with:
+It holds `events.jsonl`, `sessions/` (one JSON record per session),
+`snapshots/` (for shell commands) and `repo.json` (which repository it is).
+Files are owner-only (`0600`). Override the base with `$SWARMIA_STATE_DIR`;
+`swarmia-cli state-dir` prints it.
 
-```sh
-swarmia-cli state-dir
-```
+### Processing: `process`
 
-## Setting up the Claude Code hook
+- **Fold:** the raw log becomes one compact record per session — prompts, tool
+  calls, edit hunks and the lines each edit replaced, without the whole-file
+  payloads (~6× smaller) — and the log is emptied. Identical records logged
+  twice fold once.
+- **Usage:** token counts are read incrementally from the agent's transcript
+  (usage fields only), counting each API response once.
+- **Attribute:** see below. Results are cached per session and recomputed only
+  when its edits or candidate commits change.
+- **Prune:** sessions inactive for 30 days are deleted.
+- **Deliver**, if a token is configured.
 
-`swarmia-cli` ships a ready-made hook configuration in
-[`.claude/settings.json`](.claude/settings.json). It registers `log-hook` for
-prompts, all tool use, and session lifecycle events.
+It runs detached from `log-hook` at session end (or when the log passes 8 MB),
+and before `report`. A lock keeps it to one run at a time.
 
-**Build the binary first** — the config invokes `${CLAUDE_PROJECT_DIR}/swarmia-cli`,
-so the compiled binary must exist at the repo root:
+### Attribution
 
-```sh
-make build
-```
+- **Candidate commits:** non-merge commits reachable from any ref, made after
+  the session's edits, touching an edited file, and yours — authored with your
+  `user.email`, or created on this machine according to your worktrees'
+  reflogs (other emails, rebase picks, cherry-picks). Amended or rebased-away
+  commits are unreachable, so they drop out and their replacements are matched.
+- **Matching:** each edit hunk is located in the committed file with a
+  line-level local alignment; matching lines are classed `exact`, `normalized`
+  (equal once whitespace, quotes, trailing commas and line wrapping are
+  ignored) or `modified` (at least half the tokens shared). A `modified` match
+  against a line the edit itself replaced is dropped: that commit holds the
+  pre-edit version.
+- **Introduced lines only:** a commit is credited only with lines it added
+  relative to its parent.
+- **Matcher version** (`internal/attribution.Version`) travels with every
+  result so results from a version later found wrong can be discounted.
 
-Then reload hooks with `/hooks` inside Claude Code (or start a fresh session).
-Events will stream into the repository's state directory:
+Not yet covered: code moved to another file (renames).
 
-```sh
-tail -f "$(swarmia-cli state-dir)/events.jsonl"
-```
+### Delivery
 
-Earlier versions logged to `.swarmia/events.jsonl` inside the repository; that
-directory is no longer used and can be deleted.
-
-To set this up in another repository, run [`swarmia-cli install`](#install) there
-instead of copying the block by hand — it detects the agent and writes the right
-`hooks`, choosing an appropriate command reference automatically.
+Each changed session's full payload — exactly `report --json` — goes in a
+gzipped `POST <endpoint>/sessions` with the token as a bearer token; the
+server keeps the latest version per session. Sessions are resent when their
+payload changes, at most every 15 minutes while still running. The endpoint
+answers per session (`accepted` = queued, or `rejected` with a reason that
+`report` shows); failures back off exponentially, honouring `Retry-After`, and
+for six hours on an unusable token. The contract is
+[docs/ingest-api.md](docs/ingest-api.md).
 
 ## Development
 
 ```sh
 make build         # compile ./swarmia-cli
-make test          # run tests
-make vet           # go vet
+make test          # unit tests, golden cases and fuzzers (with CI thresholds)
+make vet           # go vet (including the e2e package)
 make fmt           # gofmt -w
-make tidy          # go mod tidy
-make npm-binaries  # cross-compile per-platform binaries into the npm packages
-make clean         # remove build artifacts
+make e2e           # end-to-end with a real Claude Code release (docs/e2e.md)
+make npm-binaries  # cross-compile per-platform binaries into npm/platforms
 ```
 
-Attribution quality is measured by two fuzzers that track every line's true
-origin and compare it with what the CLI attributes: one for the matcher (agent
-edits followed by human edits, formatter runs and moved code), one for the whole
-pipeline in real git repositories (commits, partial commits, amends, squashes,
-rebases onto a teammate's fetched commits, shell edits). CI enforces minimum
-precision and recall; to explore further:
+This repository runs its own hooks from `.claude/settings.json`, which invokes
+`${CLAUDE_PROJECT_DIR}/swarmia-cli` — run `make build` before starting Claude
+Code here, then watch events with `tail -f "$(./swarmia-cli state-dir)/events.jsonl"`.
+
+Exploring attribution quality beyond the CI settings:
 
 ```sh
 go test ./internal/attribution -run TestAttributionFuzzer -v -fuzz.trials=5000 -fuzz.maxops=60
@@ -339,56 +311,39 @@ go test ./internal/report -run TestPipelineFuzzer -v -pfuzz.trials=100 -pfuzz.st
 go test ./internal/attribution -run '^$' -fuzz FuzzMatchHunk -fuzztime 1m   # invariants
 ```
 
-`make e2e` runs a real Claude Code release against a real open-source
-repository with swarmia-cli's hooks installed; see [docs/e2e.md](docs/e2e.md).
-It runs nightly in CI.
+Design notes and plans: [docs/roadmap.md](docs/roadmap.md).
 
-Project layout:
+### Layout
 
 ```
-main.go            thin entrypoint → cmd.Execute()
-cmd/
-  root.go          cobra root command
-  install.go       the install command (wires hooks into detected agents)
-  loghook.go       the log-hook command (captures hook payloads)
-  paths.go         project dir, state dir and log-file resolution
-  statedir.go      the state-dir command
-  report.go        the report command
-  process.go       the process command and the background launch from log-hook
-  config.go        the config command
-  send.go          the send command
-  detach_*.go      starting the background run detached (per OS)
-  version.go       version command + build metadata
+main.go            entrypoint → cmd.Execute()
+cmd/               the commands (cobra): install, log-hook, process, report,
+                   config, send, state-dir, version; detached background runs
 internal/
-  events/          the local event log format (written by log-hook)
-  gitrepo/         finds the enclosing repo and reads HEAD without spawning git
-  attribution/     matches agent edits to committed files, line by line
-                   (golden cases from real sessions in testdata/golden)
-  report/          folds the log into stored sessions and attributes them to commits
-  fslock/          cross-process file locks (per OS)
-  config/          layered configuration (environment, user, repository)
-  redact/          secret redaction and code stripping for free text
-  payload/         builds what delivery sends, applying the privacy rules
-  deliver/         sends payloads to the ingest endpoint (batching, backoff)
-  snapshot/        captures what shell commands changed in the worktree
-npm/
-  cli/             the @swarmia/cli package (JS launcher + package.json)
-  platforms/       one binary-only package per os/arch (@swarmia/cli-<os>-<arch>)
+  events/          the local event log format
+  gitrepo/         finds the repository and reads HEAD and reflogs without spawning git
+  snapshot/        what shell commands changed in the worktree
+  attribution/     matching agent edits to committed files (golden cases in testdata/)
+  report/          folding the log into sessions; attributing them to commits
+  usage/           token usage from agent transcripts
+  config/          layered configuration
+  redact/          secret redaction and code stripping
+  payload/         what delivery sends, with the privacy rules applied
+  deliver/         sending to the ingest endpoint
+  fslock/          cross-process file locks
+e2e/               the end-to-end suite (build tag e2e)
+npm/               the npm packages (launcher + one binary package per platform)
+docs/              roadmap, ingest API, end-to-end suite
 ```
 
 ### npm packaging
 
-`@swarmia/cli` follows the esbuild model: a small JS launcher
-(`npm/cli/bin/swarmia-cli`) plus one binary-only package per platform, published
-under `optionalDependencies` so npm installs only the host's binary. The launcher
-resolves and execs it, passing stdin/stdout/stderr and the exit code through
-unchanged.
-
-To cut a release: bump the version in every `npm/**/package.json` in lockstep, run
-`make npm-binaries` (fills each `npm/platforms/*/bin/`), then `npm publish` each
-platform package followed by `npm/cli`. The binaries are build artifacts and are
-gitignored. Windows is not packaged yet — the log-file locking is POSIX-only
-(`syscall.Flock`) and needs a `LockFileEx` implementation first.
+`@swarmia/cli` follows the esbuild model: a small launcher (`npm/cli/bin`) plus
+one binary-only package per platform under `optionalDependencies`, so npm and
+pnpm install only the host's binary. To cut a release: bump the version in
+every `npm/**/package.json` in lockstep, `make npm-binaries`, then `npm publish`
+each platform package followed by `npm/cli`. Windows builds compile but aren't
+packaged or tested yet.
 
 ## License
 
