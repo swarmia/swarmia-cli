@@ -38,3 +38,16 @@ func TestOracleHelpers(t *testing.T) {
 		t.Errorf("session id %q is not a UUIDv4", id)
 	}
 }
+
+func TestScrub(t *testing.T) {
+	e := &env{}
+	e.addSecret("short")
+	e.addSecret("sk-proj-abcdefghijkl")
+	out, found := e.scrub([]byte(`{"env":"OPENAI_API_KEY=sk-proj-abcdefghijkl","n":"short"}`))
+	if !found || string(out) != `{"env":"OPENAI_API_KEY=[E2E-SCRUBBED]","n":"short"}` {
+		t.Errorf("scrub = %s, %v", out, found)
+	}
+	if _, found := e.scrub([]byte("nothing here")); found {
+		t.Error("found a secret in clean text")
+	}
+}

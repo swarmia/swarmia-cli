@@ -53,6 +53,8 @@ type env struct {
 	artifacts string // where to keep logs (empty: don't)
 	auth      auth
 	base      []string // environment for every command
+	secrets   []string // credential values that must never reach the artifacts
+	leaked    bool     // a secret was found (and scrubbed) in an artifact
 }
 
 func newEnv(t *testing.T) *env {
@@ -70,6 +72,14 @@ func newEnv(t *testing.T) *env {
 	if e.artifacts != "" {
 		must(t, os.MkdirAll(e.artifacts, 0o755))
 	}
+	for _, k := range secretVars {
+		e.addSecret(os.Getenv(k))
+	}
+	t.Cleanup(func() {
+		if e.leaked {
+			t.Error("a credential reached the artifacts (scrubbed before upload); find out how")
+		}
+	})
 	gitconfig := filepath.Join(root, "gitconfig")
 	must(t, os.WriteFile(gitconfig, []byte(fmt.Sprintf(
 		"[user]\n\tname = %s\n\temail = %s\n[init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n", devName, devEmail)), 0o644))
@@ -122,15 +132,8 @@ func (e *env) try(dir string, extra []string, name string, args ...string) (stri
 }
 
 func (e *env) logCommand(dir, name string, args []string, out []byte, err error) {
-	if e.artifacts == "" {
-		return
-	}
-	f, ferr := os.OpenFile(filepath.Join(e.artifacts, "commands.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if ferr != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "$ (cd %s && %s %s)  # err=%v\n%s\n", dir, name, strings.Join(args, " "), err, truncate(string(out), 4000))
+	e.writeArtifact("commands.log", []byte(fmt.Sprintf("$ (cd %s && %s %s)  # err=%v\n%s\n",
+		dir, name, strings.Join(args, " "), err, truncate(string(out), 4000))), true)
 }
 
 func truncate(s string, n int) string {
@@ -146,14 +149,59 @@ func (e *env) keep(src, name string) {
 		return
 	}
 	if data, err := os.ReadFile(src); err == nil {
-		os.WriteFile(filepath.Join(e.artifacts, name), data, 0o644)
+		e.writeArtifact(name, data, false)
 	}
 }
 
 func (e *env) keepBytes(name string, data []byte) {
-	if e.artifacts != "" {
-		os.WriteFile(filepath.Join(e.artifacts, name), data, 0o644)
+	e.writeArtifact(name, data, false)
+}
+
+// secretVars are the caller's variables holding credentials. Their values
+// (and every OIDC token the suite mints) are scrubbed from artifacts: CI
+// uploads those publicly, unmasked, and an agent's transcript or output could
+// echo its environment.
+var secretVars = []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY",
+	"ACTIONS_ID_TOKEN_REQUEST_TOKEN"}
+
+func (e *env) addSecret(v string) {
+	if len(v) >= 8 { // shorter is no credential, and would scrub innocent text
+		e.secrets = append(e.secrets, v)
 	}
+}
+
+// scrub replaces every known secret in data, and reports whether it found one.
+func (e *env) scrub(data []byte) ([]byte, bool) {
+	found := false
+	for _, s := range e.secrets {
+		if bytes.Contains(data, []byte(s)) {
+			data, found = bytes.ReplaceAll(data, []byte(s), []byte("[E2E-SCRUBBED]")), true
+		}
+	}
+	return data, found
+}
+
+// writeArtifact is the one way into the artifacts directory: it scrubs
+// secrets at write time, so even a run killed by a timeout (which skips
+// cleanups) leaves nothing to leak.
+func (e *env) writeArtifact(name string, data []byte, appendTo bool) {
+	if e.artifacts == "" {
+		return
+	}
+	data, found := e.scrub(data)
+	if found {
+		e.leaked = true
+	}
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if appendTo {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	f, err := os.OpenFile(filepath.Join(e.artifacts, name), flags, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(data)
 }
 
 // --- setup ---------------------------------------------------------------------
@@ -280,6 +328,7 @@ func (e *env) agentEnv() []string {
 	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &tok) != nil || tok.Value == "" {
 		e.t.Fatalf("minting a GitHub OIDC token failed: HTTP %d", resp.StatusCode)
 	}
+	e.addSecret(tok.Value)
 	path := filepath.Join(e.root, fmt.Sprintf("oidc-%d.jwt", time.Now().UnixNano()))
 	must(e.t, os.WriteFile(path, []byte(tok.Value), 0o600))
 	return append(vars, "ANTHROPIC_IDENTITY_TOKEN_FILE="+path)
