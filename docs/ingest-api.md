@@ -167,7 +167,7 @@ cap the decompressed size, see Limits).
 | `matcher_version` | string (semver) | Version of the client's attribution rules. If a version is later found to attribute wrongly, the server can discount or flag results from it. |
 | `cli_version` | string | Client version that built this payload. |
 | `repo` | string, optional | The repository as `host/owner/name` (derived from the `origin` remote, e.g. `github.com/acme/app`; GitLab subgroups give `gitlab.com/group/sub/repo`). Empty/omitted if the repository has no `origin` remote. |
-| `author_email` | string, optional | The developer's git `user.email` in that repository — the same identity their commits carry. Use it to map the session to a Swarmia identity. |
+| `author_email` | string, optional | The email the developer's commits in that repository carry: `$GIT_AUTHOR_EMAIL`, else `user.email` (never one git guesses; absent if neither is set). Use it to map the session to a Swarmia identity. It's self-asserted — anyone with the token, which may be committed, can send any email — so it's fine for analytics but must not grant access to anything. For sessions with `commits`, those commits' authors, as Swarmia knows them from the Git provider, are the stronger mapping. |
 | `started_at` | string, RFC 3339 UTC | First event of the session. |
 | `ended_at` | string, RFC 3339 UTC | Last event seen so far (not necessarily the end — see `ended`). |
 | `ended` | boolean | Whether the agent reported the session's end. A later version may flip it back to `false` if the session is resumed. |

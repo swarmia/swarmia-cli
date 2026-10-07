@@ -34,8 +34,8 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
    your commits, line by line: each committed line it introduced is `exact`,
    `normalized` (only a formatter touched it) or `modified` (edited by a human).
 3. **Deliver.** If a Swarmia token is configured, changed sessions are sent:
-   line ranges in *pushed* commits, prompts (redacted), tool names and commands
-   (stripped of code), and token usage.
+   your git email, line ranges in *pushed* commits, prompts (redacted), tool
+   names and commands (stripped of code), and token usage.
 
 `swarmia-cli report` shows all of this locally, at any time.
 
@@ -50,6 +50,10 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
 - **Secrets are redacted** from prompts and commands before sending (provider
   tokens, private keys, passwords in URLs and connection strings, secret-looking
   assignments, random-looking strings), each becoming `[REDACTED:<kind>]`.
+- **You're identified by your git email** — the one your commits carry
+  (`$GIT_AUTHOR_EMAIL`, else `user.email`), which Swarmia already sees on your
+  commits. It's how Swarmia attributes sessions to you, and the only
+  identifying detail sent. Without either, sessions are sent without one.
 - **Local details are masked:** the repository root becomes `<repo>`, your home
   directory `~`, your user name `<user>`; file paths are repository-relative.
 - **You can withhold your prompts** (`SWARMIA_PROMPTS=0`), whatever the team's
