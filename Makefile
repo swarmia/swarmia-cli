@@ -23,7 +23,7 @@ NPM_PLATFORMS := \
 	linux-arm64:linux:arm64 \
 	linux-x64:linux:amd64
 
-.PHONY: all build install test vet fmt tidy clean npm-binaries
+.PHONY: all build install test vet fmt tidy clean npm-binaries e2e
 
 all: build ## Build the binary (default)
 
@@ -38,6 +38,10 @@ test: ## Run the test suite
 
 vet: ## Run go vet
 	go vet ./...
+	go vet -tags e2e ./e2e/
+
+e2e: ## Run the end-to-end suite with a real coding agent (see docs/e2e.md)
+	go test -tags e2e -count=1 -v -timeout 45m ./e2e/
 
 fmt: ## Format all Go source in place
 	gofmt -l -w .

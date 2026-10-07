@@ -39,7 +39,7 @@ jobs:
         run: go mod tidy -diff
 
       - name: Vet
-        run: go vet ./...
+        run: go vet ./... && go vet -tags e2e ./e2e/
 
       - name: Build
         run: go build ./...

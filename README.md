@@ -339,6 +339,10 @@ go test ./internal/report -run TestPipelineFuzzer -v -pfuzz.trials=100 -pfuzz.st
 go test ./internal/attribution -run '^$' -fuzz FuzzMatchHunk -fuzztime 1m   # invariants
 ```
 
+`make e2e` runs a real Claude Code release against a real open-source
+repository with swarmia-cli's hooks installed; see [docs/e2e.md](docs/e2e.md).
+It runs nightly in CI.
+
 Project layout:
 
 ```

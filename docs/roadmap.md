@@ -196,6 +196,18 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 8. **Global install** (D2) + MDM docs.
 9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
 
+15. 🟡 **End-to-end suite** ([docs/e2e.md](e2e.md)): a real Claude Code release
+    (`latest` and `stable`, installed from npm) does a task in `unjs/ufo` (MIT,
+    TypeScript, prettier) with our hooks, in a fully isolated environment;
+    checks capture completeness, usage, attribution against an oracle built
+    from the transcript, and payload privacy. Phase 1 done 2026-10-07 (setup
+    verified locally; agent steps need credentials). CI uses workload identity
+    federation like the monorepo — needs the org's `ANTHROPIC_*` variables
+    shared with this repo and the federation rule to accept its OIDC subject.
+    Watch: Claude Code's docs say `--bare` "will become the default for `-p`";
+    bare mode skips hooks, so headless sessions would stop reaching us — the
+    nightly `latest` run is what would catch it.
+
 Added after reviewing git-ai (2026-10-06; see "Lessons from git-ai"), in
 suggested order:
 
