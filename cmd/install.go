@@ -87,13 +87,13 @@ type installOpts struct {
 
 // agentConfig describes how to install into one supported coding agent:
 // whether it is used for a scope (ok is false when it isn't, and why explains
-// it), the hook command that finds swarmia-cli, and how to add our hooks to
-// its settings. New agents plug in by appending to supportedAgents.
+// it), the hook command that finds swarmia-cli, and the hooks to add to its
+// settings. New agents plug in by appending to supportedAgents.
 type agentConfig struct {
 	*agent.Agent
 	detected    func(repoDir string, scope agent.Scope) (ok bool, why string)
 	hookCommand func(ref binaryRef, scope agent.Scope) string
-	install     func(path, hookCommand string, dryRun bool) (hookChanges, error)
+	hooks       []hookSpec
 	// activate tells the user what's left to do once hooks are installed at
 	// path (and does it, where asked and possible).
 	activate func(out io.Writer, path string, opts installOpts) error
@@ -146,7 +146,7 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			continue
 		}
 		detected++
-		res, err := ag.install(path, ag.hookCommand(ref, scope), opts.dryRun)
+		res, err := installHooks(path, ag.hookCommand(ref, scope), ag.hooks, opts.dryRun)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ag.Title, err)
 		}
@@ -291,22 +291,7 @@ var claudeCodeAgent = agentConfig{
 		}
 		return nil
 	},
-	install: func(path, hookCommand string, dryRun bool) (hookChanges, error) {
-		doc, err := readJSONObject(path)
-		if err != nil {
-			return hookChanges{}, err
-		}
-		res := hookChanges{
-			removed: removeObsoleteHooks(doc),
-			added:   ensureHooks(doc, hookCommand, claudeHookSpecs),
-		}
-		if (res.added > 0 || res.removed > 0) && !dryRun {
-			if err := writeJSONObject(path, doc); err != nil {
-				return hookChanges{}, err
-			}
-		}
-		return res, nil
-	},
+	hooks: claudeHookSpecs,
 }
 
 // hookSpec is one hook to install: log-hook on an event, under a matcher,
@@ -327,24 +312,35 @@ var claudeHookSpecs = []hookSpec{
 	{"Stop", "", 0},
 }
 
-// ensureHooks adds the Swarmia hook set to a parsed settings document,
-// returning how many entries were newly added.
-func ensureHooks(doc map[string]any, logHook string, specs []hookSpec) int {
-	added := 0
+// installHooks adds log-hook, run by command, to an agent's settings file for
+// each spec, and removes obsolete swarmia-cli hooks. The file is only written
+// when something changed, and never in a dry run.
+func installHooks(path, command string, specs []hookSpec, dryRun bool) (hookChanges, error) {
+	doc, err := readJSONObject(path)
+	if err != nil {
+		return hookChanges{}, err
+	}
+	res := hookChanges{removed: removeObsoleteHooks(doc)}
 	for _, s := range specs {
-		if ensureHook(doc, s.event, s.matcher, logHook, "log-hook", s.timeout) {
-			added++
+		if ensureHook(doc, s, command) {
+			res.added++
 		}
 	}
-	return added
+	if (res.added > 0 || res.removed > 0) && !dryRun {
+		if err := writeJSONObject(path, doc); err != nil {
+			return hookChanges{}, err
+		}
+	}
+	return res, nil
 }
 
-// ensureHook makes sure hooks[event] contains a command hook running our
-// <subcmd>, under a group with the given matcher. It is a no-op (returns false)
+// ensureHook makes sure the spec's event has a command hook running our
+// log-hook, under a group with the spec's matcher. It is a no-op (returns false)
 // when such a hook already exists, matching any swarmia-cli command regardless of
 // how the binary is referenced so re-running with a different --binary won't
 // duplicate. Existing unrelated groups and hooks are preserved.
-func ensureHook(doc map[string]any, event, matcher, command, subcmd string, timeout int) bool {
+func ensureHook(doc map[string]any, spec hookSpec, command string) bool {
+	event, matcher := spec.event, spec.matcher
 	hooks := childMap(doc, "hooks")
 	arr, _ := hooks[event].([]any)
 
@@ -353,14 +349,14 @@ func ensureHook(doc map[string]any, event, matcher, command, subcmd string, time
 		if !ok || !matcherEquals(gm["matcher"], matcher) {
 			continue
 		}
-		if groupHasSwarmia(gm, subcmd) {
+		if groupHasSwarmia(gm, "log-hook") {
 			return false // already installed
 		}
 	}
 
 	newHook := map[string]any{"type": "command", "command": command}
-	if timeout > 0 {
-		newHook["timeout"] = timeout
+	if spec.timeout > 0 {
+		newHook["timeout"] = spec.timeout
 	}
 
 	// Prefer appending to an existing group with the same matcher.

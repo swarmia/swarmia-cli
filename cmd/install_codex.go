@@ -42,19 +42,7 @@ var codexAgent = agentConfig{
 		}
 		return command
 	},
-	install: func(path, hookCommand string, dryRun bool) (hookChanges, error) {
-		doc, err := readJSONObject(path)
-		if err != nil {
-			return hookChanges{}, err
-		}
-		res := hookChanges{added: ensureHooks(doc, hookCommand, codexHookSpecs)}
-		if res.added > 0 && !dryRun {
-			if err := writeJSONObject(path, doc); err != nil {
-				return hookChanges{}, err
-			}
-		}
-		return res, nil
-	},
+	hooks:    codexHookSpecs,
 	activate: activateCodex,
 }
 
