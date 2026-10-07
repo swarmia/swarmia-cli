@@ -230,7 +230,12 @@ suggested order:
     unattributed lines in a file whose mtime/ctime falls within ±3 s of a
     window to that session, tagged so it can be measured separately. Validate
     against dogfood data ("via shell" counts, unattributed lines) first.
-13. **Attribution fuzzer.** A randomized harness that simulates agent edits,
+13. ✅ **Attribution fuzzer** (done 2026-10-06; `internal/attribution/fuzz_test.go`):
+    matcher-level scenarios from this repo's own files; CI profiles "light"
+    (≤ 6 changes, precision ≥ 0.995, recall ≥ 0.98) and "heavy" (≤ 30,
+    ≥ 0.99 / ≥ 0.90), plus native `FuzzMatchHunk` invariants. See "Findings
+    from milestone 13". Not yet covered: git-level scenarios (amend, rebase,
+    squash, the introduced-lines rule). Original plan: A randomized harness that simulates agent edits,
     human edits, formatter runs, shell codegen, amends, rebases and squashes
     against real repositories, and measures matcher precision and recall per
     class. Complements golden cases and dogfood data; runs in CI on a fixed
@@ -321,6 +326,26 @@ suggested order:
 - **Local paths leaked** (19 mentions of the home directory, plus the user
   name encoded in Claude's scratchpad paths) until masking was added.
 - Prompts can still contain pasted code; redaction can't tell.
+
+## Findings from milestone 13
+
+Precision holds as post-edit changes pile up; recall degrades gracefully,
+mostly for `modified` lines (which need surrounding lines to anchor them).
+1,000 trials, seed 1:
+
+| changes per trial (max) | precision | recall | exact | normalized | modified |
+|---|---|---|---|---|---|
+| 6 | 1.000 | 0.993 | 0.996 | 0.987 | 0.976 |
+| 15 | 0.999 | 0.966 | 0.987 | 0.949 | 0.870 |
+| 30 | 0.998 | 0.921 | 0.977 | 0.890 | 0.755 |
+| 60 | 0.996 | 0.795 | 0.924 | 0.759 | 0.549 |
+
+(Class columns: share of those lines attributed at all.) The remaining false
+positives are boilerplate repeated across a file (`if err != nil {`,
+`return nil`, import lines) matched in the wrong place. Seeds 1–3 agree within
+±0.002 on precision and recall. Native fuzzing (6.4M executions) found no
+invariant violations. Recall for heavily edited code is the tuning target once
+dogfood data shows how much editing real sessions see.
 
 ## Lessons from git-ai (reviewed 2026-10-06)
 

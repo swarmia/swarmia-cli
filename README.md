@@ -323,6 +323,16 @@ make npm-binaries  # cross-compile per-platform binaries into the npm packages
 make clean         # remove build artifacts
 ```
 
+Attribution quality is measured by a fuzzer that simulates agent edits
+followed by human edits, formatter runs and moved code, and compares the
+matcher's classes with the truth. CI enforces minimum precision and recall; to
+explore further:
+
+```sh
+go test ./internal/attribution -run TestAttributionFuzzer -v -fuzz.trials=5000 -fuzz.maxops=60
+go test ./internal/attribution -run '^$' -fuzz FuzzMatchHunk -fuzztime 1m   # invariants
+```
+
 Project layout:
 
 ```

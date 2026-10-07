@@ -137,21 +137,7 @@ const maxDiffCells = 4_000_000
 // hunks: each run of added lines with up to diffContext unchanged lines around
 // it, runs closer than 2*diffContext merged, as in a unified diff.
 func diffHunks(before, after string) []Hunk {
-	a, b := splitLines(before), splitLines(after)
-
-	// Edits are local: trim the common prefix and suffix, diff only the middle.
-	pre := 0
-	for pre < len(a) && pre < len(b) && a[pre] == b[pre] {
-		pre++
-	}
-	suf := 0
-	for suf < len(a)-pre && suf < len(b)-pre && a[len(a)-1-suf] == b[len(b)-1-suf] {
-		suf++
-	}
-	added := make([]bool, len(b))
-	for j, isAdded := range middleAdded(a[pre:len(a)-suf], b[pre:len(b)-suf]) {
-		added[pre+j] = isAdded
-	}
+	b, added := addedFlags(before, after)
 
 	var hunks []Hunk
 	for j := 0; j < len(b); j++ {
@@ -175,6 +161,27 @@ func diffHunks(before, after string) []Hunk {
 		j = end - 1
 	}
 	return hunks
+}
+
+// addedFlags splits after into lines and marks those not present in before
+// (outside the longest common subsequence).
+func addedFlags(before, after string) ([]string, []bool) {
+	a, b := splitLines(before), splitLines(after)
+
+	// Edits are local: trim the common prefix and suffix, diff only the middle.
+	pre := 0
+	for pre < len(a) && pre < len(b) && a[pre] == b[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(a)-pre && suf < len(b)-pre && a[len(a)-1-suf] == b[len(b)-1-suf] {
+		suf++
+	}
+	added := make([]bool, len(b))
+	for j, isAdded := range middleAdded(a[pre:len(a)-suf], b[pre:len(b)-suf]) {
+		added[pre+j] = isAdded
+	}
+	return b, added
 }
 
 // middleAdded marks each line of b that isn't part of the longest common
