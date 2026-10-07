@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/events"
 )
@@ -356,7 +357,7 @@ func TestBuildAttributesCodexPatch(t *testing.T) {
 	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"src/app.ts": base})
 	logCodex := func(at time.Time, event map[string]any) {
 		f.log(at, event)
-		f.recs[len(f.recs)-1].Agent = attribution.AgentCodex
+		f.recs[len(f.recs)-1].Agent = agent.Codex.Name
 	}
 	logCodex(t0, map[string]any{"hook_event_name": "SessionStart", "model": "gpt-test", "cwd": f.root})
 	logCodex(t0.Add(time.Second), map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "add helpers", "model": "gpt-test"})
