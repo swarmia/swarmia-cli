@@ -233,9 +233,10 @@ suggested order:
 13. ✅ **Attribution fuzzer** (done 2026-10-06; `internal/attribution/fuzz_test.go`):
     matcher-level scenarios from this repo's own files; CI profiles "light"
     (≤ 6 changes, precision ≥ 0.995, recall ≥ 0.98) and "heavy" (≤ 30,
-    ≥ 0.99 / ≥ 0.90), plus native `FuzzMatchHunk` invariants. See "Findings
-    from milestone 13". Not yet covered: git-level scenarios (amend, rebase,
-    squash, the introduced-lines rule). Original plan: A randomized harness that simulates agent edits,
+    ≥ 0.99 / ≥ 0.90), plus native `FuzzMatchHunk` invariants; and a
+    pipeline fuzzer (`internal/report/fuzz_test.go`) running whole scenarios
+    through real git repos and `Build`. See "Findings from milestone 13".
+    Original plan: A randomized harness that simulates agent edits,
     human edits, formatter runs, shell codegen, amends, rebases and squashes
     against real repositories, and measures matcher precision and recall per
     class. Complements golden cases and dogfood data; runs in CI on a fixed
@@ -351,6 +352,22 @@ positives are boilerplate repeated across a file (`if err != nil {`,
 ±0.002 on precision and recall. Native fuzzing (6.4M executions) found no
 invariant violations. Recall for heavily edited code is the tuning target once
 dogfood data shows how much editing real sessions see.
+
+**Pipeline fuzzer** (git level): agent edits via the edit tool and via shell
+snapshots, human edits and formatting, commits (all or one file), amends,
+squashes, and rebases onto a teammate's commits fetched from their clone; truth
+is the lines git says each reachable commit introduced, with origins from a
+per-commit snapshot of a working-tree model. Results: precision 1.000, recall
+0.999 at the CI defaults (10 trials × 12 steps) and at seeds 2–3 with
+40 trials × 30 steps (~4,500 agent lines, ~100 amends, ~120 rebases, ~35 squashes
+per seed). Teammate lines, lines a commit didn't introduce, and unreachable
+commits were never attributed; the only false positives were boilerplate
+(`if err != nil {`). Its first run reported precision 0.915 — entirely the
+generator's own bookkeeping (re-deriving the diff in the test; agent blocks
+duplicating the edited file's lines), fixed by using the matcher's diff
+(`attribution.AddedFlags`). CI thresholds: precision ≥ 0.99, recall ≥ 0.97.
+Not covered: merges, cherry-picks, and squash merges done on the server (the
+server's job per `docs/ingest-api.md`).
 
 ## Lessons from git-ai (reviewed 2026-10-06)
 

@@ -82,3 +82,10 @@ func DecodeHunk(lines []string) Hunk {
 	}
 	return h
 }
+
+// AddedFlags reports, for each line of after, whether it is new relative to
+// before — the same diff DiffHunks uses.
+func AddedFlags(before, after string) []bool {
+	_, added := addedFlags(before, after)
+	return added
+}

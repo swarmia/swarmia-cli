@@ -326,13 +326,16 @@ make npm-binaries  # cross-compile per-platform binaries into the npm packages
 make clean         # remove build artifacts
 ```
 
-Attribution quality is measured by a fuzzer that simulates agent edits
-followed by human edits, formatter runs and moved code, and compares the
-matcher's classes with the truth. CI enforces minimum precision and recall; to
-explore further:
+Attribution quality is measured by two fuzzers that track every line's true
+origin and compare it with what the CLI attributes: one for the matcher (agent
+edits followed by human edits, formatter runs and moved code), one for the whole
+pipeline in real git repositories (commits, partial commits, amends, squashes,
+rebases onto a teammate's fetched commits, shell edits). CI enforces minimum
+precision and recall; to explore further:
 
 ```sh
 go test ./internal/attribution -run TestAttributionFuzzer -v -fuzz.trials=5000 -fuzz.maxops=60
+go test ./internal/report -run TestPipelineFuzzer -v -pfuzz.trials=100 -pfuzz.steps=30
 go test ./internal/attribution -run '^$' -fuzz FuzzMatchHunk -fuzztime 1m   # invariants
 ```
 
