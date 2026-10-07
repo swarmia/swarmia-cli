@@ -21,5 +21,5 @@
     "type": "git",
     "url": "git+https://github.com/swarmia/swarmia-cli.git"
   },
-  "license": "UNLICENSED"
+  "license": "MIT"
 }

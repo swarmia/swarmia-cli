@@ -366,4 +366,4 @@ packaged or tested yet.
 
 ## License
 
-Not yet determined.
+MIT. See [LICENSE](LICENSE).
