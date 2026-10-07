@@ -59,7 +59,9 @@ func runLogHook(stdin io.Reader) error {
 	if ag == nil {
 		return fmt.Errorf("unknown --agent %q", logAgent)
 	}
-	if logSkipIfProjectHooks && projectHasLogHook(ag, projectDir()) {
+	dir := projectDir()
+	repo, repoErr := gitrepo.Find(dir)
+	if logSkipIfProjectHooks && projectHasLogHook(ag, dir, repo.Root) {
 		return nil // the project's own hook logs this event
 	}
 	payload, err := io.ReadAll(stdin)
@@ -93,7 +95,7 @@ func runLogHook(stdin io.Reader) error {
 	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
 	ev, _ := ag.Parse(payload)
 	// Best-effort: an unreadable repo state must not stop the event being logged.
-	if repo, err := gitrepo.Find(projectDir()); err == nil {
+	if repoErr == nil {
 		if st, err := repo.ReadState(); err == nil {
 			rec.Git = &events.Git{Root: repo.Root, Head: st.Head, Branch: st.Branch}
 		}
@@ -144,8 +146,8 @@ func appendLine(path string, line []byte) error {
 
 // projectHasLogHook reports whether the project's own hooks for the agent
 // already run swarmia-cli log-hook, without our user-scope flag.
-func projectHasLogHook(ag *agent.Agent, dir string) bool {
-	for _, path := range ag.ProjectHooksFiles(dir) {
+func projectHasLogHook(ag *agent.Agent, projectDir, repoRoot string) bool {
+	for _, path := range ag.ProjectHooksFiles(projectDir, repoRoot) {
 		if hooksFileRunsLogHook(path) {
 			return true
 		}

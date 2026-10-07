@@ -2,9 +2,6 @@ package agent
 
 import (
 	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -54,23 +51,15 @@ func TestParse(t *testing.T) {
 // Claude Code's project is the directory it passes; Codex's is the enclosing
 // repository, wherever in it the session runs.
 func TestProjectHooksFiles(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	sub := filepath.Join(root, "pkg")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{filepath.Join(sub, ".claude", "settings.json"), filepath.Join(sub, ".claude", "settings.local.json")}
-	if got := ClaudeCode.ProjectHooksFiles(sub); !reflect.DeepEqual(got, want) {
+	want := []string{"/r/pkg/.claude/settings.json", "/r/pkg/.claude/settings.local.json"}
+	if got := ClaudeCode.ProjectHooksFiles("/r/pkg", "/r"); !reflect.DeepEqual(got, want) {
 		t.Errorf("Claude Code: %q", got)
 	}
-	if got := Codex.ProjectHooksFiles(sub); !reflect.DeepEqual(got, []string{filepath.Join(root, ".codex", "hooks.json")}) {
+	if got := Codex.ProjectHooksFiles("/r/pkg", "/r"); !reflect.DeepEqual(got, []string{"/r/.codex/hooks.json"}) {
 		t.Errorf("Codex: %q", got)
+	}
+	if got := Codex.ProjectHooksFiles("/r/pkg", ""); got != nil {
+		t.Errorf("Codex outside a repository: %q", got)
 	}
 }
 

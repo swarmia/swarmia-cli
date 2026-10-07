@@ -120,6 +120,37 @@ func TestLogHookSkipIfProjectHooks(t *testing.T) {
 	}
 }
 
+// A Codex user-scope hook stands down when the enclosing repository's
+// .codex/hooks.json runs log-hook, wherever below the root the session runs.
+func TestLogHookSkipIfCodexProjectHooks(t *testing.T) {
+	logSkipIfProjectHooks, logAgent = true, "codex"
+	t.Cleanup(func() { logSkipIfProjectHooks, logAgent = false, "claude-code" })
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+
+	repo := initRepo(t)
+	sub := filepath.Join(repo, "pkg")
+	if err := os.MkdirAll(filepath.Join(repo, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := json.Marshal(map[string]any{"hooks": map[string]any{
+		"Stop": []any{grp("", "swarmia-cli log-hook --agent codex")},
+	}})
+	if err := os.WriteFile(filepath.Join(repo, ".codex", "hooks.json"), hooks, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", sub) // stands in for the session's cwd
+	if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("logged although the repository has its own Codex log-hook")
+	}
+}
+
 // A Bash tool call is bracketed: PreToolUse snapshots the worktree and the
 // finishing event (here a failure) records what the command authored.
 func TestLogHookRecordsShellCommandChanges(t *testing.T) {

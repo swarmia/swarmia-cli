@@ -11,7 +11,6 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/codex"
-	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
@@ -227,16 +226,17 @@ func (a *Agent) HooksFile(dir string, scope Scope) (string, error) {
 	return filepath.Join(dir, a.ConfigDir, name), nil
 }
 
-// ProjectHooksFiles are the files where the project a hook runs in (in dir)
-// may configure the agent's hooks: its project and local scope. For Claude
-// Code, dir is the project directory it passes to hooks.
-func (a *Agent) ProjectHooksFiles(dir string) []string {
+// ProjectHooksFiles are the files where the project a hook runs in may
+// configure the agent's hooks: its project and local scope. projectDir is the
+// directory the agent passes to hooks (Claude Code's project directory), else
+// where the hook runs; repoRoot is the enclosing repository's root, if any.
+func (a *Agent) ProjectHooksFiles(projectDir, repoRoot string) []string {
+	dir := projectDir
 	if a.hooksAtRepoRoot {
-		repo, err := gitrepo.Find(dir)
-		if err != nil {
+		if repoRoot == "" {
 			return nil
 		}
-		dir = repo.Root
+		dir = repoRoot
 	}
 	var files []string
 	for _, scope := range []Scope{ScopeProject, ScopeLocal} {
