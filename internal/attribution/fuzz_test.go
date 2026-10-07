@@ -429,14 +429,16 @@ func (s *fuzzStats) table(m map[origin]map[Class]int) string {
 // fuzzProfiles are the CI configurations, with minimum quality on
 // substantive lines at the default seed, set a little below measured values
 // (2026-10-06: light 1.000 / 0.993, heavy 0.998 / 0.921). Raise them as the
-// matcher improves; a drop means a regression.
+// matcher improves; a drop means a regression. The corpus is this repository's
+// own source, so it drifts as the code changes: across seeds 1–8 heavy recall
+// spans 0.900–0.924 (2026-10-07), hence the margin.
 var fuzzProfiles = []struct {
 	name                    string
 	maxOps                  int
 	minPrecision, minRecall float64
 }{
 	{"light", 6, 0.995, 0.98},
-	{"heavy", 30, 0.99, 0.90},
+	{"heavy", 30, 0.99, 0.88},
 }
 
 func TestAttributionFuzzer(t *testing.T) {
