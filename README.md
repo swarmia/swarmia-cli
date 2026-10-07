@@ -62,13 +62,28 @@ Prompts can still contain code you paste into them; redaction can't tell.
 
 ### Never in the way
 
-- Hooks are passive: they always exit 0, never print to the agent, and take a
-  few milliseconds (≈70 ms around shell commands in a large repository, for the
-  snapshot). Everything heavier runs detached in the background.
+The agent waits for each hook before it continues, so every millisecond a hook
+takes is a millisecond added to your session. swarmia-cli treats hook latency
+as a budget:
+
+| Hook | Typical cost |
+|---|---|
+| Prompts, edits, reads and other tool calls | ~5–7 ms per event: an append to a local file and a read of `.git/HEAD`, with no `git` process |
+| Shell commands (Bash) | one `git status` before and after, for the snapshot: ~35 ms per command in a small repository, ~140 ms in a 14k-file one |
+| Session end | starts the background run and returns immediately |
+
+- Anything heavier — folding the log, matching edits to commits, delivery —
+  runs in a detached background process after the session ends, never while the
+  agent waits.
+- Hooks are passive: they always exit 0 and never print to the agent, so a
+  failure can't block or derail a tool call.
 - Concurrent hooks are serialized with file locks; nothing is written into your
   repository, git config or git hooks.
 - Delivery failures back off and retry; nothing is lost while the network or
   Swarmia is unavailable.
+
+Numbers are from a MacBook (Apple Silicon); `git status` cost grows with the
+size of the repository's working tree.
 
 ### Accurate, and honest about what it doesn't know
 
