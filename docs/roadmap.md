@@ -210,7 +210,13 @@ suggested order:
     (cost per commit/PR). git-ai ports its parsing and deduplication from
     ccusage (MIT) for Claude Code and Codex. Payload fields are additive (no
     schema bump); tell the `hook` consumer.
-11. **Reflog-based commit candidates.** Identify commits created on this
+11. ✅ **Reflog-based commit candidates** (done 2026-10-06): candidates are
+    reachable commits that are authored with `user.email` **or** created on
+    this machine per the HEAD reflogs of all worktrees (commit, amend, rebase /
+    pull --rebase picks, cherry-pick, revert, am). Union rather than
+    replacement: reflog-only would drop rebased commits' attribution, and
+    amended-away commits stay in the reflog (reachability filters them).
+    Monorepo report: 0.24 s. Original plan: Identify commits created on this
     machine from the worktree's HEAD reflog (`commit:`, `commit (initial):`,
     `commit (merge):` entries, corroborated by the branch reflog) instead of
     relying only on `user.email`. Pulled, rebased and cherry-picked commits never

@@ -16,6 +16,7 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/events"
+	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
@@ -26,8 +27,10 @@ type Options struct {
 	// FallbackRoot resolves file paths in records logged before records carried
 	// their worktree root.
 	FallbackRoot string
-	// AuthorEmail limits candidate commits to this author; "" considers all. In a
-	// busy repository this keeps other people's commits out of the scan.
+	// AuthorEmail limits candidate commits to the user's own: those authored
+	// with this email, plus those the reflog shows were created on this machine
+	// (covering other emails). "" considers all. In a busy repository this keeps
+	// other people's commits out of the scan.
 	AuthorEmail string
 }
 
@@ -361,9 +364,12 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 		return nil
 	}
 	r := newRepo(opts.RepoDir)
-	commits, err := r.commitsSince(earliest.Add(-clockSlack), opts.AuthorEmail)
+	commits, err := r.commitsSince(earliest.Add(-clockSlack))
 	if err != nil {
 		return err
+	}
+	if opts.AuthorEmail != "" {
+		commits = ownCommits(commits, opts, earliest.Add(-clockSlack))
 	}
 	for _, s := range sessions {
 		if len(s.Edits) == 0 {
@@ -394,6 +400,25 @@ func UpdateUsage(sessions []*Session) {
 		}
 		_ = s.Usage.Update(s.TranscriptPath)
 	}
+}
+
+// ownCommits keeps the commits that are the user's: authored with their
+// email, or created on this machine according to the reflog — which also
+// covers commits made under another email, rebased picks and cherry-picks.
+// Reachability (commitsSince lists only commits reachable from refs) already
+// drops commits that were amended or rebased away.
+func ownCommits(commits []commit, opts Options, since time.Time) []commit {
+	created := map[string]bool{}
+	if repo, err := gitrepo.Find(opts.RepoDir); err == nil {
+		created, _ = repo.LocallyCreatedCommits(since)
+	}
+	var out []commit
+	for _, c := range commits {
+		if strings.EqualFold(c.AuthorEmail, opts.AuthorEmail) || created[c.SHA] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // candidatesFor narrows commits to those that touch one of the session's files

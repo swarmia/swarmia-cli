@@ -260,3 +260,35 @@ func TestBuildAttributesShellCommandChanges(t *testing.T) {
 		t.Errorf("commits = %+v, want %s with 2 lines", s.Commits(), sha[:7])
 	}
 }
+
+// The reflog makes a commit made here under a different email the user's,
+// while a fetched commit by someone else with the very same content isn't.
+func TestOwnCommitsUseTheReflog(t *testing.T) {
+	f := newFixture(t)
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	code := lines(3, "func reflogged%d() string { return \"written by the agent\" }")
+	f.agentWrite(t0, "mine.go", code, nil)
+	f.agentWrite(t0, "theirs.go", code, nil)
+
+	// I commit mine.go with my work email in this repo's config.
+	local := f.commit(t0.Add(time.Minute), "me@work.example.com", "with another email", map[string]string{"mine.go": code})
+
+	// A teammate commits theirs.go in their own clone; I fetch it.
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	theirs := &fixture{t: t, root: filepath.Join(dir, "theirs")}
+	f.git(t0, "me@example.com", "clone", "-q", f.root, theirs.root)
+	fetched := theirs.commit(t0.Add(2*time.Minute), "teammate@example.com", "teammate", map[string]string{"theirs.go": code})
+	f.git(t0, "me@example.com", "fetch", "-q", theirs.root, "main:refs/remotes/teammate/main")
+
+	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shas []string
+	for _, c := range sessions[0].Commits() {
+		shas = append(shas, c.SHA)
+	}
+	if len(shas) != 1 || shas[0] != local {
+		t.Errorf("commits = %v, want only the local one %s (not fetched %s)", shas, local[:7], fetched[:7])
+	}
+}

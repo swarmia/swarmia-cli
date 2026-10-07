@@ -36,34 +36,31 @@ func (r *repo) git(args ...string) ([]byte, error) {
 
 // commit is a candidate commit and the paths it touched.
 type commit struct {
-	SHA     string
-	At      time.Time
-	Subject string
-	Paths   map[string]bool
+	SHA         string
+	At          time.Time
+	AuthorEmail string
+	Subject     string
+	Paths       map[string]bool
 }
 
-// commitsSince lists non-merge commits on any ref, committed at or after since,
-// optionally only those authored by authorEmail, oldest first.
-func (r *repo) commitsSince(since time.Time, authorEmail string) ([]commit, error) {
-	args := []string{"log", "--all", "--no-merges", "--reverse",
-		"--since=" + strconv.FormatInt(since.Unix(), 10),
-		"--format=%x1e%H%x1f%ct%x1f%s", "--name-only"}
-	if authorEmail != "" {
-		args = append(args, "--author=<"+regexp.QuoteMeta(authorEmail)+">")
-	}
-	out, err := r.git(args...)
+// commitsSince lists non-merge commits reachable from any ref, committed at or
+// after since, oldest first.
+func (r *repo) commitsSince(since time.Time) ([]commit, error) {
+	out, err := r.git("log", "--all", "--no-merges", "--reverse",
+		"--since="+strconv.FormatInt(since.Unix(), 10),
+		"--format=%x1e%H%x1f%ct%x1f%ae%x1f%s", "--name-only")
 	if err != nil {
 		return nil, err
 	}
 	var commits []commit
 	for _, rec := range strings.Split(string(out), "\x1e") {
 		header, files, _ := strings.Cut(rec, "\n")
-		f := strings.Split(header, "\x1f")
-		if len(f) != 3 {
+		f := strings.SplitN(header, "\x1f", 4)
+		if len(f) != 4 {
 			continue
 		}
 		ct, _ := strconv.ParseInt(f[1], 10, 64)
-		c := commit{SHA: f[0], At: time.Unix(ct, 0).UTC(), Subject: f[2], Paths: map[string]bool{}}
+		c := commit{SHA: f[0], At: time.Unix(ct, 0).UTC(), AuthorEmail: f[2], Subject: f[3], Paths: map[string]bool{}}
 		for _, p := range strings.Split(files, "\n") {
 			if p = strings.TrimSpace(p); p != "" {
 				c.Paths[p] = true

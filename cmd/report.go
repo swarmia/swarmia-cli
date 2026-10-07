@@ -37,8 +37,8 @@ var reportCmd = &cobra.Command{
 		"are attributed to it, each classed as exact, normalized (only reformatted) or\n" +
 		"modified (edited by a human).\n\n" +
 		"Commits are considered if they are on any branch, were made after the session's\n" +
-		"edits, and are authored by your git user.email (--all-authors to include\n" +
-		"everyone). 'pushed' marks commits a remote-tracking branch contains; only those\n" +
+		"edits, and are yours: authored with your git user.email, or created on this\n" +
+		"machine according to the reflog (--all-authors to include everyone). 'pushed' marks commits a remote-tracking branch contains; only those\n" +
 		"would ever be sent.\n\n" +
 		"--json prints exactly what delivery would send for each session: pushed\n" +
 		"commits only, secrets redacted, commands stripped of heredoc bodies and inline\n" +

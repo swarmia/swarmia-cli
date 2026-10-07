@@ -179,8 +179,10 @@ Session 7999d991  claude-opus-4-8  2026-10-06 16:43 → 17:00
 How it decides:
 
 - **Candidate commits** are non-merge commits on any branch, made after the
-  session's edits, that touch an edited file and are authored by your git
-  `user.email` (`--all-authors` lifts that filter).
+  session's edits, that touch an edited file and are yours: authored with your
+  git `user.email`, or — per the reflogs of your worktrees — created on this
+  machine (commits under another email, rebased picks, cherry-picks).
+  `--all-authors` lifts that filter.
 - **A line counts for a commit only if that commit introduced it** (relative to
   its parent), so later commits that merely carry the agent's lines along get
   nothing.
