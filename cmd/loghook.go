@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
@@ -20,14 +21,16 @@ import (
 var (
 	logFile               string
 	logSkipIfProjectHooks bool
+	logAgent              string
 )
 
 var logHookCmd = &cobra.Command{
 	Use:   "log-hook",
-	Short: "Log a Claude Code hook payload to a JSONL file",
-	Long: "log-hook reads a Claude Code hook payload from stdin and appends it to a JSONL\n" +
-		"file, one event per line. It is meant to be registered as a hook command in\n" +
-		"Claude Code settings so that agent activity can later be attributed to commits.\n\n" +
+	Short: "Log a coding agent's hook payload to a JSONL file",
+	Long: "log-hook reads a hook payload from stdin and appends it to a JSONL file, one\n" +
+		"event per line. It is meant to be registered as a hook command in a coding\n" +
+		"agent's settings (see install) so that agent activity can later be attributed\n" +
+		"to commits. --agent says which agent sends the payloads.\n\n" +
 		"It is a passive logger: it always exits 0 and writes nothing to stdout, so it\n" +
 		"can never block or interfere with the tool call that triggered it.",
 	// SilenceUsage/SilenceErrors keep cobra from ever writing to stdout/stderr on
@@ -46,12 +49,16 @@ var logHookCmd = &cobra.Command{
 func init() {
 	logHookCmd.Flags().StringVar(&logFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
 	logHookCmd.Flags().BoolVar(&logSkipIfProjectHooks, strings.TrimPrefix(skipIfProjectHooksFlag, "--"), false,
-		"do nothing if the project's own Claude Code settings run swarmia-cli log-hook (set by user-scope installs)")
+		"do nothing if the project's own agent settings run swarmia-cli log-hook (set by user-scope installs)")
+	logHookCmd.Flags().StringVar(&logAgent, "agent", attribution.AgentClaudeCode, "the agent sending the payloads: claude-code or codex")
 	rootCmd.AddCommand(logHookCmd)
 }
 
 func runLogHook(stdin io.Reader) error {
-	if logSkipIfProjectHooks && projectHasLogHook(projectDir()) {
+	if logAgent != attribution.AgentClaudeCode && logAgent != attribution.AgentCodex {
+		return fmt.Errorf("unknown --agent %q", logAgent)
+	}
+	if logSkipIfProjectHooks && projectHasLogHook(logAgent, projectDir()) {
 		return nil // the project's own hook logs this event
 	}
 	payload, err := io.ReadAll(stdin)
@@ -83,6 +90,9 @@ func runLogHook(stdin io.Reader) error {
 		return fmt.Errorf("resolving log file: %w", err)
 	}
 	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Event: event}
+	if logAgent != attribution.AgentClaudeCode {
+		rec.Agent = logAgent
+	}
 	// Best-effort: an unreadable repo state must not stop the event being logged.
 	if repo, err := gitrepo.Find(projectDir()); err == nil {
 		if st, err := repo.ReadState(); err == nil {
@@ -133,9 +143,16 @@ func appendLine(path string, line []byte) error {
 	return nil
 }
 
-// projectHasLogHook reports whether the project's Claude Code settings (shared
-// or local) already run swarmia-cli log-hook, without our user-scope flag.
-func projectHasLogHook(dir string) bool {
+// projectHasLogHook reports whether the project's own settings for the agent
+// (Claude Code's shared or local settings, Codex's hooks.json) already run
+// swarmia-cli log-hook, without our user-scope flag. Claude Code passes the
+// project directory; Codex runs hooks wherever the session is, so its project
+// is the enclosing repository.
+func projectHasLogHook(agent, dir string) bool {
+	if agent == attribution.AgentCodex {
+		repo, err := gitrepo.Find(dir)
+		return err == nil && settingsRunLogHook(filepath.Join(repo.Root, ".codex", "hooks.json"))
+	}
 	for _, name := range []string{"settings.json", "settings.local.json"} {
 		if settingsRunLogHook(filepath.Join(dir, ".claude", name)) {
 			return true

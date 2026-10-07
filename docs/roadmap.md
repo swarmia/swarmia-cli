@@ -190,7 +190,8 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
    show per-session stored/dropped state in `report` and token problems in
    `config`.
 8. **Global install** (D2) + MDM docs.
-9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
+9. **More agents:** Codex (on its branch, see "Codex support"), then Cursor,
+   Copilot CLI, Gemini CLI.
 
 15. 🟡 **End-to-end suite** ([docs/e2e.md](e2e.md)): a real Claude Code release
     (`latest` and `stable`, installed from npm) does a task in `unjs/ufo` (MIT,
@@ -412,6 +413,83 @@ choices on two fronts; what it does well became milestones 10–14 and a D9 note
   modified.
 - **Known human:** IDE extensions (VS Code, JetBrains, + others) report saved
   files, so lines are AI / known human / unknown (milestone 14).
+
+## Codex support (branch `otto/codex`)
+
+How Codex differs from Claude Code, as far as swarmia-cli is concerned
+(verified against codex-cli 0.161.0 where marked ✓; the rest from git-ai's and
+entire-cli's integrations, to be confirmed by the first end-to-end runs):
+
+- ✓ **Hooks** live in `.codex/hooks.json` (project) or `~/.codex/hooks.json`
+  (user, or `$CODEX_HOME`); there is no per-checkout local file.
+- ✓ **Hooks run in the session's working directory** (a subdirectory, if
+  Codex was started there), with no project-directory variable like
+  `CLAUDE_PROJECT_DIR`. Project hooks therefore walk up to the repository's
+  `swarmia-cli` in `sh` (0.5 ms; `git rev-parse` costs ~10 ms per hook).
+- ✓ **Trust:** Codex silently skips hooks without a `trusted_hash` in the
+  user's `config.toml`, keyed by the hooks file's real path, the event and the
+  handler's position; the hash covers the handler's definition. Our hashes
+  match Codex's own (`codex app-server` `hooks/list` reports `currentHash` and
+  `trustStatus`, a model-free oracle the e2e suite now checks in setup).
+- ✓ **Project trust:** Codex reads a project's `.codex/` at all only once the
+  project folder is trusted (`[projects."<path>"] trust_level`), which it asks
+  about on first use; `codex exec --dangerously-bypass-approvals-and-sandbox`
+  records it itself.
+- ✓ **Payloads** carry `session_id`, `transcript_path`, `cwd` and (except
+  `SessionEnd`) `model`.
+- ✓ **`SessionEnd`** fires in `codex exec`; the detached processing run it
+  starts survives Codex's teardown (3 s cap, then the hook's process tree is
+  killed).
+- ✓ **Auth for `codex exec`:** it sends `CODEX_API_KEY`, not
+  `OPENAI_API_KEY`.
+- **Edits** arrive as `apply_patch` (`tool_input.command` holds the patch
+  text). `PreToolUse` now fires for all tools (it used to be shell-only).
+- **Transcripts** are "rollout" JSONL with cumulative `token_count` events and
+  the model in `turn_context`.
+- **No hooks fire in read-only mode.**
+
+Done on the branch:
+
+1. ✅ **Install:** a Codex agent for `project` and `user` scope (`local`
+   explains it isn't available); hooks run `log-hook --agent codex` with a
+   30 s timeout (`SessionEnd`: 3 s); `install` prints how to approve them with
+   `/hooks`, `install --trust` records the trust in `config.toml` (a textual
+   edit that keeps the rest of the file, verified to parse before replacing
+   it); `config` warns about untrusted hooks.
+2. ✅ **Capture and attribution:** the agent is recorded on each event;
+   `apply_patch` chunks become hunks (before/after diffed, so replaced lines
+   are kept; paths resolved against `cwd`); edit extraction dispatches by
+   agent; payload `agent: "codex"`.
+3. ✅ **Usage:** per-response differences of the rollout's cumulative totals,
+   per model; cached input split out of input, reasoning reported as part of
+   output (`reasoning_output_tokens`). Subagents later.
+4. ✅ **End-to-end matrix** (nightly, agent × channel), one scenario and oracle
+   for both agents:
+
+   | Agent | Development | Stable |
+   |---|---|---|
+   | Claude Code | `latest` | `stable` |
+   | Codex | `alpha` | `latest` |
+
+5. ✅ **Docs:** README (agents, scopes, trust), e2e.md, ingest-api.md.
+
+Still to verify with the first real Codex runs (CI): `apply_patch`'s payload
+shape and tool name in `PostToolUse`; the shell tool's name (we expect
+`Bash`) and whether shell snapshots work for failing commands (Codex has no
+`PostToolUseFailure`); whether `exec resume` appends to the same rollout (the
+usage tracker assumes so: a new file replaying old totals would double-count,
+and the usage check would catch it).
+
+**CI credentials (decided):** an `OPENAI_API_KEY` secret in the `e2e`
+environment, from a dedicated OpenAI project with a spend cap and
+inference-only permissions. While the branch is in progress, `otto/codex` is
+temporarily allowed in the `e2e` environment's deployment branches. Leak
+safeguards for a public repository: fork PRs never get secrets and the
+workflow runs only on schedule/dispatch; only Codex jobs get the key, and the
+suite passes it to the agent process alone; artifacts are **scrubbed** of
+every credential value as they're written (they're public and not masked by
+GitHub), and a found value fails the run; a workflow step checks the artifacts
+for the key again, independently, and withholds them if it's there.
 
 ## Before publishing the npm package
 

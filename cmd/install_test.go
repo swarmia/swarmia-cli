@@ -206,7 +206,7 @@ func TestInstallDryRunWritesNothing(t *testing.T) {
 func TestDetectBinaryRefPrefersLocal(t *testing.T) {
 	repo := t.TempDir()
 	// No local binary: falls through to PATH assumption (bare name).
-	if ref, _ := detectBinaryRef(repo); ref != "swarmia-cli" {
+	if ref, _ := claudeRef(repo); ref != "swarmia-cli" {
 		t.Errorf("without local binary, ref = %q, want bare swarmia-cli", ref)
 	}
 	// With an executable at the repo root: prefer the repo-local reference.
@@ -214,7 +214,7 @@ func TestDetectBinaryRefPrefersLocal(t *testing.T) {
 	if err := os.WriteFile(local, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if ref, src := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/swarmia-cli" {
+	if ref, src := claudeRef(repo); ref != "${CLAUDE_PROJECT_DIR}/swarmia-cli" {
 		t.Errorf("with local binary, ref = %q (%s), want ${CLAUDE_PROJECT_DIR}/swarmia-cli", ref, src)
 	}
 }
@@ -230,7 +230,7 @@ func TestDetectBinaryRefNodeModules(t *testing.T) {
 	}
 
 	// With no repo-root binary, an npm dependency in node_modules/.bin is used.
-	if ref, _ := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/node_modules/.bin/swarmia-cli" {
+	if ref, _ := claudeRef(repo); ref != "${CLAUDE_PROJECT_DIR}/node_modules/.bin/swarmia-cli" {
 		t.Errorf("ref = %q, want the node_modules/.bin reference", ref)
 	}
 
@@ -242,7 +242,7 @@ func TestDetectBinaryRefNodeModules(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pkgBin, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if ref, _ := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/node_modules/@swarmia/cli/bin/swarmia-cli" {
+	if ref, _ := claudeRef(repo); ref != "${CLAUDE_PROJECT_DIR}/node_modules/@swarmia/cli/bin/swarmia-cli" {
 		t.Errorf("ref = %q, want the package launcher", ref)
 	}
 
@@ -250,7 +250,7 @@ func TestDetectBinaryRefNodeModules(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if ref, _ := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/swarmia-cli" {
+	if ref, _ := claudeRef(repo); ref != "${CLAUDE_PROJECT_DIR}/swarmia-cli" {
 		t.Errorf("with a repo-root binary present, ref = %q, want the repo-root reference", ref)
 	}
 }
@@ -550,7 +550,7 @@ func TestInstallUserScope(t *testing.T) {
 
 // Without --binary, personal scopes point at this binary by absolute path.
 func TestExecutableRefIsAbsolute(t *testing.T) {
-	ref, _ := executableRef()
+	ref := executableRef().cmd
 	if !filepath.IsAbs(strings.Trim(ref, "'")) {
 		t.Errorf("executableRef = %q, want an absolute path", ref)
 	}
@@ -592,4 +592,10 @@ func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
 	if strings.Contains(out.String(), "Warning") {
 		t.Errorf("unexpected warning for a clean project:\n%s", out.String())
 	}
+}
+
+// claudeRef is how a Claude Code project hook would invoke swarmia-cli.
+func claudeRef(repo string) (ref, source string) {
+	r := detectBinaryRef(repo)
+	return strings.TrimSuffix(claudeCodeAgent.hookCommand(r, scopeProject), " log-hook"), r.source
 }

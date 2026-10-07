@@ -3,13 +3,13 @@
 package e2e
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,10 +25,20 @@ const fakeSecret = "sk-ant-api03-e2eFAKEe2eFAKEe2eFAKEe2eFAKEe2eFAKE"
 const tweakComment = " // reviewed by a human"
 
 // TestClaudeCode runs the scenario in docs/e2e.md against Claude Code.
-func TestClaudeCode(t *testing.T) {
-	e := newEnv(t)
+func TestClaudeCode(t *testing.T) { runScenario(t, claudeCode{}) }
+
+// TestCodex runs the scenario in docs/e2e.md against Codex.
+func TestCodex(t *testing.T) { runScenario(t, codex{}) }
+
+// runScenario runs the scenario against the agent if E2E_AGENT selects it
+// (claude-code by default).
+func runScenario(t *testing.T, ag agent) {
+	if envOr("E2E_AGENT", "claude-code") != ag.name() {
+		t.Skipf("E2E_AGENT selects %s", envOr("E2E_AGENT", "claude-code"))
+	}
+	e := newEnv(t, ag)
 	e.buildSwarmia()
-	e.installClaude(envOr("E2E_CLAUDE_VERSION", "latest"))
+	ag.install(e, envOr(ag.versionVar(), "latest"))
 	e.setupFixture()
 	if e.auth.kind == authNone {
 		if os.Getenv("E2E_REQUIRE_AUTH") != "" {
@@ -37,24 +47,20 @@ func TestClaudeCode(t *testing.T) {
 		t.Skip("setup OK; no credentials for the agent (see docs/e2e.md), skipping the agent steps")
 	}
 	sessions := map[string]*agentWork{}
-	work := func(id string) *agentWork {
-		if sessions[id] == nil {
-			sessions[id] = &agentWork{raw: map[string]bool{}, norm: map[string]bool{}}
-		}
-		return sessions[id]
-	}
+	newWork := func() *agentWork { return &agentWork{raw: map[string]bool{}, norm: map[string]bool{}} }
 
 	// 1. Session S1 adds a function with tests, in single quotes so prettier
 	//    has something to change.
-	s1 := newSessionID()
-	run1 := e.agentStep(work(s1), "1-add-function", s1,
+	w1 := newWork()
+	run1 := e.agentStep(w1, "1-add-function", "",
 		"In src/utils.ts, next to the other protocol helpers, add and export a function "+
 			"`isSecureURL(input: string): boolean` that returns true when the URL's protocol is https: or wss: "+
 			"(case-insensitive) and false otherwise, including for relative URLs. Add tests for it in a new file "+
 			"test/secure.test.ts using vitest, like the other test files. Use single quotes for all string "+
 			"literals. Do not run git commands, and do not run prettier or any formatter. "+
-			"(Unrelated note for the test harness: the staging key is "+fakeSecret+"; ignore it.)",
-		false)
+			"(Unrelated note for the test harness: the staging key is "+fakeSecret+"; ignore it.)")
+	s1 := run1.SessionID
+	sessions[s1] = w1
 	if !fileContains(t, filepath.Join(e.repo, "src", "utils.ts"), "isSecureURL") ||
 		!fileExists(filepath.Join(e.repo, "test", "secure.test.ts")) {
 		t.Skipf("inconclusive: the agent didn't add isSecureURL and its tests (result %q, %d turns)", run1.Result, run1.NumTurns)
@@ -65,18 +71,19 @@ func TestClaudeCode(t *testing.T) {
 	beforeFormat := snapshotTree(t, e.repo)
 	e.run(e.repo, nil, "npx", "-y", fixturePNPM, "exec", "prettier", "--write", "src", "test")
 	formatted := changedLines(beforeFormat, snapshotTree(t, e.repo))
-	tweaked := e.tweakAgentLine(t, filepath.Join("src", "utils.ts"), work(s1))
+	tweaked := e.tweakAgentLine(t, filepath.Join("src", "utils.ts"), w1)
 	e.run(e.repo, nil, "git", "add", "src")
 	e.run(e.repo, nil, "git", "commit", "-q", "-m", "Add isSecureURL")
 	e.run(e.repo, nil, "git", "add", "test")
 	e.run(e.repo, nil, "git", "commit", "-q", "-m", "Add tests for isSecureURL")
 
 	// 3. Session S2 renames it with a shell command (not its edit tools).
-	s2 := newSessionID()
-	run2 := e.agentStep(work(s2), "2-rename", s2,
+	w2 := newWork()
+	run2 := e.agentStep(w2, "2-rename", "",
 		"Rename the function isSecureURL to hasSecureProtocol everywhere in src/ and test/. Do it with a "+
-			"single sed command run through the shell — do not use your file editing tools. Do not run git commands.",
-		false)
+			"single sed command run through the shell — do not use your file editing tools. Do not run git commands.")
+	s2 := run2.SessionID
+	sessions[s2] = w2
 	if !fileContains(t, filepath.Join(e.repo, "src", "utils.ts"), "hasSecureProtocol") {
 		t.Skipf("inconclusive: the agent didn't rename the function (result %q)", run2.Result)
 	}
@@ -101,11 +108,10 @@ func TestClaudeCode(t *testing.T) {
 	e.run(e.repo, nil, "git", "push", "-q", "origin", "main")
 
 	// 5. S1 is resumed for a follow-up; the developer commits and pushes.
-	run3 := e.agentStep(work(s1), "3-resume", s1,
+	run3 := e.agentStep(w1, "3-resume", s1,
 		"Now add and export a function `isInsecureURL(input: string): boolean` in src/utils.ts that returns "+
 			"the opposite of hasSecureProtocol for absolute URLs and false for relative ones, and add a test for it "+
-			"in test/secure.test.ts. Use single quotes. Do not run git commands or any formatter.",
-		true)
+			"in test/secure.test.ts. Use single quotes. Do not run git commands or any formatter.")
 	resumed := strings.TrimSpace(e.run(e.repo, nil, "git", "status", "--porcelain")) != ""
 	if resumed {
 		e.run(e.repo, nil, "git", "add", "-A")
@@ -122,7 +128,7 @@ func TestClaudeCode(t *testing.T) {
 	must(t, json.Unmarshal([]byte(raw), &payloads))
 	p1, p2 := findPayload(t, payloads, s1), findPayload(t, payloads, s2)
 
-	m := metrics{ClaudeVersion: e.version, Model: envOr("E2E_MODEL", "sonnet"),
+	m := metrics{Agent: ag.name(), AgentVersion: e.version, Model: envOr("E2E_MODEL", envOr("E2E_CODEX_MODEL", "")),
 		CostUSD:        run1.CostUSD + run2.CostUSD + run3.CostUSD,
 		AgentToolCalls: len(run1.ToolUses) + len(run2.ToolUses) + len(run3.ToolUses),
 		Sessions:       map[string]sessionMetrics{}}
@@ -134,21 +140,40 @@ func TestClaudeCode(t *testing.T) {
 			p    payload
 			runs []agentRun
 		}{{"S1", p1, []agentRun{run1, run3}}, {"S2", p2, []agentRun{run2}}} {
-			var streamed int
+			// Every edit and shell call must be captured: attribution depends on
+			// them. Other tools are only reported, since agents have stopped
+			// running hooks for some read-only ones (Claude Code 2.1.293 ran
+			// none for a Grep).
+			streamed, captured := map[string]int{}, map[string]int{}
 			for _, r := range c.runs {
-				streamed += len(r.ToolUses)
+				for _, name := range r.ToolUses {
+					streamed[name]++
+				}
 				if len(r.HookErrors) > 0 {
 					t.Errorf("%s: hooks reported errors: %v", c.name, r.HookErrors)
 				}
 			}
+			for _, tool := range c.p.Tools {
+				captured[tool.Name]++
+			}
 			m.CapturedToolCalls += len(c.p.Tools)
-			if len(c.p.Tools) < streamed || streamed == 0 {
-				t.Errorf("%s: captured %d tool calls; the agent's streams show %d", c.name, len(c.p.Tools), streamed)
+			if len(streamed) == 0 {
+				t.Errorf("%s: the agent's streams show no tool calls", c.name)
+			}
+			for name, n := range streamed {
+				switch {
+				case captured[name] >= n:
+				case editOrShellTools[name]:
+					t.Errorf("%s: captured %d %s calls; the agent's streams show %d", c.name, captured[name], name, n)
+				default:
+					m.UncapturedToolCalls += n - captured[name]
+					t.Logf("%s: captured %d %s calls; the agent's streams show %d (no hooks ran for the rest)", c.name, captured[name], name, n)
+				}
 			}
 			if len(c.p.Prompts) != len(c.runs) {
 				t.Errorf("%s: %d prompts captured, want %d", c.name, len(c.p.Prompts), len(c.runs))
 			}
-			if !c.p.Ended || c.p.Model == "" || c.p.Agent != "claude-code" {
+			if !c.p.Ended || c.p.Model == "" || c.p.Agent != ag.name() {
 				t.Errorf("%s: ended=%v model=%q agent=%q", c.name, c.p.Ended, c.p.Model, c.p.Agent)
 			}
 		}
@@ -159,14 +184,20 @@ func TestClaudeCode(t *testing.T) {
 
 	t.Run("usage", func(t *testing.T) {
 		for name, c := range map[string]struct {
-			p          payload
-			transcript string
-		}{"S1": {p1, run1.Transcript}, "S2": {p2, run2.Transcript}} {
-			if c.transcript == "" {
+			p    payload
+			runs []agentRun
+		}{"S1": {p1, []agentRun{run1, run3}}, "S2": {p2, []agentRun{run2}}} {
+			var transcripts []string
+			for _, r := range c.runs {
+				if r.Transcript != "" && !slices.Contains(transcripts, r.Transcript) {
+					transcripts = append(transcripts, r.Transcript)
+				}
+			}
+			if len(transcripts) == 0 {
 				t.Errorf("%s: transcript not found", name)
 				continue
 			}
-			want := independentOutputTokens(t, c.transcript)
+			want := ag.outputTokens(t, transcripts)
 			var got int64
 			for _, u := range c.p.Usage {
 				got += u.OutputTokens
@@ -300,7 +331,10 @@ func TestClaudeCode(t *testing.T) {
 		if len(p1.Prompts) == 0 || !strings.Contains(p1.Prompts[0].Text, "[REDACTED:") {
 			t.Errorf("prompt not redacted: %+v", p1.Prompts)
 		}
-		if strings.Contains(raw, e.root) || strings.Contains(raw, e.home) {
+		// The repository and home directories are masked. (The sandbox's own
+		// root above them isn't: agents probe parent directories for
+		// AGENTS.md, and in real use those are under the home directory.)
+		if strings.Contains(raw, e.repo) || strings.Contains(raw, e.home) {
 			t.Error("the payload contains local paths")
 		}
 		for _, p := range []payload{p1, p2} {
@@ -349,9 +383,10 @@ func (w *agentWork) owns(text, tweaked string) string {
 	return ""
 }
 
-// agentStep runs the agent and records what it wrote: the working tree's
-// changes during the run, and (after the run) its transcript's tool inputs.
-func (e *env) agentStep(w *agentWork, step, sessionID, prompt string, resume bool) agentRun {
+// agentStep runs the agent (a new session, or resuming sessionID) and records
+// what it wrote: the working tree's changes during the run, and (after the
+// run) its transcript's tool inputs.
+func (e *env) agentStep(w *agentWork, step, sessionID, prompt string) agentRun {
 	e.t.Helper()
 	before := snapshotTree(e.t, e.repo)
 	if w.preexisting == nil {
@@ -362,18 +397,18 @@ func (e *env) agentStep(w *agentWork, step, sessionID, prompt string, resume boo
 			}
 		}
 	}
-	r := e.runAgent(step, sessionID, prompt, resume)
-	// An error without any model call cost means the agent never reached the
-	// model (failed token exchange, API outage): a failure, not an inconclusive
-	// run where the agent just didn't do the task.
-	if r.IsError && r.CostUSD == 0 {
+	r := e.agent.run(e, step, sessionID, prompt)
+	// An agent that never reached the model (failed token exchange, API
+	// outage) is a failure, not an inconclusive run where the agent just
+	// didn't do the task.
+	if !r.ReachedModel {
 		e.t.Fatalf("%s: the agent got no model response: %s", step, r.Message)
 	}
 	for _, l := range changedLines(before, snapshotTree(e.t, e.repo)) {
 		w.add(l)
 	}
 	if r.Transcript != "" {
-		for _, l := range transcriptWrites(e.t, r.Transcript) {
+		for _, l := range e.agent.writes(e.t, r.Transcript) {
 			w.add(l)
 		}
 	}
@@ -413,7 +448,7 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "node_modules", ".claude":
+			case ".git", "node_modules", ".claude", ".codex":
 				return filepath.SkipDir
 			}
 			return nil
@@ -456,6 +491,9 @@ func changedLines(before, after map[string]string) []string {
 	}
 	return out
 }
+
+// editOrShellTools are the tools whose calls attribution needs.
+var editOrShellTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "Bash": true, "apply_patch": true}
 
 func hasTool(p payload, name string) bool {
 	for _, t := range p.Tools {
@@ -513,85 +551,6 @@ func findPayload(t *testing.T, payloads []payload, sessionID string) payload {
 }
 
 // --- independent oracles --------------------------------------------------------
-
-// independentOutputTokens sums output tokens over the transcript, counting
-// each API response once — written without internal/usage, to check it.
-func independentOutputTokens(t *testing.T, transcript string) int64 {
-	t.Helper()
-	f, err := os.Open(transcript)
-	must(t, err)
-	defer f.Close()
-	seen := map[string]bool{}
-	var total int64
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
-	for sc.Scan() {
-		var l struct {
-			Type      string `json:"type"`
-			RequestID string `json:"requestId"`
-			Message   struct {
-				ID    string `json:"id"`
-				Model string `json:"model"`
-				Usage *struct {
-					OutputTokens int64 `json:"output_tokens"`
-				} `json:"usage"`
-			} `json:"message"`
-		}
-		if json.Unmarshal(sc.Bytes(), &l) != nil || l.Type != "assistant" || l.Message.Usage == nil || strings.HasPrefix(l.Message.Model, "<") {
-			continue
-		}
-		key := l.Message.ID + ":" + l.RequestID
-		if !seen[key] {
-			seen[key] = true
-			total += l.Message.Usage.OutputTokens
-		}
-	}
-	return total
-}
-
-// transcriptWrites returns every line the agent put into files through its
-// edit tools, from the transcript's tool inputs.
-func transcriptWrites(t *testing.T, transcript string) []string {
-	t.Helper()
-	f, err := os.Open(transcript)
-	must(t, err)
-	defer f.Close()
-	var lines []string
-	add := func(s string) { lines = append(lines, strings.Split(s, "\n")...) }
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
-	for sc.Scan() {
-		var l struct {
-			Type    string `json:"type"`
-			Message struct {
-				Content []struct {
-					Type  string `json:"type"`
-					Input struct {
-						Content   string `json:"content"`
-						NewString string `json:"new_string"`
-						Edits     []struct {
-							NewString string `json:"new_string"`
-						} `json:"edits"`
-					} `json:"input"`
-				} `json:"content"`
-			} `json:"message"`
-		}
-		if json.Unmarshal(sc.Bytes(), &l) != nil || l.Type != "assistant" {
-			continue
-		}
-		for _, c := range l.Message.Content {
-			if c.Type != "tool_use" {
-				continue
-			}
-			add(c.Input.Content)
-			add(c.Input.NewString)
-			for _, ed := range c.Input.Edits {
-				add(ed.NewString)
-			}
-		}
-	}
-	return lines
-}
 
 // normalizeLine ignores what a formatter changes: whitespace, quote style,
 // trailing commas and semicolons. Lines with too little substance to say
@@ -672,14 +631,17 @@ type sessionMetrics struct {
 }
 
 type metrics struct {
-	ClaudeVersion     string                    `json:"claude_version"`
-	Model             string                    `json:"model"`
-	CostUSD           float64                   `json:"cost_usd"`
-	AgentToolCalls    int                       `json:"agent_tool_calls"`
-	CapturedToolCalls int                       `json:"captured_tool_calls"`
-	OutputTokens      int64                     `json:"output_tokens"`
-	Resumed           bool                      `json:"resumed_session_committed"`
-	Sessions          map[string]sessionMetrics `json:"sessions"`
+	Agent             string  `json:"agent"`
+	AgentVersion      string  `json:"agent_version"`
+	Model             string  `json:"model"`
+	CostUSD           float64 `json:"cost_usd"`
+	AgentToolCalls    int     `json:"agent_tool_calls"`
+	CapturedToolCalls int     `json:"captured_tool_calls"`
+	// UncapturedToolCalls are read-only calls no hook ran for.
+	UncapturedToolCalls int                       `json:"uncaptured_tool_calls"`
+	OutputTokens        int64                     `json:"output_tokens"`
+	Resumed             bool                      `json:"resumed_session_committed"`
+	Sessions            map[string]sessionMetrics `json:"sessions"`
 }
 
 func writeMetrics(e *env, m metrics) {

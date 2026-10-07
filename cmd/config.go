@@ -19,6 +19,8 @@ var configCmd = &cobra.Command{
 		"  repository    .swarmia.json at the worktree root (may be committed; its\n" +
 		"                token can only submit data, so it isn't a secret)\n\n" +
 		"File format: {\"token\": \"…\", \"endpoint\": \"…\", \"prompts\": false}\n\n" +
+		"It also warns about swarmia-cli hooks Codex won't run because they aren't\n" +
+		"trusted yet.\n\n" +
 		"Prompts are shared unless any layer sets prompts to false: you can always\n" +
 		"withhold your own prompts, e.g. with SWARMIA_PROMPTS=0. swarmia-cli never\n" +
 		"writes these files.",
@@ -46,6 +48,12 @@ var configCmd = &cobra.Command{
 		fmt.Fprintf(out, "prompts:   %s  (%s)\n", prompts, cfg.PromptsSource)
 		if w := cfg.TokenWarning(); w != "" {
 			fmt.Fprintf(out, "\nWarning: %s.\n", w)
+		}
+		for _, path := range codexHooksFiles(root) {
+			if untrusted, err := untrustedCodexHooks(path); err == nil && len(untrusted) > 0 {
+				fmt.Fprintf(out, "\nWarning: Codex skips %d swarmia-cli hook(s) in %s until you trust them:\n"+
+					"run /hooks in Codex and approve them, or `swarmia-cli install --trust`.\n", len(untrusted), displayPath(root, path))
+			}
 		}
 		return nil
 	},

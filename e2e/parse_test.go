@@ -3,6 +3,9 @@
 package e2e
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,4 +40,63 @@ func TestOracleHelpers(t *testing.T) {
 	if id := newSessionID(); len(id) != 36 || id[14] != '4' {
 		t.Errorf("session id %q is not a UUIDv4", id)
 	}
+}
+
+func TestScrub(t *testing.T) {
+	e := &env{}
+	e.addSecret("short")
+	e.addSecret("sk-proj-abcdefghijkl")
+	out, found := e.scrub([]byte(`{"env":"OPENAI_API_KEY=sk-proj-abcdefghijkl","n":"short"}`))
+	if !found || string(out) != `{"env":"OPENAI_API_KEY=[E2E-SCRUBBED]","n":"short"}` {
+		t.Errorf("scrub = %s, %v", out, found)
+	}
+	if _, found := e.scrub([]byte("nothing here")); found {
+		t.Error("found a secret in clean text")
+	}
+}
+
+func TestParseCodexStream(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"0199a-thread"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls","exit_code":0}}`,
+		`{"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[{"path":"a.ts","kind":"update"}]}}`,
+		`{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"Done."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}`,
+	}, "\n")
+	r := parseCodexStream([]byte(stream), []byte("warning: hook SessionStart failed: exit 1\n"))
+	if r.SessionID != "0199a-thread" || !r.ReachedModel || r.Result != "success" || r.Message != "Done." {
+		t.Errorf("run = %+v", r)
+	}
+	if strings.Join(r.ToolUses, ",") != "Bash,apply_patch" || len(r.HookErrors) != 1 {
+		t.Errorf("tools %v, hook errors %v", r.ToolUses, r.HookErrors)
+	}
+	failed := parseCodexStream([]byte(`{"type":"thread.started","thread_id":"x"}`+"\n"+`{"type":"turn.failed","error":{"message":"401 Unauthorized"}}`), nil)
+	if failed.ReachedModel || !failed.IsError || failed.Message != "401 Unauthorized" {
+		t.Errorf("failed run = %+v", failed)
+	}
+}
+
+func TestCodexWrites(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: src/a.ts\n@@\n keep\n-old\n+export const x = 1;\n*** End Patch"
+	args, _ := json.Marshal(map[string]any{"command": []string{"apply_patch", patch}})
+	lines := []string{
+		mustJSON(t, map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call", "name": "apply_patch", "input": patch}}),
+		mustJSON(t, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call", "name": "shell", "arguments": string(args)}}),
+		mustJSON(t, map[string]any{"type": "response_item", "payload": map[string]any{"type": "message", "content": patch}}),
+	}
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+	got := codex{}.writes(t, path)
+	if strings.Join(got, "|") != "export const x = 1;|export const x = 1;" {
+		t.Errorf("writes = %q", got)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

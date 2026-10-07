@@ -7,8 +7,8 @@ open-source repository with swarmia-cli's hooks installed, while a script plays
 the developer — formatting, editing, committing, rebasing, pushing. Then the
 suite checks what swarmia-cli captured, attributed and would send.
 
-It answers questions the fuzzers can't: did a new Claude Code release change
-its hook payloads or transcripts; do hooks fire and stay quiet; does the
+It runs against Claude Code and Codex. It answers questions the fuzzers can't:
+did a new agent release change its hook payloads or transcripts; do hooks fire and stay quiet; does the
 packaged CLI install and run; does attribution hold up on code an agent
 actually wrote and prettier actually reformatted.
 
@@ -17,10 +17,15 @@ actually wrote and prettier actually reformatted.
 ```sh
 make e2e                                  # Claude Code "latest"
 make e2e E2E_CLAUDE_VERSION=stable        # or a dist-tag / exact version
+make e2e E2E_AGENT=codex                  # Codex "latest" (E2E_CODEX_VERSION=alpha, …)
 E2E_ARTIFACTS=/tmp/e2e make e2e           # keep logs, transcripts, payloads
 ```
 
-Credentials, first match wins (nothing else from your environment leaks in):
+`E2E_MODEL` picks Claude Code's model (default `sonnet`), `E2E_CODEX_MODEL`
+Codex's (default: Codex's own).
+
+Claude Code's credentials, first match wins (nothing else from your
+environment leaks in):
 
 1. Workload identity federation, as in CI: `ANTHROPIC_FEDERATION_RULE_ID`,
    `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` (and optionally
@@ -32,41 +37,57 @@ Credentials, first match wins (nothing else from your environment leaks in):
 3. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) — the easiest way to
    run locally on a subscription.
 
+Codex's: `OPENAI_API_KEY` (or `CODEX_API_KEY`), given to `codex exec` as
+`CODEX_API_KEY`, the variable it reads.
+
 Without credentials the suite still sets everything up (installs, fixture,
-hooks) and then skips the agent steps, which checks the setup on its own.
+hooks, and for Codex the trust check below) and then skips the agent steps,
+which checks the setup on its own.
 
 Everything runs in a temporary directory with its own `HOME`,
-`CLAUDE_CONFIG_DIR`, git config and swarmia-cli state, so it never reads or
-writes your own Claude Code configuration. Claude Code runs with
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, git config and swarmia-cli state, so it
+never reads or writes your own agent configuration. Claude Code runs with
 `--setting-sources project`, so only the fixture's `.claude/settings.json` (our
 hooks) applies.
+
+Credentials only go to the agent process. Artifacts (which CI publishes) are
+scrubbed of every credential value the suite knows as they're written, and
+finding one fails the run.
 
 ## Setup per run
 
 1. Build swarmia-cli from the working tree.
-2. Install Claude Code with `npm install --prefix <tmp>
-   @anthropic-ai/claude-code@<version>` (`latest`, `stable`, or exact).
+2. Install the agent from npm into the temporary directory:
+   `@anthropic-ai/claude-code@<version>` (`latest`, `stable`, or exact) or
+   `@openai/codex@<version>` (`latest`, `alpha`, or exact).
 3. Fixture: `unjs/ufo` (MIT, TypeScript, prettier, vitest), fetched at a pinned
    commit. A local bare repository acts as `origin`; a teammate clone pushes
    to it.
-4. `pnpm install`, then `swarmia-cli install --scope project`. `.claude/` is in
+4. `pnpm install`, then `swarmia-cli install --scope project` (for Codex with
+   `--trust`, into the sandbox's `CODEX_HOME`). `.claude/` or `.codex/` is in
    `.git/info/exclude`, so the hooks are never committed.
+5. Codex only: trust the fixture as a project, then ask Codex (`codex
+   app-server`, `hooks/list`, no model involved) whether it loads all six
+   swarmia-cli hooks and trusts them. Codex skips untrusted hooks silently, so
+   a trust hash that no longer matches a new release fails here, by name.
 
 ## Scenario
 
 | Step | Who | Exercises |
 |---|---|---|
-| "Add `isSecureURL` to `src/utils.ts`, with tests, in single quotes" (`--session-id S1`) | agent | Write/Edit capture, transcript usage |
+| "Add `isSecureURL` to `src/utils.ts`, with tests, in single quotes" (session S1) | agent | edit capture (Write/Edit, `apply_patch`), transcript usage |
 | prettier over `src` and `test` (double quotes) | script | `normalized` |
 | tweak one agent line by hand; commit `src`, then `test` (unpushed) | script | `modified`, partial commits |
-| "Rename it with a single `sed`" (`--session-id S2`) | agent | shell snapshots |
+| "Rename it with a single `sed`" (session S2) | agent | shell snapshots |
 | teammate pushes; fetch, rebase, squash the last two, amend, push | script | reflog/author filter, reachability, rewrites |
-| `--resume S1`: "add `isInsecureURL` with a test"; commit, push | agent | resumed sessions |
+| resume S1: "add `isInsecureURL` with a test"; commit, push | agent | resumed sessions |
 
-Agent runs use `claude -p --output-format stream-json --verbose
+Claude Code runs as `claude -p --output-format stream-json --verbose
 --include-hook-events --permission-mode bypassPermissions --setting-sources
-project`, with an explicit `--session-id` so sessions map one-to-one to
-swarmia-cli's.
+project`, with an explicit `--session-id` (and `--resume`) so sessions map
+one-to-one to swarmia-cli's. Codex runs as `codex exec --json
+--dangerously-bypass-approvals-and-sandbox`, which picks the session id itself
+(the stream's `thread.started`), and `codex exec resume <id>`.
 
 ## Checks
 
@@ -76,8 +97,9 @@ snapshots:
 1. **Capture**: every tool call in the agent's output stream has an event in
    swarmia-cli's session; the session has the id we chose, its prompt and model,
    and is marked ended; no hook reported an error.
-2. **Usage**: swarmia-cli's token totals are non-zero and equal an independent
-   count over the transcript.
+2. **Usage**: swarmia-cli's output tokens are non-zero and equal an
+   independent count over the session's transcripts (Claude Code: each
+   response once; Codex: the rollout's last running total).
 3. **Attribution**, per session: a session's lines are the union of its
    transcript's edit-tool inputs and the working tree's changes during its runs
    (which covers shell edits). Each line the scenario's pushed commits
@@ -100,13 +122,23 @@ Artifacts (agent output streams, transcripts, swarmia-cli sessions, payloads, a
 
 ## CI
 
-`.github/workflows/e2e.yml`: nightly and on demand (pick the Claude Code
-version), matrix `latest` × `stable` on Ubuntu, with `id-token: write` for
-federation. The job runs in the `e2e` GitHub environment, which only `main` may
-deploy to and which holds the `ANTHROPIC_*` federation variables. The
-federation rule accepts only that environment's OIDC subject,
+`.github/workflows/e2e.yml`: nightly and on demand (pick the agent, a version
+and a model), on Ubuntu. Nightly runs each agent on two release channels, which
+separates "the agent changed" from "we broke something":
+
+| Agent | Development | Stable |
+|---|---|---|
+| Claude Code | `latest` | `stable` |
+| Codex | `alpha` | `latest` |
+
+Jobs run in the `e2e` GitHub environment, which only `main` may deploy to and
+which holds the `ANTHROPIC_*` federation variables and the `OPENAI_API_KEY`
+secret (a dedicated OpenAI project with a spend cap). The Anthropic federation
+rule accepts only that environment's OIDC subject,
 `repo:swarmia/swarmia-cli:environment:e2e`, so pull requests, forks and other
-branches can't obtain Anthropic credentials.
+branches can't obtain Anthropic credentials. Only Codex jobs get the OpenAI
+key; before uploading artifacts, a workflow step checks them for it once more
+and withholds them if it's there.
 
 ## Phases
 
@@ -118,5 +150,5 @@ branches can't obtain Anthropic credentials.
    was credited to that session as `modified` (fixed: hunks carry the lines
    their edit replaced). Now: precision, recall and class agreement 1.000 for
    both sessions, all three classes exercised, ~$0.23 per run.
-3. Install through the npm package; delivery to a fake `hook`; macOS; Codex
-   once swarmia-cli supports it. ← next
+3. Codex, on both channels, with the same scenario and oracle. ← in progress
+4. Install through the npm package; delivery to a fake `hook`; macOS.

@@ -128,3 +128,58 @@ func TestIgnoresMissingAndUnexpectedPaths(t *testing.T) {
 		t.Errorf("totals from nothing: %+v", tr.Totals())
 	}
 }
+
+// tokenCount renders a Codex token_count event with a cumulative total.
+func tokenCount(in, cached, out, reasoning int64) string {
+	return fmt.Sprintf(`{"timestamp":"2026-10-07T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d,"reasoning_output_tokens":%d,"total_tokens":%d},"last_token_usage":{}},"rate_limits":null}}`,
+		in, cached, out, reasoning, in+out)
+}
+
+func turnContext(model string) string {
+	return fmt.Sprintf(`{"timestamp":"2026-10-07T12:00:00Z","type":"turn_context","payload":{"cwd":"/r","model":%q}}`, model)
+}
+
+func TestCodexRollout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-10-07T12-00-00-abc.jsonl")
+	write(t, path,
+		`{"timestamp":"2026-10-07T12:00:00Z","type":"session_meta","payload":{"id":"abc"}}`,
+		turnContext("gpt-6"),
+		`{"timestamp":"2026-10-07T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{}}}`,
+		tokenCount(1000, 0, 100, 40),
+		tokenCount(1000, 0, 100, 40), // repeated: no new response
+		tokenCount(2500, 900, 180, 60),
+	)
+	var tr Tracker
+	if err := tr.Update(path); err != nil {
+		t.Fatal(err)
+	}
+	want := []Totals{{Model: "gpt-6", Speed: "standard", Requests: 2,
+		InputTokens: 1600, CacheReadInputTokens: 900, OutputTokens: 180, ReasoningOutputTokens: 60}}
+	if got := tr.Totals(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("totals = %+v\nwant %+v", got, want)
+	}
+
+	// Incremental: a new turn on another model counts only its own usage.
+	appendTo(t, path, turnContext("gpt-6-mini")+"\n"+tokenCount(4000, 2000, 200, 60)+"\n")
+	if err := tr.Update(path); err != nil {
+		t.Fatal(err)
+	}
+	got := tr.Totals()
+	if len(got) != 2 || got[1].Model != "gpt-6-mini" || got[1].Requests != 1 ||
+		got[1].InputTokens != 400 || got[1].CacheReadInputTokens != 1100 || got[1].OutputTokens != 20 {
+		t.Errorf("after a second turn: %+v", got)
+	}
+}
+
+// A Claude Code line that merely mentions token_count is still Claude usage.
+func TestClaudeLineMentioningTokenCount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	write(t, path, strings.Replace(assistant("m1", "r1", "claude-x", 10, 5, 0, 0), "secret code here", `the \"token_count\" event`, 1))
+	var tr Tracker
+	if err := tr.Update(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := tr.Totals(); len(got) != 1 || got[0].InputTokens != 10 {
+		t.Errorf("totals = %+v", got)
+	}
+}

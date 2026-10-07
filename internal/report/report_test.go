@@ -347,3 +347,44 @@ func TestRebasedCommitIsNotCreditedToALaterEditor(t *testing.T) {
 		}
 	}
 }
+
+// A Codex session: the agent comes from the record, the model from any event,
+// and apply_patch edits (paths relative to the session's cwd) are attributed.
+func TestBuildAttributesCodexPatch(t *testing.T) {
+	f := newFixture(t)
+	base := lines(10, "export const existing%d = compute(%d);")
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"src/app.ts": base})
+	logCodex := func(at time.Time, event map[string]any) {
+		f.log(at, event)
+		f.recs[len(f.recs)-1].Agent = attribution.AgentCodex
+	}
+	logCodex(t0, map[string]any{"hook_event_name": "SessionStart", "model": "gpt-test", "cwd": f.root})
+	logCodex(t0.Add(time.Second), map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "add helpers", "model": "gpt-test"})
+	patch := "*** Begin Patch\n*** Update File: app.ts\n@@\n export const existing9 = compute(9);\n export const existing10 = compute(10);\n+export function helperOne(name: string) { return name.trim(); }\n+export function helperTwo(n: number) { return n * 2 + 1; }\n*** Add File: util/new.ts\n+export const created = makeThing('created by codex');\n*** End Patch"
+	logCodex(t0.Add(10*time.Second), map[string]any{
+		"hook_event_name": "PostToolUse", "tool_name": "apply_patch", "cwd": filepath.Join(f.root, "src"),
+		"tool_input": map[string]any{"command": patch},
+	})
+	f.commit(t0.Add(time.Minute), "me@example.com", "helpers", map[string]string{
+		"src/app.ts":      base + "export function helperOne(name: string) { return name.trim(); }\nexport function helperTwo(n: number) { return n * 2 + 1; }\n",
+		"src/util/new.ts": "export const created = makeThing(\"created by codex\");\n",
+	})
+
+	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sessions[0]
+	if s.Agent != "codex" || s.Model != "gpt-test" {
+		t.Errorf("agent %q, model %q", s.Agent, s.Model)
+	}
+	if len(s.Tools) != 1 || s.Tools[0].Command != "" || s.Tools[0].File != filepath.Join(f.root, "src", "app.ts") {
+		t.Errorf("tools = %+v", s.Tools)
+	}
+	if s.AILines() != 3 {
+		t.Errorf("ai lines = %d, want 3", s.AILines())
+	}
+	if len(s.Commits()) != 1 || s.Commits()[0].Survived() != 3 {
+		t.Errorf("commits = %+v, want one with 3 lines", s.Commits())
+	}
+}

@@ -6,12 +6,21 @@
 // totals is kept. Reading is incremental: each file keeps a byte offset, so a
 // long session's transcript is read once overall, not once per run.
 //
-// Claude Code (the only agent so far) writes a transcript per session, plus one
-// per subagent under <transcript>/subagents/. Each API response is written once
-// per content block, so the same (message id, request id) appears on several
-// consecutive lines with identical usage; only the first counts (the same rule
-// as ccusage). Cost isn't computed here: prices change and depend on contracts,
-// so the server derives cost from these counts.
+// Claude Code writes a transcript per session, plus one per subagent under
+// <transcript>/subagents/. Each API response is written once per content
+// block, so the same (message id, request id) appears on several consecutive
+// lines with identical usage; only the first counts (the same rule as
+// ccusage).
+//
+// Codex writes a "rollout" per session, with a token_count event after each
+// model response holding the session's cumulative usage so far; the model is
+// in the turn_context lines before it. A response's usage is the difference
+// between consecutive totals. Codex counts cached input within input tokens,
+// and reasoning within output tokens; Totals follows Claude's convention, input
+// tokens excluding cache reads.
+//
+// Cost isn't computed here: prices change and depend on contracts, so the
+// server derives cost from these counts.
 package usage
 
 import (
@@ -37,6 +46,7 @@ type Totals struct {
 	CacheReadInputTokens       int64 `json:"cache_read_input_tokens"`
 	CacheCreation5mInputTokens int64 `json:"cache_creation_5m_input_tokens"`
 	CacheCreation1hInputTokens int64 `json:"cache_creation_1h_input_tokens"`
+	ReasoningOutputTokens      int64 `json:"reasoning_output_tokens,omitempty"` // part of OutputTokens (Codex)
 	WebSearchRequests          int64 `json:"web_search_requests,omitempty"`
 	WebFetchRequests           int64 `json:"web_fetch_requests,omitempty"`
 }
@@ -48,6 +58,7 @@ func (t *Totals) add(o Totals) {
 	t.CacheReadInputTokens += o.CacheReadInputTokens
 	t.CacheCreation5mInputTokens += o.CacheCreation5mInputTokens
 	t.CacheCreation1hInputTokens += o.CacheCreation1hInputTokens
+	t.ReasoningOutputTokens += o.ReasoningOutputTokens
 	t.WebSearchRequests += o.WebSearchRequests
 	t.WebFetchRequests += o.WebFetchRequests
 }
@@ -61,6 +72,9 @@ type fileState struct {
 	Offset  int64              `json:"offset"`
 	LastKey string             `json:"last_key,omitempty"`
 	Totals  map[string]*Totals `json:"totals,omitempty"`
+	// Codex: the model of the current turn, and the last cumulative total.
+	Model     string      `json:"model,omitempty"`
+	LastTotal *codexUsage `json:"last_total,omitempty"`
 }
 
 // Update reads whatever was appended to the session's transcript (and its
@@ -146,8 +160,91 @@ type entry struct {
 }
 
 // usageMarker prefilters lines before JSON parsing: most transcript lines are
-// tool results and attachments without usage.
-var usageMarker = []byte(`"usage"`)
+// tool results and attachments without usage. The others mark Codex's lines.
+var (
+	usageMarker       = []byte(`"usage"`)
+	tokenCountMarker  = []byte(`"token_count"`)
+	turnContextMarker = []byte(`"turn_context"`)
+)
+
+// codexUsage is Codex's token usage record.
+type codexUsage struct {
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
+	TotalTokens           int64 `json:"total_tokens"`
+}
+
+// codexLine is the part of a Codex rollout line usage needs.
+type codexLine struct {
+	Type    string `json:"type"`
+	Payload struct {
+		Type  string `json:"type"`
+		Model string `json:"model"`
+		Info  *struct {
+			TotalTokenUsage *codexUsage `json:"total_token_usage"`
+		} `json:"info"`
+	} `json:"payload"`
+}
+
+// codex folds in one rollout line if it's a turn context (the model) or a
+// token count (the cumulative usage), and reports whether it was a Codex line.
+func (st *fileState) codex(line []byte) bool {
+	var l codexLine
+	if json.Unmarshal(line, &l) != nil {
+		return false
+	}
+	switch l.Type {
+	case "turn_context":
+		if l.Payload.Model != "" {
+			st.Model = l.Payload.Model
+		}
+		return true
+	case "event_msg":
+	default:
+		return false // e.g. a Claude Code line that mentions token_count
+	}
+	if l.Payload.Type != "token_count" || l.Payload.Info == nil || l.Payload.Info.TotalTokenUsage == nil {
+		return true // e.g. a rate-limit update without usage
+	}
+	cur := *l.Payload.Info.TotalTokenUsage
+	last := codexUsage{}
+	if st.LastTotal != nil {
+		last = *st.LastTotal
+	}
+	if cur.TotalTokens < last.TotalTokens {
+		last = codexUsage{} // the counter restarted
+	}
+	if cur == last {
+		return true // repeated, no new response
+	}
+	st.LastTotal = &cur
+	model := st.Model
+	if model == "" {
+		model = "unknown"
+	}
+	cached := cur.CachedInputTokens - last.CachedInputTokens
+	t := Totals{Model: model, Speed: "standard", Requests: 1,
+		InputTokens:           cur.InputTokens - last.InputTokens - cached,
+		CacheReadInputTokens:  cached,
+		OutputTokens:          cur.OutputTokens - last.OutputTokens,
+		ReasoningOutputTokens: cur.ReasoningOutputTokens - last.ReasoningOutputTokens}
+	st.addTotals(t)
+	return true
+}
+
+func (st *fileState) addTotals(t Totals) {
+	bucket := t.Model + "\x00" + t.Speed
+	if t.Subagent {
+		bucket += "\x00sub"
+	}
+	if b, ok := st.Totals[bucket]; ok {
+		b.add(t)
+	} else {
+		st.Totals[bucket] = &t
+	}
+}
 
 func (st *fileState) read(path string, subagent bool) error {
 	f, err := os.Open(path)
@@ -181,6 +278,9 @@ func (st *fileState) read(path string, subagent bool) error {
 		st.Totals = map[string]*Totals{}
 	}
 	for _, line := range bytes.Split(data[:end], []byte("\n")) {
+		if (bytes.Contains(line, tokenCountMarker) || bytes.Contains(line, turnContextMarker)) && st.codex(line) {
+			continue
+		}
 		if !bytes.Contains(line, usageMarker) {
 			continue
 		}
@@ -211,15 +311,7 @@ func (st *fileState) read(path string, subagent bool) error {
 		if s := u.ServerToolUse; s != nil {
 			t.WebSearchRequests, t.WebFetchRequests = s.WebSearchRequests, s.WebFetchRequests
 		}
-		bucket := t.Model + "\x00" + t.Speed
-		if subagent {
-			bucket += "\x00sub"
-		}
-		if b, ok := st.Totals[bucket]; ok {
-			b.add(t)
-		} else {
-			st.Totals[bucket] = &t
-		}
+		st.addTotals(t)
 	}
 	st.Offset += int64(end + 1)
 	return nil
