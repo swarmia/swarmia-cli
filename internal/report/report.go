@@ -16,6 +16,7 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/events"
+	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
 // Options configures attribution.
@@ -48,6 +49,10 @@ type Session struct {
 	Attribution   *Attribution   `json:"attribution,omitempty"`
 	// Ended is set once the agent reported the session's end.
 	Ended bool `json:"ended,omitempty"`
+	// TranscriptPath is the agent's transcript of the session (from its hook
+	// payloads); Usage holds the token counts read from it.
+	TranscriptPath string         `json:"transcript_path,omitempty"`
+	Usage          *usage.Tracker `json:"usage,omitempty"`
 	// Delivery records the last payload sent to Swarmia for this session.
 	Delivery *Delivery `json:"delivery,omitempty"`
 }
@@ -185,6 +190,7 @@ func Build(recs []events.Record, opts Options) ([]*Session, error) {
 	sessions := map[string]*Session{}
 	Fold(sessions, recs, opts.FallbackRoot)
 	list := sortedSessions(sessions)
+	UpdateUsage(list)
 	if err := Attribute(list, opts, time.Now()); err != nil {
 		return nil, err
 	}
@@ -202,12 +208,13 @@ func sortedSessions(m map[string]*Session) []*Session {
 
 // hookPayload is the subset of Claude Code hook fields folding reads.
 type hookPayload struct {
-	HookEventName string `json:"hook_event_name"`
-	SessionID     string `json:"session_id"`
-	Model         string `json:"model"`
-	Prompt        string `json:"prompt"`
-	ToolName      string `json:"tool_name"`
-	ToolInput     struct {
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	ToolName       string `json:"tool_name"`
+	ToolInput      struct {
 		FilePath string `json:"file_path"`
 		Command  string `json:"command"`
 	} `json:"tool_input"`
@@ -245,6 +252,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		}
 		if at.After(s.EndedAt) {
 			s.EndedAt = at
+		}
+		if p.TranscriptPath != "" {
+			s.TranscriptPath = p.TranscriptPath
 		}
 		switch p.HookEventName {
 		case "SessionStart":
@@ -369,6 +379,21 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// UpdateUsage reads new token usage from each session's transcript. It is
+// cheap for transcripts that haven't grown (a stat per file). Errors only mean
+// the counts lag; they are retried on the next run.
+func UpdateUsage(sessions []*Session) {
+	for _, s := range sessions {
+		if s.TranscriptPath == "" {
+			continue
+		}
+		if s.Usage == nil {
+			s.Usage = &usage.Tracker{}
+		}
+		_ = s.Usage.Update(s.TranscriptPath)
+	}
 }
 
 // candidatesFor narrows commits to those that touch one of the session's files

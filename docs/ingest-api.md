@@ -34,7 +34,9 @@ from the agent, and sends Swarmia one **session payload** per agent session:
   wrote, which line ranges of which files, classified as `exact`, `normalized`
   or `modified`;
 - two counts: how many lines the agent wrote, and how many of them landed in
-  pushed commits unchanged or only reformatted.
+  pushed commits unchanged or only reformatted;
+- **token usage** per model, read from the agent's transcript (no cost: the
+  server prices it).
 
 **No source code is sent.** Attribution is line numbers only. Tool output
 (file contents, command output) is never included. Shell commands lose heredoc
@@ -140,7 +142,22 @@ cap the decompressed size, see Limits).
     }
   ],
   "ai_lines_generated": 61,
-  "ai_lines_committed": 54
+  "ai_lines_committed": 54,
+  "usage": [
+    {
+      "model": "claude-opus-4-8", "speed": "standard",
+      "requests": 277, "input_tokens": 554, "output_tokens": 408901,
+      "cache_read_input_tokens": 99049271,
+      "cache_creation_5m_input_tokens": 0, "cache_creation_1h_input_tokens": 1246914
+    },
+    {
+      "model": "claude-fable-5-1", "speed": "standard", "subagent": true,
+      "requests": 12, "input_tokens": 40, "output_tokens": 9120,
+      "cache_read_input_tokens": 310442,
+      "cache_creation_5m_input_tokens": 0, "cache_creation_1h_input_tokens": 28110,
+      "web_fetch_requests": 2
+    }
+  ]
 }
 ```
 
@@ -162,6 +179,28 @@ cap the decompressed size, see Limits).
 | `commits` | array of CommitAttribution | Line attribution, one entry per (commit, file). Only commits that were **pushed** (contained in a remote-tracking branch on the developer's machine) when the payload was built. Empty if nothing has been pushed yet. |
 | `ai_lines_generated` | integer | Non-blank lines the agent wrote that were still present after its last edit to each file. Lines it wrote and then replaced itself don't count. Includes lines written through shell commands. |
 | `ai_lines_committed` | integer | Of the attributed lines in `commits`, how many are `exact` or `normalized`. The ratio `ai_lines_committed / ai_lines_generated` is the session's "survival" rate, but note the numerator only covers pushed commits. |
+| `usage` | array of Usage, optional | The session's token usage so far, read from the agent's transcript (including its subagents' transcripts). Empty if unknown; absent from older clients. Cumulative: each send carries the totals to date, replacing the previous ones. |
+
+#### Usage
+
+One bucket per (model, speed, main session vs subagents). The client doesn't
+compute cost — prices change and depend on contracts — so the server prices
+these counts. Each API response counts once (agents write one transcript line
+per content block; the client deduplicates by message and request id).
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | string | Model id as the agent reports it, e.g. `claude-opus-4-8`. |
+| `speed` | string | `standard` or `fast` (fast mode is priced differently). Accept other values. |
+| `subagent` | boolean, optional | `true` for calls made by the session's subagents (e.g. Claude Code's Task tool); absent for the main session. |
+| `requests` | integer | Model calls (API responses). |
+| `input_tokens` | integer | Uncached input tokens. |
+| `output_tokens` | integer | Output tokens (including thinking). |
+| `cache_read_input_tokens` | integer | Input tokens read from the prompt cache. |
+| `cache_creation_5m_input_tokens` | integer | Input tokens written to the 5-minute cache. |
+| `cache_creation_1h_input_tokens` | integer | Input tokens written to the 1-hour cache. |
+| `web_search_requests` | integer, optional | Server-side web searches. |
+| `web_fetch_requests` | integer, optional | Server-side web fetches. |
 
 #### Prompt
 
@@ -463,7 +502,26 @@ Request body (after decompression):
         "tools": { "type": "array", "items": { "$ref": "#/$defs/tool" } },
         "commits": { "type": "array", "items": { "$ref": "#/$defs/commit" } },
         "ai_lines_generated": { "type": "integer", "minimum": 0 },
-        "ai_lines_committed": { "type": "integer", "minimum": 0 }
+        "ai_lines_committed": { "type": "integer", "minimum": 0 },
+        "usage": { "type": "array", "items": { "$ref": "#/$defs/usage" } }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": ["model", "requests", "input_tokens", "output_tokens", "cache_read_input_tokens",
+                   "cache_creation_5m_input_tokens", "cache_creation_1h_input_tokens"],
+      "properties": {
+        "model": { "type": "string" },
+        "speed": { "type": "string" },
+        "subagent": { "type": "boolean" },
+        "requests": { "type": "integer", "minimum": 0 },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cache_read_input_tokens": { "type": "integer", "minimum": 0 },
+        "cache_creation_5m_input_tokens": { "type": "integer", "minimum": 0 },
+        "cache_creation_1h_input_tokens": { "type": "integer", "minimum": 0 },
+        "web_search_requests": { "type": "integer", "minimum": 0 },
+        "web_fetch_requests": { "type": "integer", "minimum": 0 }
       }
     },
     "prompt": {

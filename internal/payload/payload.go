@@ -17,6 +17,7 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/redact"
 	"github.com/swarmia/swarmia-cli/internal/report"
+	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
 // Payload is one session as sent to Swarmia.
@@ -37,6 +38,9 @@ type Payload struct {
 	Commits         []Commit  `json:"commits"`
 	AILines         int       `json:"ai_lines_generated"`
 	AILinesKept     int       `json:"ai_lines_committed"`
+	// Usage is the session's token usage per model, speed and main session vs
+	// subagents, read from the agent's transcript. Cost is left to the server.
+	Usage []usage.Totals `json:"usage"`
 }
 
 type Prompt struct {
@@ -78,6 +82,10 @@ func Build(s *report.Session, ctx Context) Payload {
 		Prompts: []Prompt{}, PromptsWithheld: !ctx.Prompts,
 		Tools: []Tool{}, Commits: []Commit{},
 		AILines: s.AILines(),
+		Usage:   []usage.Totals{},
+	}
+	if s.Usage != nil {
+		p.Usage = s.Usage.Totals()
 	}
 	if ctx.Prompts {
 		for _, pr := range s.Prompts {

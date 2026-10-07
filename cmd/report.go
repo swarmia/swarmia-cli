@@ -18,6 +18,7 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/payload"
 	"github.com/swarmia/swarmia-cli/internal/report"
+	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
 var (
@@ -127,6 +128,11 @@ func writeSessionText(out io.Writer, s *report.Session) {
 		shell = fmt.Sprintf(" (%d via shell)", n)
 	}
 	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), len(s.Edits), shell, s.AILines())
+	if s.Usage != nil {
+		if line := usageSummary(s.Usage.Totals()); line != "" {
+			fmt.Fprintf(out, "  %s\n", line)
+		}
+	}
 	if len(s.Commits()) == 0 {
 		if s.AILines() > 0 {
 			fmt.Fprintln(out, "  not committed yet")
@@ -148,6 +154,34 @@ func writeSessionText(out io.Writer, s *report.Session) {
 	if ai := s.AILines(); ai > 0 {
 		fmt.Fprintf(out, "  %d of %d AI line(s) committed unchanged or reformatted (%d%%)\n",
 			survived, ai, 100*survived/ai)
+	}
+}
+
+// usageSummary condenses token usage into one line, e.g.
+// "271 model calls: 96.6M input tokens (99% cache reads), 402k output".
+func usageSummary(totals []usage.Totals) string {
+	var calls, input, cached, output int64
+	for _, t := range totals {
+		calls += t.Requests
+		cached += t.CacheReadInputTokens
+		input += t.InputTokens + t.CacheReadInputTokens + t.CacheCreation5mInputTokens + t.CacheCreation1hInputTokens
+		output += t.OutputTokens
+	}
+	if calls == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d model call(s): %s input tokens (%d%% cache reads), %s output",
+		calls, humanCount(input), 100*cached/max(input, 1), humanCount(output))
+}
+
+func humanCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%dk", n/1_000)
+	default:
+		return fmt.Sprint(n)
 	}
 }
 

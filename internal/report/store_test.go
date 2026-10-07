@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -161,5 +162,38 @@ func TestProcessWithoutWaitReportsBusy(t *testing.T) {
 	_, err = Process(ProcessOptions{LogPath: filepath.Join(state, "events.jsonl"), StateDir: state, Now: t0})
 	if !errors.Is(err, ErrBusy) {
 		t.Errorf("err = %v, want ErrBusy", err)
+	}
+}
+
+// Token usage is read from the session's transcript (path from the hooks) and
+// keeps up as the transcript grows, without counting anything twice.
+func TestProcessTracksTranscriptUsage(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	transcript := filepath.Join(t.TempDir(), "sess-1.jsonl")
+	line := func(id string, out int) string {
+		return `{"type":"assistant","requestId":"r-` + id + `","message":{"id":"m-` + id + `","model":"claude-test","usage":{"input_tokens":1,"output_tokens":` + strconv.Itoa(out) + `,"speed":"standard"}}}` + "\n"
+	}
+	if err := os.WriteFile(transcript, []byte(line("1", 10)+line("1", 10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.log(t0, map[string]any{"hook_event_name": "SessionStart", "transcript_path": transcript})
+	writeLog(t, filepath.Join(state, "events.jsonl"), f.recs)
+
+	usage := func(res ProcessResult) (int64, int64) {
+		tot := res.Sessions[0].Usage.Totals()
+		if len(tot) != 1 {
+			t.Fatalf("totals = %+v", tot)
+		}
+		return tot[0].Requests, tot[0].OutputTokens
+	}
+	if req, out := usage(f.process(t, state, t0)); req != 1 || out != 10 {
+		t.Errorf("first run: %d requests, %d output tokens; want 1, 10", req, out)
+	}
+	fh, _ := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o600)
+	fh.WriteString(line("2", 5))
+	fh.Close()
+	if req, out := usage(f.process(t, state, t0)); req != 2 || out != 15 {
+		t.Errorf("after growth: %d requests, %d output tokens; want 2, 15", req, out)
 	}
 }

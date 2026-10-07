@@ -148,6 +148,7 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 
 	sessions = sortedSessions(byID)
 	sessions, res.Pruned = st.Prune(sessions, opts.Now)
+	UpdateUsage(sessions)
 	if err := Attribute(sessions, opts.Options, opts.Now); err != nil {
 		return res, err
 	}

@@ -232,6 +232,9 @@ Nothing is sent without a token. With one, delivery sends exactly what
   directory `~`, and your user name `<user>`; tool file paths are
   repository-relative and dropped when outside it.
 - **Only pushed commits**, and prompts only if configuration allows them.
+- **Token usage** per model is read from the agent's transcript (usage fields
+  only — nothing else in the transcript is read or kept) and sent as counts;
+  Swarmia prices them.
 
 Prompts can still contain code you pasted into them.
 

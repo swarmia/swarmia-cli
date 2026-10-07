@@ -199,7 +199,11 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
 Added after reviewing git-ai (2026-10-06; see "Lessons from git-ai"), in
 suggested order:
 
-10. **Token usage and cost per session.** Hooks carry no token counts, but every
+10. ✅ **Token usage per session** (done 2026-10-06; `internal/usage`, payload
+    `usage`, docs in `docs/ingest-api.md`). Tokens only — cost is priced
+    server-side. Matches an independent count over this repo's own transcript
+    exactly. Sessions folded before this change have no transcript path and
+    show no usage. Original plan: Hooks carry no token counts, but every
     Claude Code payload has `transcript_path`. At session end (and
     incrementally), read the agent's transcript and sum input/output/cache
     tokens and cost per model; add them to the payload. Covers use case #6
@@ -344,10 +348,8 @@ choices on two fronts; what it does well became milestones 10–14 and a D9 note
 
 - RFC owner sign-off on local matching (principle 2) and on dropping git storage.
 - Order among the four next agents.
-- Quiet period length for no-commit sessions (D14) and retention window (30 days
-  proposed).
+- Retention window: 30 days implemented; revisit with dogfood data.
 - Which remote counts as "pushed" with multiple remotes / forks (proposal: any
   remote whose URL maps to the token's org).
-- Worker mechanism details: detached child process vs. OS scheduler; lock to
-  ensure a single worker per repo.
-- Server ingest API shape — to agree with the monorepo team.
+- Tell the `hook`/consumer side about the additive `usage` field (it passes
+  unknown fields through untouched).
