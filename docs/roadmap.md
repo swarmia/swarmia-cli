@@ -418,6 +418,24 @@ choices on two fronts; what it does well became milestones 10–14 and a D9 note
 - **Known human:** IDE extensions (VS Code, JetBrains, + others) report saved
   files, so lines are AI / known human / unknown (milestone 14).
 
+## Before publishing the npm package
+
+Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
+
+- **Launcher latency:** the Node launcher adds ~85 ms per hook (91 ms vs 7 ms
+  for the binary directly) — on every tool call, twice. Replace it with a POSIX
+  `sh` launcher resolving the sibling platform package (same relative path in
+  npm and pnpm layouts).
+- **Missing `node_modules`:** project-scope hooks pointing at
+  `node_modules/.bin/swarmia-cli` fail on every tool call in a fresh clone or
+  new worktree before `pnpm install`. `install` should write commands that
+  quietly do nothing when the binary isn't there.
+- **Release workflow:** tag-triggered build of the four binaries with the
+  version baked in, versions synced across the five `package.json` files,
+  publish platform packages then `@swarmia/cli`.
+- **Decisions:** public npmjs (simplest; publishes the binary of an internal
+  repo) vs private registry (auth for every developer and CI); license.
+
 ## Still open
 
 - RFC owner sign-off on local matching (principle 2) and on dropping git storage.
