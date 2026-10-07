@@ -132,7 +132,7 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 		if scope == agent.ScopeProject {
 			ref = detectBinaryRef(repoDir)
 		} else {
-			ref = executableRef()
+			ref = executableRef(repoDir, scope)
 		}
 	}
 	fmt.Fprintf(out, "swarmia-cli: %s (%s)\n", ref, ref.source)
@@ -253,11 +253,8 @@ func detectBinaryRef(repoDir string) binaryRef {
 	if isExecutable(filepath.Join(repoDir, binaryName)) {
 		return binaryRef{rel: binaryName, source: "local binary at repo root"}
 	}
-	// The package's own launcher, not node_modules/.bin: pnpm's .bin shim is
-	// itself a shell script that forks several processes, doubling the cost of
-	// every hook. npm and pnpm both provide this path for direct dependencies.
-	if isExecutable(filepath.Join(repoDir, "node_modules", "@swarmia", "cli", "bin", binaryName)) {
-		return binaryRef{rel: "node_modules/@swarmia/cli/bin/" + binaryName, source: "npm dependency (@swarmia/cli)"}
+	if ref, ok := npmLauncherRef(repoDir); ok {
+		return ref
 	}
 	if isExecutable(filepath.Join(repoDir, "node_modules", ".bin", binaryName)) {
 		return binaryRef{rel: "node_modules/.bin/" + binaryName, source: "npm dependency (node_modules/.bin)"}
@@ -268,16 +265,47 @@ func detectBinaryRef(repoDir string) binaryRef {
 	return binaryRef{cmd: binaryName, source: "not found; assuming it will be on $PATH"}
 }
 
-// executableRef is the absolute path of the running swarmia-cli, shell-quoted
-// if needed: personal installs (local, user scope) point straight at the binary
-// that installed them, so it needn't be on $PATH.
-func executableRef() binaryRef {
+// npmLauncherRef is the repository's @swarmia/cli dependency's launcher, if
+// it has one. It's the package's own launcher, not node_modules/.bin: pnpm's
+// .bin shim is itself a shell script that forks several processes, doubling the
+// cost of every hook. npm and pnpm both provide this path for direct
+// dependencies.
+func npmLauncherRef(repoDir string) (binaryRef, bool) {
+	rel := "node_modules/@swarmia/cli/bin/" + binaryName
+	if !isExecutable(filepath.Join(repoDir, filepath.FromSlash(rel))) {
+		return binaryRef{}, false
+	}
+	return binaryRef{rel: rel, source: "npm dependency (@swarmia/cli)"}, true
+}
+
+// executableRef is how personal installs (local, user scope) run swarmia-cli:
+// the binary that installed them, so it needn't be on $PATH.
+func executableRef(repoDir string, scope agent.Scope) binaryRef {
 	exe, err := os.Executable()
 	if err == nil {
 		exe, err = filepath.EvalSymlinks(exe)
 	}
 	if err != nil {
 		return binaryRef{cmd: binaryName, source: "can't resolve this binary's path; assuming swarmia-cli is on $PATH"}
+	}
+	return refForExecutable(exe, repoDir, scope)
+}
+
+// refForExecutable is the reference to the binary at exe, a real path, for
+// hooks in scope: its absolute path, shell-quoted if needed. Run from the
+// repository's npm dependency, though, exe is a platform package's binary at
+// a path that can change with every upgrade (pnpm's is versioned:
+// node_modules/.pnpm/@swarmia+cli-darwin-arm64@0.1.0/…), so hooks run the
+// package's launcher instead, which finds whichever version is installed.
+func refForExecutable(exe, repoDir string, scope agent.Scope) binaryRef {
+	if root, err := filepath.EvalSymlinks(repoDir); err == nil &&
+		strings.HasPrefix(exe, filepath.Join(root, "node_modules")+string(filepath.Separator)) {
+		if ref, ok := npmLauncherRef(root); ok {
+			if scope == agent.ScopeUser { // for every repository, not just this one
+				ref = binaryRef{cmd: shellQuote(filepath.Join(root, filepath.FromSlash(ref.rel))), source: ref.source}
+			}
+			return ref
+		}
 	}
 	return binaryRef{cmd: shellQuote(exe), source: "this swarmia-cli binary"}
 }

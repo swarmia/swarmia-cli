@@ -553,9 +553,46 @@ func TestInstallUserScope(t *testing.T) {
 
 // Without --binary, personal scopes point at this binary by absolute path.
 func TestExecutableRefIsAbsolute(t *testing.T) {
-	ref := executableRef().cmd
+	ref := executableRef(t.TempDir(), agent.ScopeLocal).cmd
 	if !filepath.IsAbs(strings.Trim(ref, "'")) {
 		t.Errorf("executableRef = %q, want an absolute path", ref)
+	}
+}
+
+// Run from the repository's npm dependency, personal installs point at the
+// package's launcher, not the platform binary's versioned path, so upgrading
+// the dependency doesn't break them.
+func TestRefForExecutableFromNpmDependency(t *testing.T) {
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(repo, "node_modules", ".pnpm", "@swarmia+cli-darwin-arm64@0.1.0",
+		"node_modules", "@swarmia", "cli-darwin-arm64", "bin", binaryName)
+	elsewhere := filepath.Join(t.TempDir(), "node_modules", "@swarmia", "cli-darwin-arm64", "bin", binaryName)
+
+	// Without the launcher (say, a dependency of a workspace package only),
+	// there's nothing better than the binary itself.
+	if got := refForExecutable(exe, repo, agent.ScopeLocal); got.cmd != exe {
+		t.Errorf("without a launcher: %+v, want the binary", got)
+	}
+
+	launcher := filepath.Join(repo, "node_modules", "@swarmia", "cli", "bin", binaryName)
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := refForExecutable(exe, repo, agent.ScopeLocal); got.rel != "node_modules/@swarmia/cli/bin/swarmia-cli" {
+		t.Errorf("local scope: %+v, want the launcher relative to the repository", got)
+	}
+	if got := refForExecutable(exe, repo, agent.ScopeUser); got.cmd != launcher {
+		t.Errorf("user scope: %+v, want the launcher's absolute path", got)
+	}
+	// Another repository's or a global npm install is used as is.
+	if got := refForExecutable(elsewhere, repo, agent.ScopeLocal); got.cmd != elsewhere {
+		t.Errorf("binary outside the repository: %+v, want the binary", got)
 	}
 }
 

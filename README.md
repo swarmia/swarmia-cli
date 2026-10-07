@@ -148,7 +148,9 @@ Things to know:
   on `$PATH`. Until the repository's one exists — in a fresh clone or worktree,
   before `make build` or `pnpm install` — the hooks quietly do nothing.
 - **`local`** and **`user`** hooks point at the binary that ran `install`, by
-  absolute path — rebuilding it updates them.
+  absolute path — rebuilding it updates them. Run from the repository's npm
+  devDependency (`pnpm exec swarmia-cli install --scope local`), they point at
+  its launcher instead, so upgrading the dependency doesn't break them.
 - **`local`** settings live in one checkout: new git worktrees don't get them,
   so run `install --scope local --dir <worktree>` there too.
 - **`user`** scope captures every repository you open a coding agent in,
