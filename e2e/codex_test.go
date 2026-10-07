@@ -34,7 +34,10 @@ func (codex) install(e *env, version string) {
 	e.run(e.root, nil, "npm", "install", "--prefix", prefix, "--no-audit", "--no-fund", "--loglevel=error",
 		"@openai/codex@"+version)
 	e.agentBin = filepath.Join(prefix, "node_modules", ".bin", "codex")
-	e.version = strings.TrimSpace(e.run(e.root, nil, e.agentBin, "--version"))
+	// The version is the last line: Codex may warn first (e.g. about its
+	// helper binaries under a temporary CODEX_HOME).
+	out := strings.Split(strings.TrimSpace(e.run(e.root, nil, e.agentBin, "--version")), "\n")
+	e.version = strings.TrimSpace(out[len(out)-1])
 	e.t.Logf("Codex %s (requested %q)", e.version, version)
 }
 

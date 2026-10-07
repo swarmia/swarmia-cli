@@ -140,16 +140,35 @@ func runScenario(t *testing.T, ag agent) {
 			p    payload
 			runs []agentRun
 		}{{"S1", p1, []agentRun{run1, run3}}, {"S2", p2, []agentRun{run2}}} {
-			var streamed int
+			// Every edit and shell call must be captured: attribution depends on
+			// them. Other tools are only reported, since agents have stopped
+			// running hooks for some read-only ones (Claude Code 2.1.293 ran
+			// none for a Grep).
+			streamed, captured := map[string]int{}, map[string]int{}
 			for _, r := range c.runs {
-				streamed += len(r.ToolUses)
+				for _, name := range r.ToolUses {
+					streamed[name]++
+				}
 				if len(r.HookErrors) > 0 {
 					t.Errorf("%s: hooks reported errors: %v", c.name, r.HookErrors)
 				}
 			}
+			for _, tool := range c.p.Tools {
+				captured[tool.Name]++
+			}
 			m.CapturedToolCalls += len(c.p.Tools)
-			if len(c.p.Tools) < streamed || streamed == 0 {
-				t.Errorf("%s: captured %d tool calls; the agent's streams show %d", c.name, len(c.p.Tools), streamed)
+			if len(streamed) == 0 {
+				t.Errorf("%s: the agent's streams show no tool calls", c.name)
+			}
+			for name, n := range streamed {
+				switch {
+				case captured[name] >= n:
+				case editOrShellTools[name]:
+					t.Errorf("%s: captured %d %s calls; the agent's streams show %d", c.name, captured[name], name, n)
+				default:
+					m.UncapturedToolCalls += n - captured[name]
+					t.Logf("%s: captured %d %s calls; the agent's streams show %d (no hooks ran for the rest)", c.name, captured[name], name, n)
+				}
 			}
 			if len(c.p.Prompts) != len(c.runs) {
 				t.Errorf("%s: %d prompts captured, want %d", c.name, len(c.p.Prompts), len(c.runs))
@@ -312,7 +331,10 @@ func runScenario(t *testing.T, ag agent) {
 		if len(p1.Prompts) == 0 || !strings.Contains(p1.Prompts[0].Text, "[REDACTED:") {
 			t.Errorf("prompt not redacted: %+v", p1.Prompts)
 		}
-		if strings.Contains(raw, e.root) || strings.Contains(raw, e.home) {
+		// The repository and home directories are masked. (The sandbox's own
+		// root above them isn't: agents probe parent directories for
+		// AGENTS.md, and in real use those are under the home directory.)
+		if strings.Contains(raw, e.repo) || strings.Contains(raw, e.home) {
 			t.Error("the payload contains local paths")
 		}
 		for _, p := range []payload{p1, p2} {
@@ -470,6 +492,9 @@ func changedLines(before, after map[string]string) []string {
 	return out
 }
 
+// editOrShellTools are the tools whose calls attribution needs.
+var editOrShellTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "Bash": true, "apply_patch": true}
+
 func hasTool(p payload, name string) bool {
 	for _, t := range p.Tools {
 		if t.Name == name {
@@ -606,15 +631,17 @@ type sessionMetrics struct {
 }
 
 type metrics struct {
-	Agent             string                    `json:"agent"`
-	AgentVersion      string                    `json:"agent_version"`
-	Model             string                    `json:"model"`
-	CostUSD           float64                   `json:"cost_usd"`
-	AgentToolCalls    int                       `json:"agent_tool_calls"`
-	CapturedToolCalls int                       `json:"captured_tool_calls"`
-	OutputTokens      int64                     `json:"output_tokens"`
-	Resumed           bool                      `json:"resumed_session_committed"`
-	Sessions          map[string]sessionMetrics `json:"sessions"`
+	Agent             string  `json:"agent"`
+	AgentVersion      string  `json:"agent_version"`
+	Model             string  `json:"model"`
+	CostUSD           float64 `json:"cost_usd"`
+	AgentToolCalls    int     `json:"agent_tool_calls"`
+	CapturedToolCalls int     `json:"captured_tool_calls"`
+	// UncapturedToolCalls are read-only calls no hook ran for.
+	UncapturedToolCalls int                       `json:"uncaptured_tool_calls"`
+	OutputTokens        int64                     `json:"output_tokens"`
+	Resumed             bool                      `json:"resumed_session_committed"`
+	Sessions            map[string]sessionMetrics `json:"sessions"`
 }
 
 func writeMetrics(e *env, m metrics) {
