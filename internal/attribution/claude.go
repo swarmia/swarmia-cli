@@ -138,6 +138,7 @@ const maxDiffCells = 4_000_000
 // it, runs closer than 2*diffContext merged, as in a unified diff.
 func diffHunks(before, after string) []Hunk {
 	b, added := addedFlags(before, after)
+	replaced := removedLines(before, after)
 
 	var hunks []Hunk
 	for j := 0; j < len(b); j++ {
@@ -153,7 +154,7 @@ func diffHunks(before, after string) []Hunk {
 			}
 		}
 		start, end := max(j-diffContext, 0), min(last+1+diffContext, len(b))
-		var h Hunk
+		h := Hunk{Replaced: replaced}
 		for k := start; k < end; k++ {
 			h.Lines = append(h.Lines, HunkLine{Text: b[k], Added: added[k]})
 		}
@@ -161,6 +162,26 @@ func diffHunks(before, after string) []Hunk {
 		j = end - 1
 	}
 	return hunks
+}
+
+// removedLines lists the non-blank lines of before that after no longer has
+// (as a multiset): what the edit replaced or deleted.
+func removedLines(before, after string) []string {
+	count := map[string]int{}
+	for _, l := range splitLines(after) {
+		count[l]++
+	}
+	var out []string
+	for _, l := range splitLines(before) {
+		if count[l] > 0 {
+			count[l]--
+			continue
+		}
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // addedFlags splits after into lines and marks those not present in before

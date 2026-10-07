@@ -292,3 +292,58 @@ func TestOwnCommitsUseTheReflog(t *testing.T) {
 		t.Errorf("commits = %v, want only the local one %s (not fetched %s)", shas, local[:7], fetched[:7])
 	}
 }
+
+// A commit rebased after a later session's edit holds the pre-edit lines;
+// the later session (which only renamed them) must not be credited with them.
+func TestRebasedCommitIsNotCreditedToALaterEditor(t *testing.T) {
+	f := newFixture(t)
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	original := strings.Join([]string{
+		`import { describe, expect, it } from "vitest";`,
+		`import { isSecureURL } from "../src";`,
+		``,
+		`describe("isSecureURL", () => {`,
+		`  it("accepts https and wss URLs", () => {`,
+		`    expect(isSecureURL("https://example.com")).toBe(true);`,
+		`    expect(isSecureURL("wss://example.com/socket")).toBe(true);`,
+		`  });`,
+		`  it("rejects other protocols", () => {`,
+		`    expect(isSecureURL("http://example.com")).toBe(false);`,
+		`    expect(isSecureURL("ftp://files.example.com")).toBe(false);`,
+		`  });`,
+		`});`,
+	}, "\n") + "\n"
+	renamed := strings.ReplaceAll(original, "isSecureURL", "hasSecureProtocol")
+
+	// Session 1 writes it; the developer commits it.
+	f.agentWrite(t0, "utils.ts", original, nil)
+	f.commit(t0.Add(time.Minute), "me@example.com", "Add isSecureURL", map[string]string{"utils.ts": original})
+
+	// Session 2 renames it (edits after that commit).
+	raw, _ := json.Marshal(map[string]any{
+		"hook_event_name": "PostToolUse", "session_id": "sess-2", "tool_name": "Write",
+		"tool_input":    map[string]any{"file_path": filepath.Join(f.root, "utils.ts"), "content": renamed},
+		"tool_response": map[string]any{"originalFile": original},
+	})
+	f.recs = append(f.recs, events.Record{LoggedAt: t0.Add(2 * time.Minute).Format(time.RFC3339), Git: &events.Git{Root: f.root}, Event: raw})
+
+	// The developer rebases the first commit onto a teammate's work, which
+	// gives it a committer date after session 2's edit.
+	f.git(t0.Add(3*time.Minute), "me@example.com", "checkout", "-q", "-b", "teammate", "HEAD~1")
+	f.commit(t0.Add(3*time.Minute), "teammate@example.com", "teammate", map[string]string{"team.txt": "x\n"})
+	f.git(t0.Add(4*time.Minute), "me@example.com", "checkout", "-q", "main")
+	f.git(t0.Add(4*time.Minute), "me@example.com", "rebase", "-q", "teammate")
+	rebased := f.git(t0, "me@example.com", "rev-parse", "HEAD")
+
+	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sessions {
+		for _, c := range s.Commits() {
+			if s.ID == "sess-2" && c.SHA == rebased {
+				t.Errorf("session 2 credited with %v in the rebased commit, which predates its rename", c.Files)
+			}
+		}
+	}
+}

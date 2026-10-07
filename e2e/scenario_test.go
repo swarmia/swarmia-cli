@@ -102,7 +102,9 @@ func TestClaudeCode(t *testing.T) {
 
 	// 5. S1 is resumed for a follow-up; the developer commits and pushes.
 	run3 := e.agentStep(work(s1), "3-resume", s1,
-		"Add a short JSDoc comment above hasSecureProtocol in src/utils.ts describing what it returns. Do not run git commands.",
+		"Now add and export a function `isInsecureURL(input: string): boolean` in src/utils.ts that returns "+
+			"the opposite of hasSecureProtocol for absolute URLs and false for relative ones, and add a test for it "+
+			"in test/secure.test.ts. Use single quotes. Do not run git commands or any formatter.",
 		true)
 	resumed := strings.TrimSpace(e.run(e.repo, nil, "git", "status", "--porcelain")) != ""
 	if resumed {
@@ -252,9 +254,13 @@ func TestClaudeCode(t *testing.T) {
 						case want != "":
 							sm.Missed++
 							t.Logf("%s: missed %s %q (expected %s)", name, key, text, want)
-						case attributed && !anyAgent(text):
+						case attributed && (!anyAgent(text) || w.preexisting[strings.TrimRight(text, " \t")]):
+							// No agent wrote it, or it was there before this
+							// session started and the session didn't write it.
+							// (Another session's line this one later changed is
+							// fine: many-to-many.)
 							sm.FalsePositives++
-							t.Logf("%s: attributed a line no agent wrote: %s %q (%s)", name, key, text, got)
+							t.Logf("%s: attributed a line it didn't write: %s %q (%s)", name, key, text, got)
 						}
 					}
 				}
@@ -315,6 +321,10 @@ func TestClaudeCode(t *testing.T) {
 type agentWork struct {
 	raw  map[string]bool // trailing-whitespace-trimmed text
 	norm map[string]bool // normalizeLine text
+	// preexisting holds every line in the working tree before the session's
+	// first run: lines the session can't have written unless it wrote them
+	// again itself.
+	preexisting map[string]bool
 }
 
 func (w *agentWork) add(line string) {
@@ -344,6 +354,14 @@ func (w *agentWork) owns(text, tweaked string) string {
 func (e *env) agentStep(w *agentWork, step, sessionID, prompt string, resume bool) agentRun {
 	e.t.Helper()
 	before := snapshotTree(e.t, e.repo)
+	if w.preexisting == nil {
+		w.preexisting = map[string]bool{}
+		for _, content := range before {
+			for _, l := range strings.Split(content, "\n") {
+				w.preexisting[strings.TrimRight(l, " \t")] = true
+			}
+		}
+	}
 	r := e.runAgent(step, sessionID, prompt, resume)
 	for _, l := range changedLines(before, snapshotTree(e.t, e.repo)) {
 		w.add(l)

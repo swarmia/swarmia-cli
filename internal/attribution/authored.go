@@ -29,7 +29,7 @@ func AuthoredOnly(hunks []Hunk, after string, refs ...string) []Hunk {
 	}
 	var out []Hunk
 	for _, h := range hunks {
-		kept := Hunk{Lines: make([]HunkLine, len(h.Lines))}
+		kept := Hunk{Lines: make([]HunkLine, len(h.Lines)), Replaced: h.Replaced}
 		anyAdded := false
 		for i, l := range h.Lines {
 			kept.Lines[i] = HunkLine{Text: l.Text}
@@ -57,15 +57,19 @@ func countNormalized(text string) map[string]int {
 	return counts
 }
 
-// Encode renders a hunk as diff-style lines: "+" for added, " " for context.
+// Encode renders a hunk as diff-style lines: "+" for added, " " for context,
+// then "-" for the replaced lines.
 func (h Hunk) Encode() []string {
-	out := make([]string, len(h.Lines))
-	for i, l := range h.Lines {
+	out := make([]string, 0, len(h.Lines)+len(h.Replaced))
+	for _, l := range h.Lines {
 		if l.Added {
-			out[i] = "+" + l.Text
+			out = append(out, "+"+l.Text)
 		} else {
-			out[i] = " " + l.Text
+			out = append(out, " "+l.Text)
 		}
+	}
+	for _, r := range h.Replaced {
+		out = append(out, "-"+r)
 	}
 	return out
 }
@@ -76,6 +80,10 @@ func DecodeHunk(lines []string) Hunk {
 	for _, l := range lines {
 		if l == "" {
 			h.Lines = append(h.Lines, HunkLine{})
+			continue
+		}
+		if l[0] == '-' {
+			h.Replaced = append(h.Replaced, l[1:])
 			continue
 		}
 		h.Lines = append(h.Lines, HunkLine{Text: l[1:], Added: l[0] == '+'})

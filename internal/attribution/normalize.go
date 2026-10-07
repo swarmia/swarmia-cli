@@ -13,7 +13,7 @@ import (
 // Version identifies the matching rules. It travels with every result so the
 // server can discount output from versions later found to be wrong; bump it on
 // any change that alters results.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // normalize maps a line to the form formatters can't change: no whitespace at
 // all, no trailing commas or semicolons (also before a closing bracket), and a

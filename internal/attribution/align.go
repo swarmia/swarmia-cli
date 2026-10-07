@@ -11,6 +11,10 @@ import (
 // attributed.
 type Hunk struct {
 	Lines []HunkLine
+	// Replaced are the lines the edit removed. A committed line equal to one
+	// of them is the version from before the edit, so it is never attributed
+	// as the agent's line modified — e.g. in a commit rebased after the edit.
+	Replaced []string
 }
 
 type HunkLine struct {
@@ -140,8 +144,17 @@ func MatchHunk(h Hunk, content string) Match {
 	usedH := make([]bool, len(H))
 	usedF := make([]bool, len(F))
 	classes := map[int]Class{}
+	replaced := map[string]bool{}
+	for _, r := range h.Replaced {
+		if n := normalize(r); n != "" {
+			replaced[n] = true
+		}
+	}
 	for range maxIterations {
 		pairs := align(H, F, usedH, usedF)
+		if len(replaced) > 0 {
+			pairs = withoutPreEditLines(pairs, F, replaced)
+		}
 		if len(pairs) == 0 || !accept(H, pairs, needEvidence) {
 			break
 		}
@@ -168,6 +181,20 @@ func MatchHunk(h Hunk, content string) Match {
 	}
 	sort.Slice(m.Lines, func(a, b int) bool { return m.Lines[a].Line < m.Lines[b].Line })
 	return m
+}
+
+// withoutPreEditLines drops `modified` pairs whose file line is a line the
+// edit replaced: the file holds the pre-edit version there, not an edit of
+// the agent's line.
+func withoutPreEditLines(pairs []pair, F []line, replaced map[string]bool) []pair {
+	kept := pairs[:0:0]
+	for _, p := range pairs {
+		if p.class == Modified && len(p.f) == 1 && replaced[F[p.f[0]].norm] {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept
 }
 
 // pair links hunk lines to file lines: usually one to one, or one to several
