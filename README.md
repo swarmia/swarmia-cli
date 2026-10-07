@@ -3,15 +3,14 @@
 The Swarmia Agent CLI answers a question coding-agent analytics can't: **which
 lines of which commits came from an AI coding agent, and from which session?**
 
-It hooks into your coding agent (Claude Code today), records what the agent
+It hooks into your coding agent (Claude Code or Codex), records what the agent
 writes, works out on your machine which committed lines those edits became,
 and — once configured — sends Swarmia line numbers and session metadata.
 Never your source code.
 
-> **Status:** early, but end-to-end tested against real Claude Code releases.
-> Claude Code is the only supported agent so far; Codex, Cursor, Copilot CLI
-> and Gemini CLI are planned. The npm package isn't published yet. Without a
-> token configured, nothing leaves your machine.
+> **Status:** early, but end-to-end tested against real Claude Code and Codex
+> releases. Cursor, Copilot CLI and Gemini CLI are planned. The npm package
+> isn't published yet. Without a token configured, nothing leaves your machine.
 
 ## How it works
 
@@ -103,7 +102,8 @@ size of the repository's working tree.
   git repositories (partial commits, amends, squashes, rebases onto a
   teammate's commits). CI enforces minimum precision and recall.
 - **An end-to-end suite** ([docs/e2e.md](docs/e2e.md)) that runs real Claude
-  Code releases nightly on an open-source TypeScript repository: the agent
+  Code and Codex releases (each on two release channels) nightly on an
+  open-source TypeScript repository: the agent
   writes code, a script formats, tweaks, commits, rebases, squashes and
   pushes, and the suite checks capture, attribution, token usage and payload
   privacy against an independent oracle.
@@ -123,19 +123,21 @@ repository devDependency) is on its way. macOS and Linux are supported.
 ### 2. Install the hooks
 
 `swarmia-cli install` adds its hooks to the coding agents configured in a
-repository (Claude Code: a `.claude` directory). Pick a **scope**:
+repository (Claude Code: a `.claude` directory; Codex: a `.codex` directory).
+Pick a **scope**:
 
-| Scope | Writes to | Use it when |
-|---|---|---|
-| `project` (default) | `.claude/settings.json` (committed) | the whole team should be tracked in this repository |
-| `local` | `.claude/settings.local.json` (gitignored) | you want it for yourself in one repository |
-| `user` | `~/.claude/settings.json` | you want it in every repository on this machine |
+| Scope | Claude Code | Codex | Use it when |
+|---|---|---|---|
+| `project` (default) | `.claude/settings.json` (committed) | `.codex/hooks.json` (committed) | the whole team should be tracked in this repository |
+| `local` | `.claude/settings.local.json` (gitignored) | — (Codex has no such file) | you want it for yourself in one repository |
+| `user` | `~/.claude/settings.json` | `~/.codex/hooks.json` | you want it in every repository on this machine |
 
 ```sh
 swarmia-cli install                              # project scope, in the current repository
 swarmia-cli install --scope local                # just you, here
 swarmia-cli install --scope local --dir ../app   # just you, in another repository
 swarmia-cli install --dry-run                    # preview
+swarmia-cli install --trust                      # also trust the Codex hooks for yourself
 ```
 
 Things to know:
@@ -157,7 +159,18 @@ Things to know:
   repository would end up with hooks in both of its settings files (every
   event would be logged twice).
 
-Reload hooks in Claude Code with `/hooks`, or start a new session.
+Then activate them:
+
+- **Claude Code:** reload hooks with `/hooks`, or start a new session.
+- **Codex** runs a hook only once *you* have trusted it — each developer, for
+  project hooks too — and skips the others silently. Run `/hooks` in Codex and
+  approve swarmia-cli's six hooks, or let `swarmia-cli install --trust` record
+  that approval in your `~/.codex/config.toml` (it adds trust entries for
+  swarmia-cli's hooks and leaves the rest of the file as it was). Codex also
+  reads a project's `.codex/` only once you've trusted the project folder,
+  which it asks about the first time. `swarmia-cli config` warns about hooks
+  Codex won't run. Changing a hook's command (say, reinstalling with another
+  binary) needs trusting again.
 
 ### 3. See what it captured
 
@@ -205,9 +218,9 @@ sends right away; `send --dry-run` shows how many would go.
 
 | Command | What it does |
 |---|---|
-| `install` | add hooks to the coding agents in a repository |
+| `install` | add hooks to the coding agents in a repository (`--trust`: trust them in Codex) |
 | `report` | show recent sessions and the committed lines they produced |
-| `config` | show the effective configuration and where it comes from |
+| `config` | show the effective configuration and where it comes from; warn about untrusted Codex hooks |
 | `send` | send changed sessions to Swarmia now |
 | `process` | fold the event log and attribute sessions (runs automatically) |
 | `state-dir` | print where this repository's local state lives |
@@ -226,6 +239,15 @@ spawning git:
 ```json
 {"logged_at":"2026-07-10T19:02:37Z","git":{"root":"/src/app","head":"ec37b5d…","branch":"main"},"event":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}}
 ```
+
+Hooks call `log-hook --agent codex` for Codex (Claude Code is the default),
+and the agent is recorded with each event. Codex runs hooks in the session's
+working directory and passes no project directory, so its project hooks walk
+up to the repository's `swarmia-cli` in `sh` (well under a millisecond; `git
+rev-parse` would cost ~10 ms per hook). Codex edits files with `apply_patch`;
+each patch chunk's lines before and after are diffed like an Edit tool's old
+and new strings. Its `SessionEnd` hook gets at most 3 seconds, which is
+enough: the processing it triggers runs detached.
 
 Around each Bash call, `log-hook` snapshots the worktree's dirty files before
 the command and, when it finishes (`PostToolUse` or `PostToolUseFailure`),
@@ -264,7 +286,8 @@ Files are owner-only (`0600`). Override the base with `$SWARMIA_STATE_DIR`;
   payloads (~6× smaller) — and the log is emptied. Identical records logged
   twice fold once.
 - **Usage:** token counts are read incrementally from the agent's transcript
-  (usage fields only), counting each API response once.
+  (usage fields only), counting each API response once. Codex records running
+  totals, so each response is the difference between consecutive ones.
 - **Attribute:** see below. Results are cached per session and recomputed only
   when its edits or candidate commits change.
 - **Prune:** sessions inactive for 30 days are deleted.
@@ -312,6 +335,7 @@ make test          # unit tests, golden cases and fuzzers (with CI thresholds)
 make vet           # go vet (including the e2e package)
 make fmt           # gofmt -w
 make e2e           # end-to-end with a real Claude Code release (docs/e2e.md)
+make e2e E2E_AGENT=codex   # ... or Codex
 make npm-binaries  # cross-compile per-platform binaries into npm/platforms
 ```
 
@@ -341,7 +365,8 @@ internal/
   snapshot/        what shell commands changed in the worktree
   attribution/     matching agent edits to committed files (golden cases in testdata/)
   report/          folding the log into sessions; attributing them to commits
-  usage/           token usage from agent transcripts
+  usage/           token usage from agent transcripts (Claude Code) and rollouts (Codex)
+  codex/           Codex's hooks files and hook trust
   config/          layered configuration
   redact/          secret redaction and code stripping
   payload/         what delivery sends, with the privacy rules applied
