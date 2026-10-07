@@ -1,70 +1,75 @@
-#!/usr/bin/env node
-'use strict'
+#!/bin/sh
+# Launcher for the @swarmia/cli npm package. The CLI itself is a Go binary
+# shipped per platform as an optional dependency (@swarmia/cli-<os>-<arch>);
+# npm and pnpm install only the one matching the host. This script finds it and
+# execs it, so arguments, stdin/stdout/stderr and the exit code pass through
+# unchanged (log-hook reads its payload from stdin).
+#
+# Coding agents run hooks on every tool call and wait for them, so this is
+# POSIX sh rather than Node (~85 ms to start), and its common path forks no
+# process at all: no $(...), no uname, no dirname.
 
-// Thin launcher for the @swarmia/cli npm package. The actual CLI is a Go binary
-// shipped per platform as an optional dependency (@swarmia/cli-<platform>-<arch>).
-// npm installs only the package matching the host's os/cpu; this script resolves
-// that binary and runs it, passing through argv, stdin/stdout/stderr, and the exit
-// code unchanged — stdin passthrough matters because `log-hook` reads its payload
-// from stdin.
-
-const { spawnSync } = require('child_process')
-const path = require('path')
-
-// Windows is not supported yet (the CLI's file locking is POSIX-only).
-const SUPPORTED = new Set([
-  'darwin-arm64',
-  'darwin-x64',
-  'linux-arm64',
-  'linux-x64',
-])
-
-// Bases to resolve the platform package from. __dirname handles the common
-// (copied) npm install; process.cwd() and the invocation path handle installs
-// that symlink packages (pnpm, `file:` deps) where resolving from this script's
-// realpath would miss the consumer's node_modules — hooks run with the project
-// root as cwd, so its node_modules is found there.
-function resolutionBases() {
-  const bases = [__dirname, process.cwd()]
-  if (process.argv[1]) {
-    bases.push(path.dirname(process.argv[1]))
-  }
-  return bases
+# find_in <dir> <platforms>: look for an installed platform package relative to
+# <dir> (where this script was invoked from, or where it really lives), trying
+# <platforms> in order. Sets $count to the number of platforms found and
+# $first to the first one's binary.
+#   <dir>/../../cli-<p>                     the script's own bin/ dir: npm (hoisted,
+#                                           global) and pnpm keep the packages side by side
+#   <dir>/../@swarmia/cli-<p>               npm's node_modules/.bin
+#   <dir>/../node_modules/@swarmia/cli-<p>  npm nesting it under @swarmia/cli
+find_in() {
+  count=0
+  first=
+  for p in $2; do
+    for b in "$1/../../cli-$p/bin/swarmia-cli" \
+      "$1/../@swarmia/cli-$p/bin/swarmia-cli" \
+      "$1/../node_modules/@swarmia/cli-$p/bin/swarmia-cli"; do
+      if [ -x "$b" ]; then
+        count=$((count + 1))
+        [ -n "$first" ] || first=$b
+        break
+      fi
+    done
+  done
 }
 
-function resolveBinary() {
-  const key = `${process.platform}-${process.arch}`
-  if (!SUPPORTED.has(key)) {
-    throw new Error(
-      `swarmia-cli: unsupported platform ${key}. ` +
-        `Supported: ${[...SUPPORTED].join(', ')}.`
-    )
-  }
-  const pkg = `@swarmia/cli-${key}`
-  try {
-    return require.resolve(`${pkg}/bin/swarmia-cli`, { paths: resolutionBases() })
-  } catch {
-    throw new Error(
-      `swarmia-cli: the platform package ${pkg} is not installed.\n` +
-        `It ships as an optional dependency and should install automatically.\n` +
-        `Reinstall with optional dependencies enabled (e.g. 'npm install', not '--no-optional').`
-    )
-  }
-}
+all="darwin-arm64 darwin-x64 linux-arm64 linux-x64"
 
-let binary
-try {
-  binary = resolveBinary()
-} catch (err) {
-  process.stderr.write(`${err.message}\n`)
-  process.exit(1)
-}
+dir=${0%/*}
+[ "$dir" = "$0" ] && dir=.
+find_in "$dir" "$all"
 
-const result = spawnSync(binary, process.argv.slice(2), { stdio: 'inherit' })
+if [ "$count" -eq 0 ]; then
+  # Not next to how we were invoked: follow symlinks to the real script.
+  self=$0
+  while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+      /*) self=$link ;;
+      *) self=${self%/*}/$link ;;
+    esac
+  done
+  dir=${self%/*}
+  find_in "$dir" "$all"
+fi
 
-if (result.error) {
-  process.stderr.write(`swarmia-cli: failed to run ${binary}: ${result.error.message}\n`)
-  process.exit(1)
-}
-// Preserve the child's exit code; treat signal termination as failure.
-process.exit(typeof result.status === 'number' ? result.status : 1)
+if [ "$count" -gt 1 ]; then
+  # Several platforms installed (rare): prefer the host's own.
+  case $(uname -s)-$(uname -m) in
+    Darwin-arm64) want="darwin-arm64 darwin-x64" ;; # x64 also runs under Rosetta
+    Darwin-x86_64) want=darwin-x64 ;;
+    Linux-aarch64 | Linux-arm64) want=linux-arm64 ;;
+    Linux-x86_64) want=linux-x64 ;;
+    *) want= ;;
+  esac
+  find_in "$dir" "$want"
+fi
+
+if [ "$count" -gt 0 ]; then
+  exec "$first" "$@"
+fi
+
+echo "swarmia-cli: no platform package (@swarmia/cli-<os>-<arch>) for this system is installed." >&2
+echo "It ships as an optional dependency and should install automatically on macOS and" >&2
+echo "Linux (arm64, x64); reinstall with optional dependencies enabled (not --omit=optional)." >&2
+exit 1

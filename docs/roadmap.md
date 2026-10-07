@@ -422,10 +422,12 @@ choices on two fronts; what it does well became milestones 10–14 and a D9 note
 
 Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
 
-- **Launcher latency:** the Node launcher adds ~85 ms per hook (91 ms vs 7 ms
-  for the binary directly) — on every tool call, twice. Replace it with a POSIX
-  `sh` launcher resolving the sibling platform package (same relative path in
-  npm and pnpm layouts).
+- ✅ **Launcher latency** (fixed 2026-10-07): the Node launcher added ~85 ms per
+  hook. Now a POSIX `sh` launcher that forks nothing on its common path: 14 ms
+  per hook via npm or pnpm vs 8 ms for the binary directly (was 91 ms).
+  Project-scope hooks call the package's launcher, bypassing pnpm's `.bin`
+  shim (28 → 14 ms). Verified with packed tarballs: pnpm isolated, npm local,
+  npm global, and a path containing a space.
 - **Missing `node_modules`:** project-scope hooks pointing at
   `node_modules/.bin/swarmia-cli` fail on every tool call in a fresh clone or
   new worktree before `pnpm install`. `install` should write commands that

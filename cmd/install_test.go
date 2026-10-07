@@ -234,6 +234,18 @@ func TestDetectBinaryRefNodeModules(t *testing.T) {
 		t.Errorf("ref = %q, want the node_modules/.bin reference", ref)
 	}
 
+	// The package's own launcher is preferred over the .bin shim.
+	pkgBin := filepath.Join(repo, "node_modules", "@swarmia", "cli", "bin")
+	if err := os.MkdirAll(pkgBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgBin, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ref, _ := detectBinaryRef(repo); ref != "${CLAUDE_PROJECT_DIR}/node_modules/@swarmia/cli/bin/swarmia-cli" {
+		t.Errorf("ref = %q, want the package launcher", ref)
+	}
+
 	// A repo-root binary still takes precedence over node_modules.
 	if err := os.WriteFile(filepath.Join(repo, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)

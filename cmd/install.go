@@ -176,6 +176,12 @@ func detectBinaryRef(repoDir string) (ref, source string) {
 	if isExecutable(filepath.Join(repoDir, binaryName)) {
 		return "${CLAUDE_PROJECT_DIR}/" + binaryName, "local binary at repo root"
 	}
+	// The package's own launcher, not node_modules/.bin: pnpm's .bin shim is
+	// itself a shell script that forks several processes, doubling the cost of
+	// every hook. npm and pnpm both provide this path for direct dependencies.
+	if isExecutable(filepath.Join(repoDir, "node_modules", "@swarmia", "cli", "bin", binaryName)) {
+		return "${CLAUDE_PROJECT_DIR}/node_modules/@swarmia/cli/bin/" + binaryName, "npm dependency (@swarmia/cli)"
+	}
 	if isExecutable(filepath.Join(repoDir, "node_modules", ".bin", binaryName)) {
 		return "${CLAUDE_PROJECT_DIR}/node_modules/.bin/" + binaryName, "npm dependency (node_modules/.bin)"
 	}

@@ -141,8 +141,9 @@ swarmia-cli install --dry-run                    # preview
 Things to know:
 
 - **`project`** hooks reference the CLI the way the repository provides it: a
-  `swarmia-cli` binary at the repository root (development), a
-  `node_modules/.bin/swarmia-cli` (npm devDependency), or one on `$PATH`.
+  `swarmia-cli` binary at the repository root (development), the npm
+  devDependency's launcher (`node_modules/@swarmia/cli/bin/swarmia-cli`), or one
+  on `$PATH`.
 - **`local`** and **`user`** hooks point at the binary that ran `install`, by
   absolute path — rebuilding it updates them.
 - **`local`** settings live in one checkout: new git worktrees don't get them,
@@ -355,7 +356,10 @@ docs/              roadmap, ingest API, end-to-end suite
 
 `@swarmia/cli` follows the esbuild model: a small launcher (`npm/cli/bin`) plus
 one binary-only package per platform under `optionalDependencies`, so npm and
-pnpm install only the host's binary. To cut a release: bump the version in
+pnpm install only the host's binary. The launcher is POSIX `sh` that forks
+nothing on its common path — it adds ~6 ms per hook, where starting Node added
+~85 ms — and project-scope hooks call it directly rather than through
+`node_modules/.bin`, whose pnpm shim forks several processes of its own. To cut a release: bump the version in
 every `npm/**/package.json` in lockstep, `make npm-binaries`, then `npm publish`
 each platform package followed by `npm/cli`. Windows builds compile but aren't
 packaged or tested yet.
