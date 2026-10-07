@@ -1,17 +1,15 @@
 # Swarmia Agent CLI — Ingest API (v1)
 
-This is the contract between `swarmia-cli` (the client, this repository) and the
-ingest service that receives its data (the `hook` service). It describes exactly
-what the client sends today, what it expects back, and what Swarmia is
-responsible for doing with it.
+This is the contract between `swarmia-cli` (the client, this repository) and
+Swarmia's ingest endpoint. It describes exactly what the client sends, and what
+it expects back.
 
-**Processing is asynchronous.** `hook` checks each request's shape, publishes
-every session as its own message to a Pub/Sub queue, and answers with a result
-per session. Resolving the token to an organization, the repository check,
-storage and attribution joining happen downstream, after the client has its
-answer. So `accepted` means *queued*: the client learns about shape problems
-(`rejected`), but not about sessions the consumer later drops. (A way to check
-that is planned — see "Future: delivery status".)
+**Processing is asynchronous.** The endpoint checks each request's shape,
+queues every session for processing, and answers with a result per session.
+Resolving the token to an organization, checking the repository and storing the
+data happen afterwards. So `accepted` means *queued*: the client learns about
+shape problems (`rejected`), but not about sessions Swarmia later drops (for
+example, because the repository isn't connected to the token's organization).
 
 - **Base URL:** `https://hook.swarmia.com/cli` (clients can override it with the
   `endpoint` setting, e.g. to test against a local server).
@@ -61,9 +59,9 @@ the client can't prevent: a developer may paste code into a prompt.
   version of a session came from a request with a later `sent_at`, ignore the
   incoming one (still answer `accepted`).
 - **Batching.** One request carries 1–25 sessions and at most ~4 MB of JSON
-  before compression. Sessions in a batch are independent: `hook` answers for
-  each and publishes each as its own message, and the consumer must process
-  each on its own, never fail the batch as a whole.
+  before compression. Sessions in a batch are independent: the server answers
+  for each one separately and never fails the batch as a whole because of one
+  session.
 - **Sessions belong to one repository.** A session's `repo` is the repository the
   agent worked in. (One agent session in one repository maps to one payload.)
 
@@ -265,8 +263,8 @@ Display them as-is. Never try to reverse them.
 
 ### 200 OK — per-session results
 
-Once the request passes the whole-request checks below, `hook` answers `200`
-with one result per session it could identify:
+Once the request passes the whole-request checks below, the server answers
+`200` with one result per session it could identify:
 
 ```json
 {
@@ -280,8 +278,8 @@ with one result per session it could identify:
 | Field | Type | Description |
 |---|---|---|
 | `results[].session_id` | string | Echoes the session's id. |
-| `results[].status` | string | `accepted` — published to the queue; `rejected` — failed a shape check. |
-| `results[].error` | string, only for `rejected` | `invalid payload: <field>` (a required field missing or of the wrong type), `repository unknown` (no `repo`), or `session too large` (the session's message exceeds the queue's ~9 MiB message limit). Shown to the developer by `swarmia-cli report`. |
+| `results[].status` | string | `accepted` — queued for processing; `rejected` — failed a shape check. |
+| `results[].error` | string, only for `rejected` | `invalid payload: <field>` (a required field missing or of the wrong type), `repository unknown` (no `repo`), or `session too large` (over ~9 MiB). Shown to the developer by `swarmia-cli report`. |
 
 Client behaviour:
 
@@ -290,11 +288,9 @@ Client behaviour:
   changes** (e.g. after an `origin` remote is added, `repository unknown` goes
   away on the next change).
 - **Left out of `results`:** treated as not sent and retried on the next run.
-  `hook` leaves out sessions whose publish failed, and sessions without a
-  `session_id` (which the client never sends).
 
-Whether the consumer later stores or drops an accepted session is invisible to
-the client.
+Whether Swarmia later stores or drops an accepted session isn't visible to the
+client.
 
 ### Errors — the whole request
 
@@ -304,320 +300,59 @@ the client.
 | `401` | No `Authorization` header, or the token isn't `swm_cli_` followed by 64+ lowercase hex characters. | Pauses delivery for 6 hours. (`swarmia-cli config` and `send` warn about a malformed token up front.) |
 | `404` / `405` | Any path other than `/cli/sessions`, or any method other than `POST`. | Backs off exponentially (a misconfigured `endpoint`). |
 | `413` | More than 25 sessions. | Splits the batch in half and retries (the client never sends more than 25). |
-| `429` | Rate limited, if added (e.g. by infrastructure in front of `hook`). | Waits for `Retry-After` (seconds) if given, else backs off exponentially. |
-| `503` | None of the sessions could be published to the queue. | Waits for `Retry-After` if given, else backs off exponentially. |
+| `429` | Rate limited. | Waits for `Retry-After` (seconds) if given, else backs off exponentially. |
+| `503` | None of the sessions could be queued. | Waits for `Retry-After` if given, else backs off exponentially. |
 | other `5xx` | Unexpected failures. | As `503`. |
 
 Error bodies are only logged (first ~200 characters). Network errors and
 timeouts (the client waits 30 s) back off like `5xx`. Because the client retries
-after timeouts, the same payload can be queued twice — consumers must be
-idempotent (upserts make that free).
+after timeouts, the same payload can arrive twice; the server's upserts make
+that harmless.
 
 ## Authentication and tokens
 
 - `Authorization: Bearer <token>`. The token identifies the **organization**.
-- **Format:** `swm_cli_` followed by 64 or more lowercase hex characters
-  (`hook` answers `401` to anything else). `hook` never forwards the token
-  itself: messages carry its SHA-256 digest (`tokenHash`), which the consumer
-  resolves to the organization. The CLI redacts `swm_cli_…` strings from
-  prompts and commands.
+- **Format:** `swm_cli_` followed by 64 or more lowercase hex characters. The
+  CLI redacts `swm_cli_…` strings from prompts and commands.
 - **The token is write-only and may be public.** Teams can commit it to a
   repository's `.swarmia.json` so every developer's CLI picks it up. Anyone who
-  can read that repository — including the whole internet for a public one —
-  can submit data with it. So a token must only allow submitting sessions for
-  its own organization: no reads, no other endpoints. Expect junk submissions
-  and validate accordingly (see Server responsibilities).
+  can read that repository can submit data with it, but it allows nothing else:
+  no reads, and only sessions for repositories connected to its organization
+  are kept.
 - Tokens are also distributed by MDM, user config files or the `SWARMIA_TOKEN`
   environment variable.
 
 ## Limits
 
-| Limit | Client guarantee | Server should |
-|---|---|---|
-| Sessions per request | ≤ 25 | `hook` answers `413` beyond 25. |
-| Request size (uncompressed JSON) | ≤ 4 MB, except a single session can exceed it | Decompressed before the handler; guard against decompression bombs. |
-| Session size | Usually < 100 KB; long sessions with many prompts can reach a few MB | `hook` rejects a session whose message exceeds ~9 MiB (`session too large`). |
-| Request rate | One request per batch per background run; background runs happen at session ends | Rate limit per token; answer `429` with `Retry-After`. |
-
-## Server responsibilities
-
-### `hook` (receiver) — as implemented
-
-1. Serve only `POST /cli/sessions` (others: `404`/`405`); the body arrives
-   gzip-decompressed.
-2. Check the `Authorization` header carries a token in the CLI format → else
-   `401`. The token is replaced by its SHA-256 digest (`tokenHash`) straight
-   away; the plaintext never reaches messages or logs.
-3. Whole-request checks → `400` / `413` as above.
-4. For each session: check required fields and types (`invalid payload:
-   <field>`), that `repo` is set (`repository unknown`), and the message size
-   (`session too large`); then publish it as its own `cli-ingest/session`
-   message carrying `schemaVersion`, `cliVersion`, `sentAt`, `userAgent`,
-   `tokenHash` and the session exactly as received (unknown fields included).
-5. Answer `200` with per-session results; leave out sessions whose publish
-   failed; answer `503` if nothing could be published.
-6. Never log prompts: the body is detached from the request before anything can
-   throw.
-
-### Consumer (downstream of the queue)
-
-1. **Authenticate** `tokenHash` → organization; drop messages with unknown or
-   revoked tokens.
-2. **Validate further.** `hook` only checked field presence and types; ignore
-   unknown fields (the client may add fields without bumping
-   `schema_version`).
-3. **Check the repository belongs to the organization.** Match `repo` against
-   the organization's connected repositories (GitHub/GitLab integration) and
-   drop sessions for others. This is what stops junk sent with a leaked token,
-   and keeps developers' personal projects out. Record why sessions were
-   dropped, per token — that is what the planned delivery status endpoint would
-   report.
-4. **Upsert** by (organization, `session_id`), replacing the stored payload,
-   unless the stored version came from a later `sent_at`. Duplicate messages are
-   expected.
-5. **Map the developer**: `author_email` → Swarmia identity, as for commits.
-6. **Join attribution with commits.**
-   - Commits are pushed, but the webhook for a push may arrive after the session
-     payload, and a pushed commit can still be force-pushed away. Store
-     attribution for unknown SHAs and resolve it when the commit shows up.
-   - Line numbers refer to the file as of that commit.
-   - **Squash and rebase merges:** the commits attributed are the developer's
-     own (pushed branch) commits. When a PR is squash-merged, the merge commit
-     contains the same lines at possibly different positions. Carry ranges
-     forward using the diff hunk headers between the PR's commits and the
-     merge commit (from the GitHub/GitLab API; file contents aren't needed and
-     shouldn't be stored).
-   - The same line can be attributed to several sessions (many-to-many).
-7. **Compute AI share as AI vs unknown, never AI vs human.** Per commit (or PR):
-   - The denominator is the non-blank lines the commit introduced, from the Git
-     provider's diff.
-   - AI lines are the lines attributed by any session, counted once, broken
-     down by `class`.
-   - Unknown lines are the rest. Never label them human-written.
-   - A commit with no attribution from any session — for instance because the
-     developer has no recorded sessions at all, or the CLI isn't installed — is
-     entirely unknown, not human.
-8. **Discount bad matcher versions:** keep `matcher_version` with the stored
-   attribution so results from a version found to be wrong can be excluded or
-   recomputed later.
-9. **Protect prompts.** Prompts are sensitive: only the session's author, the
-   organization's admins and Swarmia should be able to read them. Honour
-   `prompts_withheld` (no prompts stored). Free text is untrusted input: escape
-   it when rendering.
-10. **Never expect code.** If you need code for analysis (e.g. to show an "AI
-   blame" view), fetch it from the Git provider at display time using the SHA,
-   path and line ranges.
-
-## Future: delivery status
-
-`hook` only answers for shape problems, so the client can't tell whether an
-accepted session was stored or dropped downstream (repository not in the
-organization, unknown or revoked token). A
-separate, synchronous endpoint on `https://app.swarmia.com/` is planned for that:
-called with the same write-only token, it would answer — per session id the
-client sent, or summarised for the token — whether the session was received and
-stored, or dropped and why. It must not return any session content, since the
-token may be public. The CLI would surface the answer in `swarmia-cli report`
-and `swarmia-cli config`. Not part of v1; the request format above doesn't
-depend on it.
-
-## Example exchange
-
-Request (shown decompressed):
-
-```http
-POST /cli/sessions HTTP/1.1
-Authorization: Bearer swm_cli_3f9a0c…
-Content-Type: application/json
-Content-Encoding: gzip
-User-Agent: swarmia-cli/0.4.0
-
-{
-  "schema_version": 1,
-  "cli_version": "0.4.0",
-  "sent_at": "2026-10-06T22:05:00Z",
-  "sessions": [
-    {
-      "session_id": "e2e5c1d0-5f7a-4c1e-9d2b-3a4b5c6d7e8f",
-      "agent": "claude-code",
-      "model": "claude-opus-4-8",
-      "matcher_version": "0.1.0",
-      "cli_version": "0.4.0",
-      "repo": "github.com/acme/app",
-      "author_email": "dev@acme.com",
-      "started_at": "2026-10-06T21:58:40Z",
-      "ended_at": "2026-10-06T22:04:51Z",
-      "ended": true,
-      "prompts": [{ "at": "2026-10-06T21:58:45Z", "text": "add a FromShell helper" }],
-      "prompts_withheld": false,
-      "tools": [
-        { "at": "2026-10-06T21:59:02Z", "name": "Bash", "command": "cat > x.go <<EOF\n[2 lines omitted]\nEOF" }
-      ],
-      "commits": [
-        {
-          "sha": "5e96aa6d1b0e4f3c2a1908776655443322110099",
-          "path": "x.go",
-          "lines": [
-            { "start": 1, "end": 1, "class": "exact" },
-            { "start": 3, "end": 3, "class": "exact" }
-          ]
-        }
-      ],
-      "ai_lines_generated": 2,
-      "ai_lines_committed": 2
-    }
-  ]
-}
-```
-
-Response:
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{ "results": [ { "session_id": "e2e5c1d0-5f7a-4c1e-9d2b-3a4b5c6d7e8f", "status": "accepted" } ] }
-```
-
-## JSON Schema
-
-Request body (after decompression):
-
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hook.swarmia.com/cli/schemas/sessions-request-v1.json",
-  "type": "object",
-  "required": ["schema_version", "cli_version", "sent_at", "sessions"],
-  "properties": {
-    "schema_version": { "const": 1 },
-    "cli_version": { "type": "string" },
-    "sent_at": { "type": "string", "format": "date-time" },
-    "sessions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/session" } }
-  },
-  "$defs": {
-    "session": {
-      "type": "object",
-      "required": ["session_id", "agent", "matcher_version", "cli_version", "started_at", "ended_at",
-                   "ended", "prompts", "prompts_withheld", "tools", "commits",
-                   "ai_lines_generated", "ai_lines_committed"],
-      "properties": {
-        "session_id": { "type": "string", "minLength": 1 },
-        "agent": { "type": "string" },
-        "model": { "type": "string" },
-        "matcher_version": { "type": "string" },
-        "cli_version": { "type": "string" },
-        "repo": { "type": "string" },
-        "author_email": { "type": "string" },
-        "started_at": { "type": "string", "format": "date-time" },
-        "ended_at": { "type": "string", "format": "date-time" },
-        "ended": { "type": "boolean" },
-        "prompts": { "type": "array", "items": { "$ref": "#/$defs/prompt" } },
-        "prompts_withheld": { "type": "boolean" },
-        "tools": { "type": "array", "items": { "$ref": "#/$defs/tool" } },
-        "commits": { "type": "array", "items": { "$ref": "#/$defs/commit" } },
-        "ai_lines_generated": { "type": "integer", "minimum": 0 },
-        "ai_lines_committed": { "type": "integer", "minimum": 0 },
-        "usage": { "type": "array", "items": { "$ref": "#/$defs/usage" } }
-      }
-    },
-    "usage": {
-      "type": "object",
-      "required": ["model", "requests", "input_tokens", "output_tokens", "cache_read_input_tokens",
-                   "cache_creation_5m_input_tokens", "cache_creation_1h_input_tokens"],
-      "properties": {
-        "model": { "type": "string" },
-        "speed": { "type": "string" },
-        "subagent": { "type": "boolean" },
-        "requests": { "type": "integer", "minimum": 0 },
-        "input_tokens": { "type": "integer", "minimum": 0 },
-        "output_tokens": { "type": "integer", "minimum": 0 },
-        "cache_read_input_tokens": { "type": "integer", "minimum": 0 },
-        "cache_creation_5m_input_tokens": { "type": "integer", "minimum": 0 },
-        "cache_creation_1h_input_tokens": { "type": "integer", "minimum": 0 },
-        "web_search_requests": { "type": "integer", "minimum": 0 },
-        "web_fetch_requests": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "prompt": {
-      "type": "object",
-      "required": ["at", "text"],
-      "properties": {
-        "at": { "type": "string", "format": "date-time" },
-        "text": { "type": "string" }
-      }
-    },
-    "tool": {
-      "type": "object",
-      "required": ["at", "name"],
-      "properties": {
-        "at": { "type": "string", "format": "date-time" },
-        "name": { "type": "string" },
-        "file": { "type": "string" },
-        "command": { "type": "string" }
-      }
-    },
-    "commit": {
-      "type": "object",
-      "required": ["sha", "path", "lines"],
-      "properties": {
-        "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
-        "path": { "type": "string", "minLength": 1 },
-        "lines": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/range" } }
-      }
-    },
-    "range": {
-      "type": "object",
-      "required": ["start", "end", "class"],
-      "properties": {
-        "start": { "type": "integer", "minimum": 1 },
-        "end": { "type": "integer", "minimum": 1 },
-        "class": { "enum": ["exact", "normalized", "modified"] }
-      }
-    }
-  }
-}
-```
-
-Response body (200):
-
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hook.swarmia.com/cli/schemas/sessions-response-v1.json",
-  "type": "object",
-  "required": ["results"],
-  "properties": {
-    "results": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["session_id", "status"],
-        "properties": {
-          "session_id": { "type": "string" },
-          "status": { "enum": ["accepted", "rejected"] },
-          "error": { "type": "string" }
-        }
-      }
-    }
-  }
-}
-```
+| Limit | Client guarantee |
+|---|---|
+| Sessions per request | ≤ 25 (the server answers `413` beyond that). |
+| Request size (uncompressed JSON) | ≤ 4 MB, except a single session can exceed it. |
+| Session size | Usually < 100 KB; long sessions with many prompts can reach a few MB. The server rejects sessions over ~9 MiB (`session too large`). |
+| Request rate | One request per batch per background run; background runs happen at session ends. |
 
 ## Versioning
 
 - Additive changes (new optional fields, new `agent` values, new redaction
-  kinds, new tool names) don't change `schema_version`; the server must ignore
-  unknown fields and accept unknown enum-like values except `class`.
-- Breaking changes bump `schema_version`. The server should keep accepting the
+  kinds, new tool names) don't change `schema_version`; the server ignores
+  unknown fields and accepts unknown enum-like values except `class`.
+- Breaking changes bump `schema_version`. The server keeps accepting the
   previous version for a transition period, since developers update the CLI at
-  their own pace; answer `400` for versions it doesn't support.
+  their own pace.
 
-## Testing against a local server
+## Checking payloads with the CLI
 
-Point the CLI at a local implementation and send now:
+The CLI shows exactly what it would send, without sending anything:
+
+```sh
+swarmia-cli report --json            # the session payloads delivery would send
+swarmia-cli report --json --session <id>
+swarmia-cli send --dry-run           # how many sessions would be sent now
+swarmia-cli config                   # resolved token, endpoint and prompt sharing
+```
+
+To test a server implementation, point the CLI at it and send:
 
 ```sh
 SWARMIA_ENDPOINT=http://127.0.0.1:8080/cli SWARMIA_TOKEN=swm_cli_$(openssl rand -hex 32) swarmia-cli send
-swarmia-cli report --json   # the exact payloads it would send
 ```

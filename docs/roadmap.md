@@ -1,15 +1,12 @@
 # Swarmia Agent CLI — Roadmap
 
-> Working roadmap. Supersedes the Notion RFC
-> ("Swarmia Agent CLI: Tool for tracking agentic tool usage"). Feature context and
-> use cases: "Link sessions, prompts, and AI-generated code to source code (AI Git
-> Blame / Swarmia agent CLI)".
+> Working roadmap.
 
-## Summary of the change from the RFC
+## Summary of the change from the original design
 
-The RFC stores encrypted, full session logs (including source code) in
-`refs/ai-sessions/*` in the customer's git repo, and matches sessions to commits
-on Swarmia's servers. This plan instead:
+The original design stored encrypted, full session logs (including source code)
+in `refs/ai-sessions/*` in the customer's git repo, and matched sessions to
+commits on Swarmia's servers. This plan instead:
 
 1. **Matches locally.** The CLI attributes AI-generated lines to commits on the
    developer's machine, where it has the exact AI output and the exact committed
@@ -23,7 +20,7 @@ on Swarmia's servers. This plan instead:
 **Why:** none of the use cases need source code at rest. AI % per line/PR/dev,
 acceptance/survival rate, rework, cost-per-PR and incident linking need *line
 attribution*; session analysis, skill loop and struggle detection need *prompts
-and metadata*. The RFC's storage and encryption machinery exists only to protect
+and metadata*. The original storage and encryption machinery existed only to protect
 code we don't need.
 
 ## Principles (revised)
@@ -33,8 +30,7 @@ code we don't need.
 2. ~~Locally running code is as dumb as possible.~~ → Local code does capture,
    matching and redaction; everything else (aggregation, propagation through
    squash merges, thresholds, analytics) is server-side. Matching is versioned so
-   results from bad versions can be discounted. **Needs sign-off from the RFC
-   owner.**
+   results from bad versions can be discounted.
 3. Source code never leaves the developer's machine.
 4. Prompt privacy: only the author, Swarmia and customer admins see prompts; any
    individual can withhold their own prompts.
@@ -52,13 +48,13 @@ code we don't need.
 | D4 | Token distribution | **Both**: committed `.swarmia.json` (write-only token, like a Sentry DSN) and user config | User config (`~/.config/swarmia/config.json`, MDM or `swarmia-cli configure`) overrides repo config. No token anywhere → capture + match locally, send nothing. Accepted risk: a committed token allows junk submissions for that org → server-side validation/rate limits. |
 | D5 | Commit detection | **Lazy scan only** | On agent hooks and worker runs, scan `git log --all` + reflog since the oldest pending session. No git hooks, no daemon. Commits made after the developer stops using the agent are picked up at their next session. |
 | D6 | Partial edits | **Line-level diff** | For each located hunk, classify every committed line: `exact` (identical to AI output), `normalized` (D7), or `modified`/`human`. Server gets per-line classes, applies its own thresholds. |
-| D7 | Formatting-only differences | **Count as AI**, tagged `normalized` | Normalization per the RFC (whitespace, blank/comment lines, trailing `,`/`;`, quote style). |
+| D7 | Formatting-only differences | **Count as AI**, tagged `normalized` | Normalization ignores whitespace, blank/comment lines, trailing `,`/`;` and quote style. |
 | D8 | Git-ref storage | **Delete** `process-logs` / `refs/ai-sessions/*` | Remains in git history. |
 | D9 | Agents | Claude Code, then **Codex, Cursor, Copilot CLI, Gemini CLI** | Capture layer needs a per-agent payload normalizer (session id, tool names, edit shapes differ). Order within the four: TBD. Reference: git-ai's `agent-support/` and per-agent "presets" normalize hook JSON for 14 agents, including where each puts shell commands (`tool_input.command`, `toolInput.command`, `tool_input.cmd`, `cmd`, …); its docs cover installing in cloud agents (Claude on the web, Codex Cloud, Cursor Agent, Devin), where sandboxes block background sockets. |
 | D10 | Secret redaction | **Own layered redactor** (revised from "full scanner") | Embedding gitleaks cost +5 MB and ~200 modules and caught 1 of 4 sample secrets. Instead: provider token formats, private keys, URL/connection-string/`curl -u` passwords, secret-looking assignments, high-entropy strings; applied to prompts and commands. |
 | D15 | Shell commands in payload | **Keep structure, strip code** | Heredoc bodies, inline interpreter scripts and quoted strings > 120 chars replaced by placeholders, then redacted; capped at 1000 chars. Repo root, home dir and user name masked in all free text. |
-| D16 | Endpoint | **`https://hook.swarmia.com/cli`** default, overridable | Server side lives in the `hook` repo. |
-| D17 | Ingest feedback | **Shape checks synchronous, the rest asynchronous** | `hook` (implemented in `src/cli.ts`) validates the request and each session's shape, publishes each session to Pub/Sub, and answers `200` with per-session `accepted` (= queued) / `rejected` (`invalid payload: <field>`, `repository unknown`, `session too large`); `503` if nothing could be queued, `401` for tokens not matching `swm_cli_[0-9a-f]{64,}`. The repo-in-org check, token→org resolution and storage happen downstream and aren't visible to the client. The client also treats a bare `2xx` as "all queued". **Planned:** a synchronous endpoint on `https://app.swarmia.com/` where the CLI, using the same write-only token, can check whether its sessions were received and stored or dropped (and why) — without exposing any session content, since the token may be public. Surfaced in `report`/`config` when it exists. |
+| D16 | Endpoint | **`https://hook.swarmia.com/cli`** default, overridable | Received by Swarmia's `hook` service. |
+| D17 | Ingest feedback | **Shape checks synchronous, the rest asynchronous** | `hook` validates the request and each session's shape, queues each session for processing, and answers `200` with per-session `accepted` (= queued) / `rejected` (`invalid payload: <field>`, `repository unknown`, `session too large`); `503` if nothing could be queued, `401` for tokens not matching `swm_cli_[0-9a-f]{64,}`. The repo-in-org check, token→org resolution and storage happen downstream and aren't visible to the client. The client also treats a bare `2xx` as "all queued". **Planned:** a synchronous endpoint on `https://app.swarmia.com/` where the CLI, using the same write-only token, can check whether its sessions were received and stored or dropped (and why) — without exposing any session content, since the token may be public. Surfaced in `report`/`config` when it exists. |
 | D11 | Windows | **Later, but design for it now** | Abstract file locking (flock) and paths behind small interfaces; keep state dir resolution OS-aware. |
 | D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. |
 | D13 | Local state location | **User state dir**: `~/.local/state/swarmia/<repo-id>/` (macOS: `~/Library/Application Support/swarmia/…`) | Never in `git status`, survives `git clean -fdx`, same for global and per-repo installs. Replaces in-repo `.swarmia/`. `<repo-id>` = hash of the common git dir so worktrees share state. |
@@ -96,7 +92,7 @@ agent hooks ──► log-hook ──► <state>/events.jsonl            (raw, l
 - AI changes = Edit/Write/MultiEdit hunks + Bash snapshot diffs.
 - Candidate commits: after the session's first edit, touching the file, any local
   branch, plus reflog for rewritten history.
-- Locate each hunk with the RFC cascade (exact → normalized → 5-token-shingle
+- Locate each hunk with a cascade (exact → normalized → 5-token-shingle
   containment ≥ 0.5 to *locate*), then line-diff the located region to classify
   each committed line (D6, D7).
 - Track `ai_lines_generated` vs `ai_lines_committed` per session.
@@ -189,7 +185,7 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
    "Findings from milestone 6".
 7. ✅ **Delivery** (done 2026-10-06, client side): full-payload upserts to
    `POST <endpoint>/sessions`, `2xx` = received (D17), backoff. Server: `hook`
-   repo (asynchronous, Pub/Sub), per `docs/ingest-api.md`.
+   (asynchronous), per `docs/ingest-api.md`.
 7b. **Delivery status:** once app.swarmia.com offers the status endpoint (D17),
    show per-session stored/dropped state in `report` and token problems in
    `config`.
@@ -264,10 +260,9 @@ suggested order:
     seed and longer locally. git-ai's `docs/attribution-fuzzer-spec.md` is a
     reference.
 14. ✅ **"Unknown", not "human"** (done 2026-10-06; `docs/ingest-api.md`):
-    unlisted lines are documented as unknown in CommitAttribution/LineRange,
-    and the consumer's responsibilities say how to compute AI share per commit
-    or PR — attributed lines by class vs unknown, never human; commits with no
-    recorded sessions are unknown. README notes it too. Still possible later:
+    unlisted lines are documented as unknown in CommitAttribution/LineRange:
+    AI share per commit or PR is attributed lines by class vs unknown, never
+    human; commits with no recorded sessions are unknown. README notes it too. Still possible later:
     "known human" evidence from IDE extensions. Original plan: Lines the CLI can't attribute are *unknown*:
     we have no evidence a human wrote them. Make that explicit in the payload
     docs and in how Swarmia computes AI% (the denominator is attributed +
@@ -276,8 +271,8 @@ suggested order:
 
 ## Matcher notes (from milestone 2)
 
-- **Alignment instead of the RFC cascade.** One line-level Smith-Waterman local
-  alignment, using the RFC's normalization for line equality, replaces exact →
+- **Alignment instead of the cascade.** One line-level Smith-Waterman local
+  alignment, using D7's normalization for line equality, replaces exact →
   normalized → shingle. It gives per-line classes directly (D6) and tolerates
   human insertions, moved blocks (iterates up to 8 pieces) and formatter line
   wrapping/joining (up to 4 lines). Acceptance: ≥ 2 substantive lines matched,
@@ -388,7 +383,7 @@ generator's own bookkeeping (re-deriving the diff in the test; agent blocks
 duplicating the edited file's lines), fixed by using the matcher's diff
 (`attribution.AddedFlags`). CI thresholds: precision ≥ 0.99, recall ≥ 0.97.
 Not covered: merges, cherry-picks, and squash merges done on the server (the
-server's job per `docs/ingest-api.md`).
+server's job).
 
 ## Lessons from git-ai (reviewed 2026-10-06)
 
@@ -440,7 +435,6 @@ Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
 
 ## Still open
 
-- RFC owner sign-off on local matching (principle 2) and on dropping git storage.
 - Order among the four next agents.
 - Retention window: 30 days implemented; revisit with dogfood data.
 - Which remote counts as "pushed" with multiple remotes / forks (proposal: any
