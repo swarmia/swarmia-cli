@@ -145,7 +145,8 @@ Things to know:
 - **`project`** hooks reference the CLI the way the repository provides it: a
   `swarmia-cli` binary at the repository root (development), the npm
   devDependency's launcher (`node_modules/@swarmia/cli/bin/swarmia-cli`), or one
-  on `$PATH`.
+  on `$PATH`. Until the repository's one exists — in a fresh clone or worktree,
+  before `make build` or `pnpm install` — the hooks quietly do nothing.
 - **`local`** and **`user`** hooks point at the binary that ran `install`, by
   absolute path — rebuilding it updates them.
 - **`local`** settings live in one checkout: new git worktrees don't get them,

@@ -1,25 +1,77 @@
 {
   "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
-    ],
-    "PreToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
-    ],
     "PostToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
     ],
     "PostToolUseFailure": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
     ],
-    "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ]
+      }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook" }] }
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "[ ! -x \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" ] || exec \"${CLAUDE_PROJECT_DIR}/swarmia-cli\" log-hook",
+            "type": "command"
+          }
+        ]
+      }
     ]
   }
 }
