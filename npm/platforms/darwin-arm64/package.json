@@ -1,6 +1,6 @@
 {
   "name": "@swarmia/cli-darwin-arm64",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "swarmia-cli binary for macOS (Apple Silicon). Installed automatically by @swarmia/cli.",
   "os": [
     "darwin"
@@ -11,5 +11,14 @@
   "files": [
     "bin/"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swarmia/swarmia-cli.git",
+    "directory": "npm/platforms/darwin-arm64"
+  },
+  "homepage": "https://github.com/swarmia/swarmia-cli#readme",
+  "bugs": {
+    "url": "https://github.com/swarmia/swarmia-cli/issues"
+  },
   "license": "MIT"
 }

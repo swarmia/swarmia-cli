@@ -52,3 +52,28 @@ jobs:
       # through locks, and processing runs in a detached background process.
       - name: Test
         run: go test -race ./...
+
+  package:
+    # Builds the npm packages and installs them with npm and pnpm, as the
+    # release does, so packaging breaks here rather than at release time.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - run: npm install -g pnpm@10.33.2
+
+      - name: Build and smoke-test the npm packages
+        run: make npm-smoke-test VERSION=0.0.0-ci
