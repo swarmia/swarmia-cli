@@ -63,6 +63,9 @@ var sendCmd = &cobra.Command{
 			fmt.Fprintf(out, " (%d rejected)", outcome.Rejected)
 		}
 		fmt.Fprintln(out)
+		if w := upgradeWarning(opts.StateDir); w != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", w)
+		}
 		return nil
 	},
 }

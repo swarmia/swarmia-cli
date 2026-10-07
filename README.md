@@ -345,7 +345,10 @@ server keeps the latest version per session. Sessions are resent when their
 payload changes, at most every 15 minutes while still running. The endpoint
 answers per session (`accepted` = queued, or `rejected` with a reason that
 `report` shows); failures back off exponentially, honouring `Retry-After`, and
-for six hours on an unusable token. The contract is
+for six hours on an unusable token. Swarmia can also ask a version to
+upgrade: `config`, `report` and `send` show its message, and a version it no
+longer accepts stops sending until it's upgraded. swarmia-cli never updates
+itself or checks for updates. The contract is
 [docs/ingest-api.md](docs/ingest-api.md).
 
 ## Development

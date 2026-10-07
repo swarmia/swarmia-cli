@@ -126,6 +126,21 @@ var startBackgroundProcess = func(logPath string) {
 	}
 }
 
+// upgradeWarning is what Swarmia last said about upgrading this swarmia-cli
+// version, from the delivery state in stateDir, for the developer; "" if it
+// said nothing.
+func upgradeWarning(stateDir string) string {
+	u, ok := deliver.UpgradeFor(stateDir, version)
+	switch {
+	case !ok:
+		return ""
+	case u.Required:
+		return fmt.Sprintf("Swarmia no longer accepts sessions from swarmia-cli %s, so none are sent until you upgrade it: %s", version, u.Message)
+	default:
+		return fmt.Sprintf("Swarmia asks you to upgrade swarmia-cli %s: %s", version, u.Message)
+	}
+}
+
 // deliveryOptions configures delivery for this repository.
 func deliveryOptions(repo gitrepo.Repo, cfg config.Config, opts report.ProcessOptions, force bool) deliver.Options {
 	return deliver.Options{

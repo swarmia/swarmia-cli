@@ -3,6 +3,7 @@ package deliver
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -283,6 +284,101 @@ func TestBare2xxMarksBatchReceived(t *testing.T) {
 		out, err := Deliver([]*report.Session{a, b}, srv.opts(t, now))
 		if err != nil || out.Accepted != 2 || a.Delivery == nil || b.Delivery == nil {
 			t.Errorf("HTTP %d: out=%+v err=%v", status, out, err)
+		}
+	}
+}
+
+// The server refuses this CLI version with 426: nothing more is sent from it,
+// sessions aren't marked, other versions sharing the state still send, and a
+// manual send asks again.
+func TestUpgradeRequiredStopsThisVersion(t *testing.T) {
+	srv := newServer(t)
+	srv.reply = func(req Request, w http.ResponseWriter) {
+		if req.CLIVersion != "test" {
+			acceptAll(req, w)
+			return
+		}
+		w.WriteHeader(http.StatusUpgradeRequired)
+		w.Write([]byte(`{"message":"swarmia-cli 0.1.0 sends broken payloads;\n\u001b[31mupgrade @swarmia/cli"}`))
+	}
+	a := sess("a", true)
+	o := srv.opts(t, now)
+	_, err := Deliver([]*report.Session{a}, o)
+	if !errors.Is(err, ErrUpgradeRequired) {
+		t.Fatalf("err = %v, want ErrUpgradeRequired", err)
+	}
+	if a.Delivery != nil {
+		t.Error("refused session marked delivered")
+	}
+	u, ok := UpgradeFor(o.StateDir, "test")
+	if want := "swarmia-cli 0.1.0 sends broken payloads; [31mupgrade @swarmia/cli"; !ok || !u.Required || u.Message != want {
+		t.Errorf("upgrade = %+v, %v; want required with %q (no escape characters)", u, ok, want)
+	}
+	if st := loadState(o.StateDir); st.Failures != 0 || !st.NextAttempt.IsZero() {
+		t.Errorf("426 counted as a failure to back off from: %+v", st)
+	}
+
+	// Later runs of this version send nothing, without asking.
+	o.Now = now.Add(24 * time.Hour)
+	if out, err := Deliver([]*report.Session{a}, o); err != nil || !strings.Contains(out.Skipped, "upgrade @swarmia/cli") || len(srv.requests) != 1 {
+		t.Errorf("refused version: %+v, %v, %d requests; want skipped without a request", out, err, len(srv.requests))
+	}
+
+	// Another version, sharing the state, sends, and keeps the refusal.
+	other := o
+	other.CLIVersion = "newer"
+	if out, err := Deliver([]*report.Session{sess("b", true)}, other); err != nil || out.Accepted != 1 {
+		t.Errorf("newer version: %+v, %v", out, err)
+	}
+	if u, _ := UpgradeFor(o.StateDir, "test"); !u.Required {
+		t.Error("newer version dropped the older one's refusal")
+	}
+
+	// A manual send asks again; if the server now accepts, the refusal goes.
+	srv.reply = nil
+	o.Force = true
+	if out, err := Deliver([]*report.Session{a}, o); err != nil || out.Accepted != 1 {
+		t.Errorf("forced: %+v, %v", out, err)
+	}
+	if _, ok := UpgradeFor(o.StateDir, "test"); ok {
+		t.Error("refusal kept after the server accepted this version")
+	}
+}
+
+// An upgrade notice in a 2xx reply is recorded and doesn't stop delivery; a
+// reply without one clears it.
+func TestUpgradeNoticeIsRecorded(t *testing.T) {
+	srv := newServer(t)
+	srv.reply = func(req Request, w http.ResponseWriter) {
+		w.Write([]byte(`{"upgrade":{"message":"swarmia-cli 0.1.0 won't be accepted after 2026-12-01"}}`))
+	}
+	o := srv.opts(t, now)
+	if out, err := Deliver([]*report.Session{sess("a", true)}, o); err != nil || out.Accepted != 1 {
+		t.Fatalf("with a notice: %+v, %v", out, err)
+	}
+	if u, ok := UpgradeFor(o.StateDir, "test"); !ok || u.Required || !strings.Contains(u.Message, "2026-12-01") {
+		t.Errorf("upgrade = %+v, %v; want the notice, not required", u, ok)
+	}
+	srv.reply = func(req Request, w http.ResponseWriter) {} // a bare 200
+	o.Now = now.Add(time.Hour)
+	if out, err := Deliver([]*report.Session{sess("b", true)}, o); err != nil || out.Accepted != 1 {
+		t.Fatalf("bare 200: %+v, %v", out, err)
+	}
+	if u, ok := UpgradeFor(o.StateDir, "test"); ok {
+		t.Errorf("notice kept after a reply without one: %+v", u)
+	}
+}
+
+func TestDisplayable(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                          "fallback",
+		" \x1b]0;title\x07 \n ":     "]0;title",
+		"upgrade\r\nnow\tplease":    "upgrade now please",
+		strings.Repeat("ä", 200):    strings.Repeat("ä", maxMessage/2) + "…",
+		"plain message, unchanged.": "plain message, unchanged.",
+	} {
+		if got := displayable(in, "fallback"); got != want {
+			t.Errorf("displayable(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

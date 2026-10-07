@@ -82,6 +82,9 @@ func runReport(out io.Writer) error {
 		return err
 	}
 	showDelivery = cfg.Token != ""
+	if w := upgradeWarning(opts.StateDir); showDelivery && w != "" {
+		fmt.Fprintf(out, "Warning: %s\n\n", w)
+	}
 	for i, s := range sessions {
 		if i > 0 {
 			fmt.Fprintln(out)
