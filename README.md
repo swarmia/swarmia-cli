@@ -189,6 +189,9 @@ How it decides:
 - **Classes:** `exact`; `normalized` — only a formatter changed it (whitespace,
   quotes, trailing commas, line wrapping); `modified` — recognisably the agent's
   line, edited by a human.
+- **Unlisted lines are unknown, not human.** A commit's other lines may come
+  from a person, an unrecorded agent session, another file, or a missed shell
+  edit; the CLI has no evidence either way.
 - **AI lines at session end** counts the agent's non-blank lines still present
   after its last edit to each file; lines it wrote and then replaced itself
   don't count.

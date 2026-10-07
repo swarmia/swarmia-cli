@@ -241,7 +241,12 @@ suggested order:
     class. Complements golden cases and dogfood data; runs in CI on a fixed
     seed and longer locally. git-ai's `docs/attribution-fuzzer-spec.md` is a
     reference.
-14. **"Unknown", not "human".** Lines the CLI can't attribute are *unknown*:
+14. ✅ **"Unknown", not "human"** (done 2026-10-06; `docs/ingest-api.md`):
+    unlisted lines are documented as unknown in CommitAttribution/LineRange,
+    and the consumer's responsibilities say how to compute AI share per commit
+    or PR — attributed lines by class vs unknown, never human; commits with no
+    recorded sessions are unknown. README notes it too. Still possible later:
+    "known human" evidence from IDE extensions. Original plan: Lines the CLI can't attribute are *unknown*:
     we have no evidence a human wrote them. Make that explicit in the payload
     docs and in how Swarmia computes AI% (the denominator is attributed +
     unknown lines, and unknown must not be reported as human). Later, optionally:

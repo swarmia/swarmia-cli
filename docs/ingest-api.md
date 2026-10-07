@@ -177,8 +177,8 @@ cap the decompressed size, see Limits).
 | `prompts_withheld` | boolean | `true` if the developer or the repository configuration opted out of sharing prompts. Then `prompts` is empty — that is not the same as a session without prompts. |
 | `tools` | array of Tool | The agent's tool calls, in order (only completed calls, successful or failed). |
 | `commits` | array of CommitAttribution | Line attribution, one entry per (commit, file). Only commits that were **pushed** (contained in a remote-tracking branch on the developer's machine) when the payload was built. Empty if nothing has been pushed yet. |
-| `ai_lines_generated` | integer | Non-blank lines the agent wrote that were still present after its last edit to each file. Lines it wrote and then replaced itself don't count. Includes lines written through shell commands. |
-| `ai_lines_committed` | integer | Of the attributed lines in `commits`, how many are `exact` or `normalized`. The ratio `ai_lines_committed / ai_lines_generated` is the session's "survival" rate, but note the numerator only covers pushed commits. |
+| `ai_lines_generated` | integer | Non-blank lines the agent wrote that were still present after its last edit to each file. Lines it wrote and then replaced itself don't count. Includes lines written through shell commands. Says nothing about human-written lines. |
+| `ai_lines_committed` | integer | Of the attributed lines in `commits`, how many are `exact` or `normalized`. The ratio `ai_lines_committed / ai_lines_generated` is the session's "survival" rate, but note the numerator only covers pushed commits. Says nothing about the commits' other lines, which are unknown. |
 | `usage` | array of Usage, optional | The session's token usage so far, read from the agent's transcript (including its subagents' transcripts). Empty if unknown; absent from older clients. Cumulative: each send carries the totals to date, replacing the previous ones. |
 
 #### Usage
@@ -230,13 +230,19 @@ Only lines that **this commit introduced** (relative to its first parent) are
 attributed to it. A later commit that merely carries the agent's lines along is
 not listed for them. Merge commits are never listed.
 
+Lines a commit introduced that no session lists are **unknown**, not human:
+the CLI has no evidence about who wrote them. A human may have, or an agent
+session that wasn't recorded (hooks not installed, another machine, another
+agent), or the code moved from another file (renames aren't followed yet), or a
+shell edit the snapshots missed.
+
 #### LineRange
 
 | Field | Type | Description |
 |---|---|---|
 | `start` | integer ≥ 1 | First line, 1-based, in the file as of the commit (the "new side" of the commit's diff). |
 | `end` | integer ≥ `start` | Last line, inclusive. |
-| `class` | string | `exact` — identical to what the agent wrote (ignoring trailing whitespace). `normalized` — equal once formatting is ignored (whitespace, indentation, quote style, trailing commas/semicolons, line wrapping), i.e. a formatter changed it. `modified` — recognisably the agent's line but edited by a human (at least half its tokens shared). Lines a human wrote from scratch are never listed. |
+| `class` | string | `exact` — identical to what the agent wrote (ignoring trailing whitespace). `normalized` — equal once formatting is ignored (whitespace, indentation, quote style, trailing commas/semicolons, line wrapping), i.e. a formatter changed it. `modified` — recognisably the agent's line but edited by a human (at least half its tokens shared). Lines not listed are *unknown*, not human-written (see CommitAttribution). |
 
 Blank lines are never attributed, so ranges break at blank lines.
 
@@ -382,14 +388,23 @@ idempotent (upserts make that free).
      merge commit (from the GitHub/GitLab API; file contents aren't needed and
      shouldn't be stored).
    - The same line can be attributed to several sessions (many-to-many).
-7. **Discount bad matcher versions:** keep `matcher_version` with the stored
+7. **Compute AI share as AI vs unknown, never AI vs human.** Per commit (or PR):
+   - The denominator is the non-blank lines the commit introduced, from the Git
+     provider's diff.
+   - AI lines are the lines attributed by any session, counted once, broken
+     down by `class`.
+   - Unknown lines are the rest. Never label them human-written.
+   - A commit with no attribution from any session — for instance because the
+     developer has no recorded sessions at all, or the CLI isn't installed — is
+     entirely unknown, not human.
+8. **Discount bad matcher versions:** keep `matcher_version` with the stored
    attribution so results from a version found to be wrong can be excluded or
    recomputed later.
-8. **Protect prompts.** Prompts are sensitive: only the session's author, the
+9. **Protect prompts.** Prompts are sensitive: only the session's author, the
    organization's admins and Swarmia should be able to read them. Honour
    `prompts_withheld` (no prompts stored). Free text is untrusted input: escape
    it when rendering.
-9. **Never expect code.** If you need code for analysis (e.g. to show an "AI
+10. **Never expect code.** If you need code for analysis (e.g. to show an "AI
    blame" view), fetch it from the Git provider at display time using the SHA,
    path and line ranges.
 
