@@ -512,11 +512,11 @@ Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
   upgrade broke the hooks. Run from the repository's npm dependency, they now
   point at its launcher. Global npm/pnpm installs still record the binary's
   path (pnpm's global store is versioned too).
-- **Release workflow:** tag-triggered build of the four binaries with the
-  version baked in, versions synced across the five `package.json` files,
-  publish platform packages then `@swarmia/cli`.
-- **Decisions:** public npmjs (simplest; publishes the binary of an internal
-  repo) vs private registry (auth for every developer and CI); license.
+- ✅ **Release workflow** (2026-10-07): a `v*` tag on main builds the
+  packages versioned from the tag, smoke-tests them with npm and pnpm on all
+  four platforms, publishes to npm with provenance after approval (trusted
+  publishing), and creates a GitHub release. See RELEASING.md.
+- ✅ **Decisions:** public npmjs, MIT.
 
 ## Still open
 

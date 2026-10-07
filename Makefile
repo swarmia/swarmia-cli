@@ -12,6 +12,11 @@ LDFLAGS := -s -w \
 	-X $(PKG)/cmd.commit=$(COMMIT) \
 	-X $(PKG)/cmd.date=$(DATE)
 
+# The npm packages' version: VERSION without a leading v. Releases pass
+# VERSION=1.2.3; a build from a tag's descendant is 1.2.3-4-gabcdef.
+NPM_VERSION ?= $(patsubst v%,%,$(VERSION))
+NPM_OUT     := dist/npm
+
 # npm platform packages: <dir>:<GOOS>:<GOARCH>. The <dir> uses Node's
 # platform-arch naming (process.platform-process.arch), which the launcher in
 # npm/cli/bin/swarmia-cli maps to the @swarmia/cli-<dir> package.
@@ -23,7 +28,7 @@ NPM_PLATFORMS := \
 	linux-arm64:linux:arm64 \
 	linux-x64:linux:amd64
 
-.PHONY: all build install test vet fmt tidy clean npm-binaries e2e
+.PHONY: all build install test vet fmt tidy clean npm-pack npm-smoke-test e2e
 
 all: build ## Build the binary (default)
 
@@ -51,14 +56,22 @@ tidy: ## Tidy go.mod / go.sum
 
 clean: ## Remove build artifacts
 	rm -f $(BINARY)
-	rm -rf npm/platforms/*/bin
+	rm -rf dist
 
-npm-binaries: ## Cross-compile per-platform binaries into the npm packages
+npm-pack: ## Build the npm packages, versioned NPM_VERSION, into dist/npm (see RELEASING.md)
+	scripts/npm-stage.sh $(NPM_VERSION) $(NPM_OUT)/stage
 	@for entry in $(NPM_PLATFORMS); do \
 		dir=$${entry%%:*}; rest=$${entry#*:}; os=$${rest%%:*}; arch=$${rest##*:}; \
-		out=npm/platforms/$$dir/bin/$(BINARY); \
+		out=$(NPM_OUT)/stage/platforms/$$dir/bin/$(BINARY); \
 		[ "$$os" = "windows" ] && out=$$out.exe; \
 		echo "  $$dir ($$os/$$arch) -> $$out"; \
-		mkdir -p npm/platforms/$$dir/bin; \
-		GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o $$out . || exit 1; \
+		mkdir -p $(NPM_OUT)/stage/platforms/$$dir/bin; \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $$out . || exit 1; \
 	done
+	@for pkg in $(NPM_OUT)/stage/platforms/* $(NPM_OUT)/stage/cli; do \
+		npm pack --silent --pack-destination $(NPM_OUT) $$pkg >/dev/null || exit 1; \
+	done
+	@ls $(NPM_OUT)/*.tgz
+
+npm-smoke-test: npm-pack ## Install the npm packages with npm and pnpm here and check they work
+	scripts/npm-smoke-test.sh $(NPM_OUT) $(NPM_VERSION)

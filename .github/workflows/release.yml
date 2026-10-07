@@ -1,0 +1,182 @@
+name: Release
+
+# Pushing a tag v1.2.3 (or v1.2.3-rc.1) on main releases that version: builds
+# the npm packages, smoke-tests them on each platform, publishes them to npm
+# (after approval in the release environment) and creates a GitHub release.
+# See RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dist-tag: ${{ steps.version.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The tag is the version, and only commits on main are released.
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag $TAG isn't a release version (v1.2.3 or v1.2.3-rc.1)"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $TAG isn't on main"
+            exit 1
+          fi
+          version=${TAG#v}
+          case $version in
+            *-*) dist_tag=next ;; # prereleases don't become "latest"
+            *) dist_tag=latest ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$dist_tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build the npm packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: make npm-pack VERSION="$VERSION"
+
+      # The same binaries, for the GitHub release.
+      - name: Archive the binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist/release
+          for pkg in dist/npm/stage/platforms/*; do
+            platform=${pkg##*/}
+            tar -czf "dist/release/swarmia-cli_${VERSION}_${platform}.tar.gz" \
+              -C "$pkg/bin" swarmia-cli -C "$GITHUB_WORKSPACE" LICENSE README.md
+          done
+          (cd dist/release && sha256sum *.tar.gz > SHA256SUMS)
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm
+          path: dist/npm/*.tgz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: dist/release/
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke test (${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        # One runner per shipped platform: linux-x64, linux-arm64, darwin-arm64,
+        # darwin-x64.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - run: npm install -g pnpm@10.33.2
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: npm
+          path: dist/npm
+
+      - name: Install and run the packages with npm and pnpm
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: scripts/npm-smoke-test.sh dist/npm "$VERSION"
+
+  publish:
+    name: Publish to npm
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    # Holds the approval rule and, for the first release only, NPM_TOKEN;
+    # afterwards npm trusts this workflow directly (trusted publishing).
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: npm
+          path: dist/npm
+
+      # Platform packages first, so @swarmia/cli never points at versions that
+      # aren't there. A published version can't be replaced, so rerunning a
+      # failed release skips the packages it already published.
+      - name: Publish
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for tgz in dist/npm/swarmia-cli-*-"$VERSION".tgz dist/npm/swarmia-cli-"$VERSION".tgz; do
+            name=$(tar -xzOf "$tgz" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already published, skipping"
+              continue
+            fi
+            npm publish "$tgz" --access public --tag "$DIST_TAG" --provenance
+          done
+
+  github-release:
+    name: GitHub release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release
+          path: dist/release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          DIST_TAG: ${{ needs.build.outputs.dist-tag }}
+        run: |
+          flags=
+          [ "$DIST_TAG" = latest ] || flags=--prerelease
+          gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes $flags

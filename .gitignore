@@ -2,7 +2,7 @@
 /swarmia-cli
 /dist/
 
-# Cross-compiled binaries built into the npm platform packages (release artifacts)
+# Binaries built into npm/ by older versions (make npm-pack builds in dist/)
 npm/platforms/*/bin/
 
 # npm dependencies (from local packaging tests)

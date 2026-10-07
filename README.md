@@ -9,8 +9,8 @@ and — once configured — sends Swarmia line numbers and session metadata.
 Never your source code.
 
 > **Status:** early, but end-to-end tested against real Claude Code and Codex
-> releases. Cursor, Copilot CLI and Gemini CLI are planned. The npm package
-> isn't published yet. Without a token configured, nothing leaves your machine.
+> releases. Cursor, Copilot CLI and Gemini CLI are planned. Without a token
+> configured, nothing leaves your machine.
 
 ## How it works
 
@@ -112,13 +112,26 @@ size of the repository's working tree.
 
 ### 1. Install the binary
 
+As a devDependency of the repository, so everyone working in it gets the same
+version:
+
+```sh
+pnpm add -D @swarmia/cli      # or: npm install -D @swarmia/cli
+```
+
+Or for yourself, without npm:
+
 ```sh
 go install github.com/swarmia/swarmia-cli@latest     # puts swarmia-cli in ~/go/bin
 ```
 
-Or from source: `git clone https://github.com/swarmia/swarmia-cli && cd
-swarmia-cli && make build` (Go 1.26+). An npm package (`@swarmia/cli`, as a
-repository devDependency) is on its way. macOS and Linux are supported.
+Binaries are also attached to each [GitHub
+release](https://github.com/swarmia/swarmia-cli/releases), or build from source:
+`git clone https://github.com/swarmia/swarmia-cli && cd swarmia-cli && make
+build` (Go 1.26+). macOS and Linux are supported, on arm64 and x64.
+
+Then run it as `pnpm exec swarmia-cli` (or `npx swarmia-cli`) if it's a
+devDependency, or as `swarmia-cli`.
 
 ### 2. Install the hooks
 
@@ -339,7 +352,8 @@ make vet           # go vet (including the e2e package)
 make fmt           # gofmt -w
 make e2e           # end-to-end with a real Claude Code release (docs/e2e.md)
 make e2e E2E_AGENT=codex   # ... or Codex
-make npm-binaries  # cross-compile per-platform binaries into npm/platforms
+make npm-pack VERSION=1.2.3   # build the npm packages into dist/npm
+make npm-smoke-test VERSION=1.2.3   # ... and install them with npm and pnpm
 ```
 
 This repository runs its own hooks from `.claude/settings.json`, which invokes
@@ -387,9 +401,9 @@ one binary-only package per platform under `optionalDependencies`, so npm and
 pnpm install only the host's binary. The launcher is POSIX `sh` that forks
 nothing on its common path — it adds ~6 ms per hook, where starting Node added
 ~85 ms — and project-scope hooks call it directly rather than through
-`node_modules/.bin`, whose pnpm shim forks several processes of its own. To cut a release: bump the version in
-every `npm/**/package.json` in lockstep, `make npm-binaries`, then `npm publish`
-each platform package followed by `npm/cli`. Windows builds compile but aren't
+`node_modules/.bin`, whose pnpm shim forks several processes of its own. The
+packages in `npm/` carry a placeholder version; a release stamps its tag's.
+Releasing: [RELEASING.md](RELEASING.md). Windows builds compile but aren't
 packaged or tested yet.
 
 ## License
