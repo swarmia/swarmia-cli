@@ -295,6 +295,36 @@ Client behaviour:
 Whether Swarmia later stores or drops an accepted session isn't visible to the
 client.
 
+### Asking a client version to upgrade
+
+Swarmia decides which `cli_version`s it still accepts; the client never
+compares versions itself. There are two levels:
+
+- **Deprecated** — still accepted: any `2xx` reply may carry an `upgrade`
+  object. The client records the message for its version and shows it in
+  `swarmia-cli config`, `report` and `send`; a reply without one clears it.
+
+  ```json
+  {
+    "results": [ … ],
+    "upgrade": { "message": "swarmia-cli 0.1.0 won't be accepted after 2026-12-01; upgrade @swarmia/cli" }
+  }
+  ```
+
+- **Refused** — `426 Upgrade Required`, for the whole request, with a body of
+  `{"message": "…"}` (or plain text). The client stops sending from this
+  version: background runs send nothing, without asking again, for 30 days,
+  while `swarmia-cli send` asks again each time. It shows the message in the
+  same places. Sessions aren't marked as sent, so once the developer upgrades,
+  they're all sent (their payloads changed with `cli_version`). The request
+  that got the `426` carried sessions; the server should discard them.
+
+Messages are shown to developers as plain text: the client drops control
+characters and keeps the first 300 characters. Name the version and say how
+to upgrade. Clients from before this section treat `426` as an unexpected
+error (exponential backoff) and ignore `upgrade`; to stop those, reject their
+sessions with an `error` instead: they're resent after an upgrade too.
+
 ### Errors — the whole request
 
 | Status | When | Client behaviour |
@@ -303,6 +333,7 @@ client.
 | `401` | No `Authorization` header, or the token isn't `swm_cli_` followed by 64+ lowercase hex characters. | Pauses delivery for 6 hours. (`swarmia-cli config` and `send` warn about a malformed token up front.) |
 | `404` / `405` | Any path other than `/cli/sessions`, or any method other than `POST`. | Backs off exponentially (a misconfigured `endpoint`). |
 | `413` | More than 25 sessions. | Splits the batch in half and retries (the client never sends more than 25). |
+| `426` | Swarmia no longer accepts this `cli_version` (see [above](#asking-a-client-version-to-upgrade)). | Stops sending from this version; shows the message. |
 | `429` | Rate limited. | Waits for `Retry-After` (seconds) if given, else backs off exponentially. |
 | `503` | None of the sessions could be queued. | Waits for `Retry-After` if given, else backs off exponentially. |
 | other `5xx` | Unexpected failures. | As `503`. |

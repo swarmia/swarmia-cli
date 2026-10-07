@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -20,7 +22,7 @@ var configCmd = &cobra.Command{
 		"                token can only submit data, so it isn't a secret)\n\n" +
 		"File format: {\"token\": \"…\", \"endpoint\": \"…\", \"prompts\": false}\n\n" +
 		"It also warns about swarmia-cli hooks Codex won't run because they aren't\n" +
-		"trusted yet.\n\n" +
+		"trusted yet, and shows it if Swarmia asked this version to be upgraded.\n\n" +
 		"Prompts are shared unless any layer sets prompts to false: you can always\n" +
 		"withhold your own prompts, e.g. with SWARMIA_PROMPTS=0. swarmia-cli never\n" +
 		"writes these files.",
@@ -48,6 +50,17 @@ var configCmd = &cobra.Command{
 		fmt.Fprintf(out, "prompts:   %s  (%s)\n", prompts, cfg.PromptsSource)
 		if w := cfg.TokenWarning(); w != "" {
 			fmt.Fprintf(out, "\nWarning: %s.\n", w)
+		}
+		if cfg.Token != "" && root != "" {
+			dir, err := repoStateDir(root) // as eventsPath, without creating it
+			if env := os.Getenv("SWARMIA_LOG_FILE"); env != "" {
+				dir, err = filepath.Dir(env), nil
+			}
+			if err == nil {
+				if w := upgradeWarning(dir); w != "" {
+					fmt.Fprintf(out, "\nWarning: %s\n", w)
+				}
+			}
 		}
 		for _, path := range codexHooksFiles(root) {
 			if untrusted, err := untrustedCodexHooks(path); err == nil && len(untrusted) > 0 {
