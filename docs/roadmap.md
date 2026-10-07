@@ -190,7 +190,8 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
    show per-session stored/dropped state in `report` and token problems in
    `config`.
 8. **Global install** (D2) + MDM docs.
-9. **More agents:** Codex, Cursor, Copilot CLI, Gemini CLI.
+9. **More agents:** Codex (in progress, see "Codex support"), then Cursor,
+   Copilot CLI, Gemini CLI.
 
 15. 🟡 **End-to-end suite** ([docs/e2e.md](e2e.md)): a real Claude Code release
     (`latest` and `stable`, installed from npm) does a task in `unjs/ufo` (MIT,
@@ -412,6 +413,72 @@ choices on two fronts; what it does well became milestones 10–14 and a D9 note
   modified.
 - **Known human:** IDE extensions (VS Code, JetBrains, + others) report saved
   files, so lines are AI / known human / unknown (milestone 14).
+
+## Codex support (branch `otto/codex`)
+
+How Codex differs from Claude Code, as far as swarmia-cli is concerned
+(verified against git-ai's and entire-cli's Codex integrations; to be
+re-verified against current releases by the end-to-end suite):
+
+- **Hooks** live in `.codex/hooks.json` (project) or `~/.codex/hooks.json`
+  (user, or `$CODEX_HOME`); there is no per-checkout local file. Events:
+  `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
+  `SessionEnd`, plus subagent and compaction events.
+- **Trust:** Codex silently skips hooks without a `trusted_hash` in the user's
+  `~/.codex/config.toml` (normally approved via `/hooks` in Codex).
+- **Edits** arrive as `apply_patch` tool calls carrying the patch text
+  (`*** Update File:` / `*** Add File:` / `@@` sections) — context, added and
+  removed lines map directly onto our hunks, replaced lines included.
+  `PreToolUse` fires only for shell commands.
+- **`SessionEnd`** has a hard 3 s cap, after which Codex kills the hook's
+  process tree.
+- **No hooks fire in read-only mode**; headless runs need `workspace-write` or
+  bypass mode.
+- **Transcripts** are "rollout" JSONL with cumulative `token_count` events.
+- **Headless:** `codex exec --json` (no session-id flag; the id is in the
+  stream), `codex exec resume <id>`.
+
+Plan:
+
+1. **Install:** a Codex agent in `install` for `project` and `user` scope
+   (`local` explains it isn't available for Codex); hooks run
+   `log-hook --agent codex`; `SessionEnd` at the 3 s cap. **Trust (decided):**
+   by default print instructions to approve the hooks with `/hooks`;
+   `install --trust` writes the trusted hashes into `~/.codex/config.toml`
+   only when explicitly asked (e.g. MDM); `config` reads that file and warns
+   about untrusted hooks.
+2. **Capture and attribution:** record the agent on each event; parse
+   `apply_patch` from `PostToolUse` into hunks (paths resolved against `cwd`);
+   keep shell snapshots (verify behaviour for failing commands — Codex has no
+   `PostToolUseFailure`); per-agent edit extraction behind a small interface;
+   payload `agent: "codex"`; verify the detached background run survives
+   `SessionEnd`'s process-tree kill.
+3. **Usage:** parse Codex rollouts' cumulative token counts per model (cached
+   input, reasoning output). Subagents later.
+4. **End-to-end matrix** (nightly, agent × channel):
+
+   | Agent | Development | Stable |
+   |---|---|---|
+   | Claude Code | `latest` | `stable` |
+   | Codex | `alpha` | `latest` |
+
+   Codex harness: isolated `CODEX_HOME` with our hooks pre-trusted *in the
+   sandbox* (computing Codex's trust hashes, as entire-cli's e2e suite does);
+   `codex exec --json --dangerously-bypass-approvals-and-sandbox`; the same
+   scenario and oracle (working-tree diffs are agent-independent), plus a
+   rollout reader for edits and usage. The suite must assert hooks actually
+   ran: a wrong trust hash fails silently.
+5. **Docs:** supported agents, per-agent scopes, the trust step.
+
+**CI credentials (decided):** an `OPENAI_API_KEY` secret in the `e2e`
+environment, from a dedicated OpenAI project with a spend cap and
+inference-only permissions. While the branch is in progress, `otto/codex` is
+temporarily allowed in the `e2e` environment's deployment branches. Leak
+safeguards for a public repository: fork PRs never get secrets and the
+workflow runs only on schedule/dispatch; the key is passed only to the agent
+process and never logged; **artifacts are scrubbed** of every credential value
+before upload (they're public and not masked by GitHub), and a found value
+fails the run.
 
 ## Before publishing the npm package
 
