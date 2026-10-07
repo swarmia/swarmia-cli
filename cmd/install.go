@@ -2,14 +2,18 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/swarmia/swarmia-cli/internal/agent"
 )
 
 const binaryName = "swarmia-cli"
@@ -20,19 +24,6 @@ var (
 	installDryRun bool
 	installScopeF string
 	installTrust  bool
-)
-
-// installScope says which settings file the hooks go into.
-type installScope string
-
-const (
-	// scopeProject is the repo's shared, committed settings: hooks for everyone.
-	scopeProject installScope = "project"
-	// scopeLocal is the repo's personal, gitignored settings.
-	scopeLocal installScope = "local"
-	// scopeUser is the user's settings: every project on this machine, including
-	// worktrees that lack the repo's untracked local settings.
-	scopeUser installScope = "user"
 )
 
 // skipIfProjectHooksFlag makes a user-scope log-hook stand down in projects
@@ -70,10 +61,8 @@ var installCmd = &cobra.Command{
 		if dir == "" {
 			dir = projectDir()
 		}
-		scope := installScope(installScopeF)
-		switch scope {
-		case scopeProject, scopeLocal, scopeUser:
-		default:
+		scope := agent.Scope(installScopeF)
+		if !slices.Contains(agent.Scopes, scope) {
 			return fmt.Errorf("unknown --scope %q (want project, local or user)", installScopeF)
 		}
 		return runInstall(cmd.OutOrStdout(), dir, installOpts{binaryRef: installBinary, dryRun: installDryRun, scope: scope, trust: installTrust})
@@ -84,7 +73,7 @@ func init() {
 	installCmd.Flags().StringVar(&installDir, "dir", "", "repository directory to install into (default: $CLAUDE_PROJECT_DIR or cwd)")
 	installCmd.Flags().StringVar(&installBinary, "binary", "", "override the auto-detected command used to invoke swarmia-cli in hooks")
 	installCmd.Flags().BoolVar(&installDryRun, "dry-run", false, "report what would change without writing anything")
-	installCmd.Flags().StringVar(&installScopeF, "scope", string(scopeProject), "where to install: project, local or user")
+	installCmd.Flags().StringVar(&installScopeF, "scope", string(agent.ScopeProject), "where to install: project, local or user")
 	installCmd.Flags().BoolVar(&installTrust, "trust", false, "trust swarmia-cli's Codex hooks in ~/.codex/config.toml, as approving them with /hooks would")
 	rootCmd.AddCommand(installCmd)
 }
@@ -92,22 +81,19 @@ func init() {
 type installOpts struct {
 	binaryRef string
 	dryRun    bool
-	scope     installScope // "" means project
-	trust     bool         // record trust for Codex hooks
+	scope     agent.Scope // "" means project
+	trust     bool        // record trust for Codex hooks
 }
 
-// agentConfig describes one supported coding agent: where its settings for a
-// scope live (ok is false when the agent isn't used there, and why explains
+// agentConfig describes how to install into one supported coding agent:
+// whether it is used for a scope (ok is false when it isn't, and why explains
 // it), the hook command that finds swarmia-cli, and how to add our hooks to
-// the settings. New agents plug in by appending to supportedAgents.
+// its settings. New agents plug in by appending to supportedAgents.
 type agentConfig struct {
-	name         string
-	settingsPath func(repoDir string, scope installScope) (path string, ok bool, why string)
-	hookCommand  func(ref binaryRef, scope installScope) string
-	install      func(path, hookCommand string, dryRun bool) (hookChanges, error)
-	// duplicates lists other settings files that already log this project's
-	// events, so installing into scope would log every event twice.
-	duplicates func(repoDir string, scope installScope) []string
+	*agent.Agent
+	detected    func(repoDir string, scope agent.Scope) (ok bool, why string)
+	hookCommand func(ref binaryRef, scope agent.Scope) string
+	install     func(path, hookCommand string, dryRun bool) (hookChanges, error)
 	// activate tells the user what's left to do once hooks are installed at
 	// path (and does it, where asked and possible).
 	activate func(out io.Writer, path string, opts installOpts) error
@@ -132,11 +118,11 @@ var supportedAgents = []agentConfig{claudeCodeAgent, codexAgent}
 func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 	scope := opts.scope
 	if scope == "" {
-		scope = scopeProject
+		scope = agent.ScopeProject
 	}
 	ref := binaryRef{cmd: opts.binaryRef, source: "--binary override"}
 	if ref.cmd == "" {
-		if scope == scopeProject {
+		if scope == agent.ScopeProject {
 			ref = detectBinaryRef(repoDir)
 		} else {
 			ref = executableRef()
@@ -146,23 +132,31 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 
 	detected := 0
 	for _, ag := range supportedAgents {
-		path, ok, why := ag.settingsPath(repoDir, scope)
-		if !ok {
-			fmt.Fprintf(out, "%s: %s, skipping\n", ag.name, why)
+		path, err := ag.HooksFile(repoDir, scope)
+		if noScope := (*agent.NoScopeError)(nil); errors.As(err, &noScope) {
+			fmt.Fprintf(out, "%s: %v; use --scope user, skipping\n", ag.Title, err)
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(out, "%s: %v, skipping\n", ag.Title, err)
+			continue
+		}
+		if ok, why := ag.detected(repoDir, scope); !ok {
+			fmt.Fprintf(out, "%s: %s, skipping\n", ag.Title, why)
 			continue
 		}
 		detected++
 		res, err := ag.install(path, ag.hookCommand(ref, scope), opts.dryRun)
 		if err != nil {
-			return fmt.Errorf("%s: %w", ag.name, err)
+			return fmt.Errorf("%s: %w", ag.Title, err)
 		}
 		rel := displayPath(repoDir, path)
-		for _, dup := range ag.duplicates(repoDir, scope) {
+		for _, dup := range duplicateHooks(ag.Agent, repoDir, scope) {
 			fmt.Fprintf(out, "Warning: %s already runs swarmia-cli log-hook for this project; with both, every event is logged twice. Remove the hooks from one of them.\n",
 				displayPath(repoDir, dup))
 		}
 		if res.added == 0 && res.removed == 0 {
-			fmt.Fprintf(out, "%s (%s): already configured\n", ag.name, rel)
+			fmt.Fprintf(out, "%s (%s): already configured\n", ag.Title, rel)
 		} else {
 			verb := "added"
 			if opts.dryRun {
@@ -172,10 +166,10 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			if res.removed > 0 {
 				msg += fmt.Sprintf(", removed %d obsolete hook(s)", res.removed)
 			}
-			fmt.Fprintf(out, "%s (%s): %s\n", ag.name, rel, msg)
+			fmt.Fprintf(out, "%s (%s): %s\n", ag.Title, rel, msg)
 		}
 		if err := ag.activate(out, path, opts); err != nil {
-			return fmt.Errorf("%s: %w", ag.name, err)
+			return fmt.Errorf("%s: %w", ag.Title, err)
 		}
 	}
 
@@ -183,6 +177,25 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 		fmt.Fprintln(out, "No supported coding agents detected in this repo. Nothing to do.")
 	}
 	return nil
+}
+
+// duplicateHooks lists the agent's other hooks files that already log this
+// project's events, so installing into scope would log every event twice.
+// User-scope hooks stand down where a project has its own, so they have none.
+func duplicateHooks(ag *agent.Agent, repoDir string, scope agent.Scope) []string {
+	if scope == agent.ScopeUser {
+		return nil
+	}
+	var out []string
+	for _, other := range agent.Scopes {
+		if other == scope {
+			continue
+		}
+		if path, err := ag.HooksFile(repoDir, other); err == nil && hooksFileRunsLogHook(path) {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 func (r binaryRef) String() string {
@@ -251,40 +264,23 @@ func displayPath(repoDir, path string) string {
 	return path
 }
 
-// claudeConfigDir is Claude Code's user configuration directory.
-func claudeConfigDir() (string, error) {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return dir, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".claude"), nil
-}
-
 // --- Claude Code -----------------------------------------------------------
 
 var claudeCodeAgent = agentConfig{
-	name: "Claude Code",
-	settingsPath: func(repoDir string, scope installScope) (string, bool, string) {
-		switch scope {
-		case scopeUser:
-			dir, err := claudeConfigDir()
-			return filepath.Join(dir, "settings.json"), err == nil, "no home directory"
-		case scopeLocal:
-			return filepath.Join(repoDir, ".claude", "settings.local.json"), dirExists(filepath.Join(repoDir, ".claude")), "not detected"
-		default:
-			return filepath.Join(repoDir, ".claude", "settings.json"), dirExists(filepath.Join(repoDir, ".claude")), "not detected"
+	Agent: agent.ClaudeCode,
+	detected: func(repoDir string, scope agent.Scope) (bool, string) {
+		if scope == agent.ScopeUser {
+			return true, "" // its user settings are created as needed
 		}
+		return dirExists(filepath.Join(repoDir, agent.ClaudeCode.ConfigDir)), "not detected"
 	},
-	hookCommand: func(ref binaryRef, scope installScope) string {
+	hookCommand: func(ref binaryRef, scope agent.Scope) string {
 		command := ref.cmd
 		if ref.rel != "" {
 			command = "${CLAUDE_PROJECT_DIR}/" + ref.rel
 		}
 		command += " log-hook"
-		if scope == scopeUser {
+		if scope == agent.ScopeUser {
 			command += " " + skipIfProjectHooksFlag
 		}
 		return command
@@ -292,19 +288,6 @@ var claudeCodeAgent = agentConfig{
 	activate: func(out io.Writer, path string, opts installOpts) error {
 		if !opts.dryRun {
 			fmt.Fprintln(out, "  Reload hooks with /hooks in Claude Code (or start a fresh session) to activate.")
-		}
-		return nil
-	},
-	duplicates: func(repoDir string, scope installScope) []string {
-		if scope == scopeUser {
-			return nil // user-scope hooks stand down where a project has its own
-		}
-		other := "settings.local.json"
-		if scope == scopeLocal {
-			other = "settings.json"
-		}
-		if path := filepath.Join(repoDir, ".claude", other); hooksFileRunsLogHook(path) {
-			return []string{path}
 		}
 		return nil
 	},

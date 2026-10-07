@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,5 +71,29 @@ func TestProjectHooksFiles(t *testing.T) {
 	}
 	if got := Codex.ProjectHooksFiles(sub); !reflect.DeepEqual(got, []string{filepath.Join(root, ".codex", "hooks.json")}) {
 		t.Errorf("Codex: %q", got)
+	}
+}
+
+func TestHooksFile(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/home/me/.claude")
+	t.Setenv("CODEX_HOME", "/home/me/.codex")
+	for _, tc := range []struct {
+		agent *Agent
+		scope Scope
+		want  string
+	}{
+		{ClaudeCode, ScopeProject, "/r/.claude/settings.json"},
+		{ClaudeCode, ScopeLocal, "/r/.claude/settings.local.json"},
+		{ClaudeCode, ScopeUser, "/home/me/.claude/settings.json"},
+		{Codex, ScopeProject, "/r/.codex/hooks.json"},
+		{Codex, ScopeUser, "/home/me/.codex/hooks.json"},
+	} {
+		if got, err := tc.agent.HooksFile("/r", tc.scope); err != nil || got != tc.want {
+			t.Errorf("%s %s: %q, %v", tc.agent.Name, tc.scope, got, err)
+		}
+	}
+	var noScope *NoScopeError
+	if _, err := Codex.HooksFile("/r", ScopeLocal); !errors.As(err, &noScope) {
+		t.Errorf("Codex local scope: %v", err)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/swarmia/swarmia-cli/internal/agent"
 )
 
 // readSettings parses a .claude/settings.json under repoDir for assertions.
@@ -506,7 +508,7 @@ func TestInstallLocalScope(t *testing.T) {
 	shared, _ := os.ReadFile(filepath.Join(repo, ".claude", "settings.json"))
 
 	var out bytes.Buffer
-	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeLocal}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: agent.ScopeLocal}); err != nil {
 		t.Fatal(err)
 	}
 	if after, _ := os.ReadFile(filepath.Join(repo, ".claude", "settings.json")); !bytes.Equal(shared, after) {
@@ -530,7 +532,7 @@ func TestInstallUserScope(t *testing.T) {
 	repo := t.TempDir() // no .claude here
 
 	var out bytes.Buffer
-	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeUser}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: agent.ScopeUser}); err != nil {
 		t.Fatal(err)
 	}
 	doc, err := readJSONObject(filepath.Join(configDir, "settings.json"))
@@ -565,7 +567,7 @@ func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
 	}})
 
 	var out bytes.Buffer
-	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: scopeLocal}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "/opt/bin/swarmia-cli", scope: agent.ScopeLocal}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Warning: .claude/settings.json already runs swarmia-cli log-hook") {
@@ -577,7 +579,7 @@ func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
 
 	// The reverse direction warns too; a clean project doesn't.
 	out.Reset()
-	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli", scope: scopeProject}); err != nil {
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli", scope: agent.ScopeProject}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Warning: .claude/settings.local.json already runs") {
@@ -586,7 +588,7 @@ func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
 	clean := t.TempDir()
 	os.Mkdir(filepath.Join(clean, ".claude"), 0o755)
 	out.Reset()
-	if err := runInstall(&out, clean, installOpts{binaryRef: "swarmia-cli", scope: scopeLocal}); err != nil {
+	if err := runInstall(&out, clean, installOpts{binaryRef: "swarmia-cli", scope: agent.ScopeLocal}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "Warning") {
@@ -597,5 +599,5 @@ func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
 // claudeRef is how a Claude Code project hook would invoke swarmia-cli.
 func claudeRef(repo string) (ref, source string) {
 	r := detectBinaryRef(repo)
-	return strings.TrimSuffix(claudeCodeAgent.hookCommand(r, scopeProject), " log-hook"), r.source
+	return strings.TrimSuffix(claudeCodeAgent.hookCommand(r, agent.ScopeProject), " log-hook"), r.source
 }

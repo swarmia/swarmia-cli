@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/codex"
 )
 
@@ -23,41 +24,23 @@ var codexHookSpecs = []hookSpec{
 }
 
 var codexAgent = agentConfig{
-	name: "Codex",
-	settingsPath: func(repoDir string, scope installScope) (string, bool, string) {
-		switch scope {
-		case scopeUser:
+	Agent: agent.Codex,
+	detected: func(repoDir string, scope agent.Scope) (bool, string) {
+		if scope == agent.ScopeUser {
 			home, err := codex.Home()
-			if err != nil {
-				return "", false, "no home directory"
-			}
-			return filepath.Join(home, codex.HooksFile), dirExists(home), "not detected (no " + displayPath(repoDir, home) + ")"
-		case scopeLocal:
-			return "", false, "no local scope (Codex has no personal per-project hooks file; use --scope user)"
-		default:
-			return filepath.Join(repoDir, ".codex", codex.HooksFile), dirExists(filepath.Join(repoDir, ".codex")), "not detected"
+			return err == nil && dirExists(home), "not detected (no " + displayPath(repoDir, home) + ")"
 		}
+		return dirExists(filepath.Join(repoDir, agent.Codex.ConfigDir)), "not detected"
 	},
-	hookCommand: func(ref binaryRef, scope installScope) string {
+	hookCommand: func(ref binaryRef, scope agent.Scope) string {
 		if ref.rel != "" {
 			return codexRootedCommand(ref.rel, "log-hook --agent codex")
 		}
 		command := ref.cmd + " log-hook --agent codex"
-		if scope == scopeUser {
+		if scope == agent.ScopeUser {
 			command += " " + skipIfProjectHooksFlag
 		}
 		return command
-	},
-	duplicates: func(repoDir string, scope installScope) []string {
-		if scope == scopeUser {
-			return nil // user-scope hooks stand down where a project has its own
-		}
-		if home, err := codex.Home(); err == nil {
-			if path := filepath.Join(home, codex.HooksFile); hooksFileRunsLogHook(path) {
-				return []string{path}
-			}
-		}
-		return nil
 	},
 	install: func(path, hookCommand string, dryRun bool) (hookChanges, error) {
 		doc, err := readJSONObject(path)
@@ -114,7 +97,7 @@ func activateCodex(out io.Writer, path string, opts installOpts) error {
 	}
 	fmt.Fprintf(out, "  Codex skips hooks until you trust them: run /hooks in Codex and approve the\n"+
 		"  %d swarmia-cli hook(s), or rerun with --trust to record that in %s.\n", len(untrusted), displayPath("", configPath))
-	if opts.scope == scopeProject || opts.scope == "" {
+	if opts.scope == agent.ScopeProject || opts.scope == "" {
 		fmt.Fprintln(out, "  Everyone using these project hooks approves them once, the same way.")
 	}
 	return nil
@@ -152,17 +135,15 @@ func untrustedCodexHooks(path string) (map[string]string, error) {
 // codexHooksFiles are the Codex hooks files that may hold swarmia-cli's hooks
 // for a repository: the project's and the user's.
 func codexHooksFiles(repoRoot string) []string {
-	var files []string
-	if repoRoot != "" {
-		files = append(files, filepath.Join(repoRoot, ".codex", codex.HooksFile))
-	}
-	if home, err := codex.Home(); err == nil {
-		files = append(files, filepath.Join(home, codex.HooksFile))
-	}
 	var out []string
-	for _, f := range files {
-		if _, err := os.Stat(f); err == nil {
-			out = append(out, f)
+	for _, scope := range agent.Scopes {
+		if repoRoot == "" && scope != agent.ScopeUser {
+			continue
+		}
+		if f, err := agent.Codex.HooksFile(repoRoot, scope); err == nil {
+			if _, err := os.Stat(f); err == nil {
+				out = append(out, f)
+			}
 		}
 	}
 	return out

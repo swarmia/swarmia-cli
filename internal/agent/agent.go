@@ -5,9 +5,12 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
+	"github.com/swarmia/swarmia-cli/internal/codex"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 )
 
@@ -20,8 +23,10 @@ type Agent struct {
 	Title string
 	// ConfigDir is the agent's directory in a project, e.g. ".claude".
 	ConfigDir string
-	// projectHooks are the files in ConfigDir that may configure hooks.
-	projectHooks []string
+	// hooksFiles names the file that configures hooks in each scope the agent
+	// has: in ConfigDir for project and local scope, in userDir for user scope.
+	hooksFiles map[Scope]string
+	userDir    func() (string, error)
 	// hooksAtRepoRoot is set for agents that run hooks in the session's working
 	// directory without saying where the project is: their project is the
 	// enclosing repository.
@@ -32,12 +37,13 @@ type Agent struct {
 }
 
 var ClaudeCode = &Agent{
-	Name:         "claude-code",
-	Title:        "Claude Code",
-	ConfigDir:    ".claude",
-	projectHooks: []string{"settings.json", "settings.local.json"},
-	isEditTool:   attribution.IsClaudeEditTool,
-	isShellTool:  func(name string) bool { return name == "Bash" },
+	Name:        "claude-code",
+	Title:       "Claude Code",
+	ConfigDir:   ".claude",
+	hooksFiles:  map[Scope]string{ScopeProject: "settings.json", ScopeLocal: "settings.local.json", ScopeUser: "settings.json"},
+	userDir:     claudeConfigDir,
+	isEditTool:  attribution.IsClaudeEditTool,
+	isShellTool: func(name string) bool { return name == "Bash" },
 	edits: func(payload []byte, root string) []attribution.Edit {
 		if e, ok := attribution.ClaudeEdit(payload, root); ok {
 			return []attribution.Edit{e}
@@ -50,11 +56,24 @@ var Codex = &Agent{
 	Name:            "codex",
 	Title:           "Codex",
 	ConfigDir:       ".codex",
-	projectHooks:    []string{"hooks.json"},
+	hooksFiles:      map[Scope]string{ScopeProject: codex.HooksFile, ScopeUser: codex.HooksFile},
+	userDir:         codex.Home,
 	hooksAtRepoRoot: true,
 	isEditTool:      attribution.IsCodexPatchTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
 	edits:           attribution.CodexEdits,
+}
+
+// claudeConfigDir is Claude Code's user configuration directory.
+func claudeConfigDir() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
 }
 
 // All lists the supported agents.
@@ -158,9 +177,53 @@ func (a *Agent) Edits(payload []byte, root string) []attribution.Edit {
 	return a.edits(payload, root)
 }
 
+// Scope says which of an agent's settings files configures hooks.
+type Scope string
+
+const (
+	// ScopeProject is the repo's shared, committed settings: hooks for everyone.
+	ScopeProject Scope = "project"
+	// ScopeLocal is the repo's personal, gitignored settings.
+	ScopeLocal Scope = "local"
+	// ScopeUser is the user's settings: every project on this machine, including
+	// worktrees that lack the repo's untracked local settings.
+	ScopeUser Scope = "user"
+)
+
+// Scopes lists every scope.
+var Scopes = []Scope{ScopeProject, ScopeLocal, ScopeUser}
+
+// NoScopeError is HooksFile's error for a scope the agent doesn't have.
+type NoScopeError struct {
+	Agent *Agent
+	Scope Scope
+}
+
+func (e *NoScopeError) Error() string {
+	kind := map[Scope]string{ScopeProject: "shared per-project", ScopeLocal: "personal per-project", ScopeUser: "per-user"}[e.Scope]
+	return fmt.Sprintf("no %s scope (%s has no %s hooks file)", e.Scope, e.Agent.Title, kind)
+}
+
+// HooksFile is the file that configures the agent's hooks in a scope, for the
+// project in dir. It fails for a scope the agent doesn't have.
+func (a *Agent) HooksFile(dir string, scope Scope) (string, error) {
+	name, ok := a.hooksFiles[scope]
+	if !ok {
+		return "", &NoScopeError{a, scope}
+	}
+	if scope == ScopeUser {
+		home, err := a.userDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, name), nil
+	}
+	return filepath.Join(dir, a.ConfigDir, name), nil
+}
+
 // ProjectHooksFiles are the files where the project a hook runs in (in dir)
-// may configure the agent's hooks. For Claude Code, dir is the project
-// directory it passes to hooks.
+// may configure the agent's hooks: its project and local scope. For Claude
+// Code, dir is the project directory it passes to hooks.
 func (a *Agent) ProjectHooksFiles(dir string) []string {
 	if a.hooksAtRepoRoot {
 		repo, err := gitrepo.Find(dir)
@@ -170,8 +233,10 @@ func (a *Agent) ProjectHooksFiles(dir string) []string {
 		dir = repo.Root
 	}
 	var files []string
-	for _, name := range a.projectHooks {
-		files = append(files, filepath.Join(dir, a.ConfigDir, name))
+	for _, scope := range []Scope{ScopeProject, ScopeLocal} {
+		if path, err := a.HooksFile(dir, scope); err == nil {
+			files = append(files, path)
+		}
 	}
 	return files
 }
