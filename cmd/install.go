@@ -303,7 +303,7 @@ var claudeCodeAgent = agentConfig{
 		if scope == scopeLocal {
 			other = "settings.json"
 		}
-		if path := filepath.Join(repoDir, ".claude", other); settingsRunLogHook(path) {
+		if path := filepath.Join(repoDir, ".claude", other); hooksFileRunsLogHook(path) {
 			return []string{path}
 		}
 		return nil
@@ -456,16 +456,8 @@ func removeObsoleteHooks(doc map[string]any) int {
 }
 
 func isObsoleteHook(h any) bool {
-	hm, ok := h.(map[string]any)
-	if !ok {
-		return false
-	}
-	cmd, _ := hm["command"].(string)
-	if !strings.Contains(cmd, binaryName) {
-		return false
-	}
 	for _, sub := range obsoleteSubcommands {
-		if strings.Contains(cmd, sub) {
+		if runsSwarmia(hookCommand(h), sub) {
 			return true
 		}
 	}
@@ -474,16 +466,24 @@ func isObsoleteHook(h any) bool {
 
 func groupHasSwarmia(group map[string]any, subcmd string) bool {
 	for _, h := range asSlice(group, "hooks") {
-		hm, ok := h.(map[string]any)
-		if !ok {
-			continue
-		}
-		cmd, _ := hm["command"].(string)
-		if strings.Contains(cmd, binaryName) && strings.Contains(cmd, subcmd) {
+		if runsSwarmia(hookCommand(h), subcmd) {
 			return true
 		}
 	}
 	return false
+}
+
+// runsSwarmia reports whether a hook command runs swarmia-cli's subcmd, however
+// the binary is referenced.
+func runsSwarmia(command, subcmd string) bool {
+	return strings.Contains(command, binaryName) && strings.Contains(command, subcmd)
+}
+
+// hookCommand is a hook entry's command, or "" if it has none.
+func hookCommand(h any) string {
+	hm, _ := h.(map[string]any)
+	cmd, _ := hm["command"].(string)
+	return cmd
 }
 
 // matcherEquals treats a missing matcher key and an empty string as the same slot.

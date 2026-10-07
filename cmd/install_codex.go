@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/swarmia/swarmia-cli/internal/codex"
 )
@@ -54,7 +53,7 @@ var codexAgent = agentConfig{
 			return nil // user-scope hooks stand down where a project has its own
 		}
 		if home, err := codex.Home(); err == nil {
-			if path := filepath.Join(home, codex.HooksFile); settingsRunLogHook(path) {
+			if path := filepath.Join(home, codex.HooksFile); hooksFileRunsLogHook(path) {
 				return []string{path}
 			}
 		}
@@ -139,7 +138,7 @@ func untrustedCodexHooks(path string) (map[string]string, error) {
 	}
 	out := map[string]string{}
 	for _, h := range handlers {
-		if !strings.Contains(h.Command, binaryName) || !strings.Contains(h.Command, "log-hook") {
+		if !runsSwarmia(h.Command, "log-hook") {
 			continue
 		}
 		key, hash := h.Key(path), h.Hash()

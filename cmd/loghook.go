@@ -146,17 +146,17 @@ func appendLine(path string, line []byte) error {
 // already run swarmia-cli log-hook, without our user-scope flag.
 func projectHasLogHook(ag *agent.Agent, dir string) bool {
 	for _, path := range ag.ProjectHooksFiles(dir) {
-		if settingsRunLogHook(path) {
+		if hooksFileRunsLogHook(path) {
 			return true
 		}
 	}
 	return false
 }
 
-// settingsRunLogHook reports whether a Claude Code settings file runs
+// hooksFileRunsLogHook reports whether an agent's settings or hooks file runs
 // swarmia-cli log-hook unconditionally (not as a user-scope hook that stands
 // down for project hooks).
-func settingsRunLogHook(path string) bool {
+func hooksFileRunsLogHook(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -171,10 +171,7 @@ func settingsRunLogHook(path string) bool {
 		for _, g := range gs {
 			gm, _ := g.(map[string]any)
 			for _, h := range asSlice(gm, "hooks") {
-				hm, _ := h.(map[string]any)
-				cmd, _ := hm["command"].(string)
-				if strings.Contains(cmd, binaryName) && strings.Contains(cmd, "log-hook") &&
-					!strings.Contains(cmd, skipIfProjectHooksFlag) {
+				if cmd := hookCommand(h); runsSwarmia(cmd, "log-hook") && !strings.Contains(cmd, skipIfProjectHooksFlag) {
 					return true
 				}
 			}
