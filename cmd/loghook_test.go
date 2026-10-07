@@ -110,6 +110,7 @@ func TestRunLogHookWrapsPayload(t *testing.T) {
 		t.Fatalf("got %d lines, want 1:\n%s", n, data)
 	}
 	var rec struct {
+		Format   int            `json:"format"`
 		LoggedAt string         `json:"logged_at"`
 		Event    map[string]any `json:"event"`
 	}
@@ -119,7 +120,7 @@ func TestRunLogHookWrapsPayload(t *testing.T) {
 	if bytes.Contains(data, []byte(`"git"`)) {
 		t.Errorf("git field written outside a repo: %s", data)
 	}
-	if rec.LoggedAt == "" || rec.Event["session_id"] != "s1" {
+	if rec.Format != events.Format || rec.LoggedAt == "" || rec.Event["session_id"] != "s1" {
 		t.Errorf("unexpected record: %s", data)
 	}
 }

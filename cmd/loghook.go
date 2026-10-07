@@ -101,7 +101,7 @@ func runLogHook(stdin io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("resolving log file: %w", err)
 	}
-	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
+	rec := events.Record{Format: events.Format, LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
 	ev, _ := ag.Parse(payload)
 	// Best-effort: an unreadable repo state must not stop the event being logged.
 	if repoErr == nil {

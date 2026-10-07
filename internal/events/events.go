@@ -9,8 +9,19 @@ import (
 	"os"
 )
 
+// Format is the version of the record format this binary writes and reads.
+// Binaries of different versions share a repository's log (every worktree
+// does, and each may have its own swarmia-cli), so bump it when an older
+// binary would lose or misread something in a new record: older binaries then
+// leave such records in the log, as they are, for a newer one to fold. Every
+// format's records must stay JSON objects with a "format" field.
+const Format = 1
+
 // Record is one line of the log.
 type Record struct {
+	// Format is the record's format (see Format); 0 in records from before the
+	// field, which are format 1.
+	Format   int    `json:"format,omitempty"`
 	LoggedAt string `json:"logged_at"`     // RFC 3339, UTC
 	Git      *Git   `json:"git,omitempty"` // omitted outside a repo
 	// Agent is the coding agent that sent the event (see internal/agent).
@@ -36,6 +47,9 @@ type Git struct {
 	Branch string `json:"branch,omitempty"` // short name; empty when detached
 }
 
+// Newer reports whether the record is in a format newer than this binary's.
+func (r Record) Newer() bool { return r.Format > Format }
+
 // ReadFile parses a log file. A missing file is an empty log; lines that don't
 // parse (a torn write, a future format) are skipped rather than failing.
 func ReadFile(path string) ([]Record, error) {
@@ -56,10 +70,18 @@ func Read(r io.Reader) ([]Record, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 256<<20) // Write payloads carry whole files
 	for sc.Scan() {
-		var rec Record
-		if json.Unmarshal(sc.Bytes(), &rec) == nil && len(rec.Event) > 0 {
+		if rec, ok := Parse(sc.Bytes()); ok {
 			recs = append(recs, rec)
 		}
 	}
 	return recs, sc.Err()
+}
+
+// Parse parses one line of a log. ok is false if it isn't a record: a blank
+// line, or a torn write.
+func Parse(line []byte) (rec Record, ok bool) {
+	if json.Unmarshal(line, &rec) != nil {
+		return Record{}, false
+	}
+	return rec, len(rec.Event) > 0 || rec.Newer()
 }

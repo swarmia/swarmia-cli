@@ -39,6 +39,9 @@ type Options struct {
 // Session is one agent session: what happened in it, and which committed lines
 // came from it. It is what the Store keeps once the raw events are folded in.
 type Session struct {
+	// Format is the session file's format (see SessionFormat); 0 in files
+	// from before the field, which are format 1.
+	Format    int       `json:"format,omitempty"`
 	ID        string    `json:"id"`
 	Agent     string    `json:"agent"`
 	Model     string    `json:"model,omitempty"`

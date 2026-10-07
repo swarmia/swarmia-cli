@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,5 +196,50 @@ func TestProcessTracksTranscriptUsage(t *testing.T) {
 	fh.Close()
 	if req, out := usage(f.process(t, state, t0)); req != 2 || out != 15 {
 		t.Errorf("after growth: %d requests, %d output tokens; want 2, 15", req, out)
+	}
+}
+
+// A repository's state is shared by every swarmia-cli version in use (each
+// worktree may have its own). This version must leave what a newer one wrote
+// alone: records in a newer format stay in the log byte for byte, as do the
+// records of sessions stored in a newer format, whose files it doesn't touch.
+func TestProcessLeavesNewerFormatsAlone(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	f.agentWrite(t0, "gen.go", "package gen\n", nil) // sess-1, this version's
+	writeLog(t, logPath, f.recs)
+
+	newerRecord := `{"format":2,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-2"},"from_the_future":[1,2]}` + "\n"
+	newerSession := `{"format":2,"id":"sess-3","agent":"claude-code","from_the_future":true}`
+	ofNewerSession := `{"format":1,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-3","hook_event_name":"Stop"}}` + "\n"
+	sessions := filepath.Join(state, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessions, "sess-3.json"), []byte(newerSession), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lf.WriteString(newerRecord + ofNewerSession)
+	lf.Close()
+
+	for run := range 2 { // the second run finds nothing it can fold
+		res := f.process(t, state, t0.Add(time.Hour))
+		if want := 1 - run; res.Folded != want || len(res.Sessions) != 1 || res.Sessions[0].ID != "sess-1" {
+			t.Errorf("run %d: folded %d into %d session(s), want %d into sess-1 only", run, res.Folded, len(res.Sessions), want)
+		}
+		if got, _ := os.ReadFile(logPath); string(got) != newerRecord+ofNewerSession {
+			t.Errorf("run %d: log = %q, want the newer records as they were", run, got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(sessions, "sess-3.json")); string(got) != newerSession {
+			t.Errorf("run %d: newer session rewritten: %s", run, got)
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(sessions, "sess-1.json")); !strings.Contains(string(got), `"format":1`) {
+		t.Errorf("saved session lacks its format: %.80s…", got)
 	}
 }

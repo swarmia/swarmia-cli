@@ -295,6 +295,11 @@ It holds `events.jsonl`, `sessions/` (one JSON record per session),
 Files are owner-only (`0600`). Override the base with `$SWARMIA_STATE_DIR`;
 `swarmia-cli state-dir` prints it.
 
+Worktrees can have different swarmia-cli versions sharing this state, so
+event records and session files carry a `format` version. A version leaves
+what a newer one wrote, in a format it doesn't know, alone: such sessions,
+and their records in the log, wait for a newer version to process them.
+
 ### Processing: `process`
 
 - **Fold:** the raw log becomes one compact record per session — prompts, tool
