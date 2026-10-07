@@ -206,9 +206,13 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
     5/5 tool calls captured, precision and recall 1.000 on 30 agent lines,
     planted secret redacted, $0.05 per run. The first run found two product
     bugs, both fixed: local `origin` paths leaked into `repo`, and headless
-    sessions had no model. Phase 2 must make prettier matter (the agent wrote
-    already-formatted code, so everything was `exact`), e.g. ask for single
-    quotes.
+    sessions had no model. Phase 2 (done 2026-10-07): the full scenario —
+    single quotes + prettier, a hand tweak, partial commits, a `sed` rename by a
+    second session, a teammate rebase, squash, amend, and a resumed session.
+    It found a false attribution (a commit rebased after a later session's
+    edit credited to that session as `modified`), fixed in matcher 0.2.0 by
+    hunks carrying the lines their edit replaced. Now 1.000 precision, recall
+    and class agreement for both sessions; ~$0.23 per run.
     Watch: Claude Code's docs say `--bare` "will become the default for `-p`";
     bare mode skips hooks, so headless sessions would stop reaching us — the
     nightly `latest` run is what would catch it.

@@ -56,12 +56,12 @@ hooks) applies.
 
 | Step | Who | Exercises |
 |---|---|---|
-| "Add `isSecureURL` to `src/utils.ts`, with tests" (`--session-id S1`) | agent | Write/Edit capture, transcript usage |
-| prettier over `src` and `test`, commit, push | script | `normalized`, introduced lines, pushed flag |
-| *(phase 2)* tweak one agent line by hand; commit only `src` | script | `modified`, partial commits |
-| *(phase 2)* "Rename it with a single `sed`" (`--session-id S2`) | agent | shell snapshots |
-| *(phase 2)* teammate pushes; fetch, rebase, squash, amend, push | script | reflog/author filter, reachability, rewrites |
-| *(phase 2)* `--resume S1`: "add a doc comment" | agent | resumed sessions |
+| "Add `isSecureURL` to `src/utils.ts`, with tests, in single quotes" (`--session-id S1`) | agent | Write/Edit capture, transcript usage |
+| prettier over `src` and `test` (double quotes) | script | `normalized` |
+| tweak one agent line by hand; commit `src`, then `test` (unpushed) | script | `modified`, partial commits |
+| "Rename it with a single `sed`" (`--session-id S2`) | agent | shell snapshots |
+| teammate pushes; fetch, rebase, squash the last two, amend, push | script | reflog/author filter, reachability, rewrites |
+| `--resume S1`: "add `isInsecureURL` with a test"; commit, push | agent | resumed sessions |
 
 Agent runs use `claude -p --output-format stream-json --verbose
 --include-hook-events --permission-mode bypassPermissions --setting-sources
@@ -78,11 +78,16 @@ snapshots:
    and is marked ended; no hook reported an error.
 2. **Usage**: swarmia-cli's token totals are non-zero and equal an independent
    count over the transcript.
-3. **Attribution**: from the transcript's tool inputs (what the agent wrote)
-   and the script's own steps, compute which lines each pushed commit
-   introduced that came from the agent; compare with the payload (precision
-   and recall). Invariants: no attribution outside agent-edited files, none on
-   unpushed or unreachable commits, none on teammate lines.
+3. **Attribution**, per session: a session's lines are the union of its
+   transcript's edit-tool inputs and the working tree's changes during its runs
+   (which covers shell edits). Each line the scenario's pushed commits
+   introduced gets an expected class — `exact`, `normalized` (only formatting
+   differs), or `modified` (the hand-tweaked line) — compared with the payload
+   for precision, recall and class agreement. A false positive is a line no
+   agent wrote, or one that existed before the session started and that it
+   didn't write. Invariants: every attributed commit is on `origin/main`; the
+   teammate's commit is never attributed; the tweaked line comes out
+   `modified`; prettier's changes come out `normalized`.
 4. **Payload**: required fields present; a fake secret planted in the prompt
    comes out `[REDACTED:…]`; no temp paths or user names.
 5. **Inconclusive vs failed**: if the agent didn't do the task (the function is
@@ -101,9 +106,13 @@ repository's OIDC subject.
 
 ## Phases
 
-1. Harness, isolation, credentials, the first agent task, capture/usage/payload
-   checks and a first attribution check. ← current
-2. The full scenario (tweak, partial commit, shell rename, teammate rebase,
-   squash, amend, resume) and the full attribution oracle; nightly schedule.
+1. ✅ Harness, isolation, credentials, the first agent task, capture/usage/
+   payload checks. Its first CI run found two payload bugs (local `origin`
+   paths in `repo`; no model for headless sessions).
+2. ✅ The full scenario and the per-session attribution oracle. Its first run
+   found a false attribution: a commit rebased after a later session's edit
+   was credited to that session as `modified` (fixed: hunks carry the lines
+   their edit replaced). Now: precision, recall and class agreement 1.000 for
+   both sessions, all three classes exercised, ~$0.23 per run.
 3. Install through the npm package; delivery to a fake `hook`; macOS; Codex
-   once swarmia-cli supports it.
+   once swarmia-cli supports it. ← next
