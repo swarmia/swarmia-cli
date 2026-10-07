@@ -32,16 +32,7 @@ var codexAgent = agentConfig{
 		}
 		return dirExists(filepath.Join(repoDir, agent.Codex.ConfigDir)), "not detected"
 	},
-	hookCommand: func(ref binaryRef, scope agent.Scope) string {
-		if ref.rel != "" {
-			return codexRootedCommand(ref.rel, "log-hook --agent codex")
-		}
-		command := ref.cmd + " log-hook --agent codex"
-		if scope == agent.ScopeUser {
-			command += " " + skipIfProjectHooksFlag
-		}
-		return command
-	},
+	inRepo:   codexRootedCommand,
 	hooks:    codexHookSpecs,
 	activate: activateCodex,
 }

@@ -87,13 +87,15 @@ type installOpts struct {
 
 // agentConfig describes how to install into one supported coding agent:
 // whether it is used for a scope (ok is false when it isn't, and why explains
-// it), the hook command that finds swarmia-cli, and the hooks to add to its
-// settings. New agents plug in by appending to supportedAgents.
+// it), how its hooks run a swarmia-cli inside the repository, and the hooks to
+// add to its settings. New agents plug in by appending to supportedAgents.
 type agentConfig struct {
 	*agent.Agent
-	detected    func(repoDir string, scope agent.Scope) (ok bool, why string)
-	hookCommand func(ref binaryRef, scope agent.Scope) string
-	hooks       []hookSpec
+	detected func(repoDir string, scope agent.Scope) (ok bool, why string)
+	// inRepo is a hook command running the swarmia-cli at rel, relative to the
+	// repository root, with args.
+	inRepo func(rel, args string) string
+	hooks  []hookSpec
 	// activate tells the user what's left to do once hooks are installed at
 	// path (and does it, where asked and possible).
 	activate func(out io.Writer, path string, opts installOpts) error
@@ -198,6 +200,22 @@ func duplicateHooks(ag *agent.Agent, repoDir string, scope agent.Scope) []string
 	return out
 }
 
+// hookCommand is the command the agent's hooks run: log-hook, telling it
+// which agent calls, and in user scope to stand down for project hooks.
+func (ag agentConfig) hookCommand(ref binaryRef, scope agent.Scope) string {
+	args := "log-hook"
+	if ag.Agent != agent.ClaudeCode { // the default
+		args += " --agent " + ag.Name
+	}
+	if scope == agent.ScopeUser {
+		args += " " + skipIfProjectHooksFlag
+	}
+	if ref.rel != "" {
+		return ag.inRepo(ref.rel, args)
+	}
+	return ref.cmd + " " + args
+}
+
 func (r binaryRef) String() string {
 	if r.rel != "" {
 		return "<repo>/" + r.rel
@@ -274,17 +292,7 @@ var claudeCodeAgent = agentConfig{
 		}
 		return dirExists(filepath.Join(repoDir, agent.ClaudeCode.ConfigDir)), "not detected"
 	},
-	hookCommand: func(ref binaryRef, scope agent.Scope) string {
-		command := ref.cmd
-		if ref.rel != "" {
-			command = "${CLAUDE_PROJECT_DIR}/" + ref.rel
-		}
-		command += " log-hook"
-		if scope == agent.ScopeUser {
-			command += " " + skipIfProjectHooksFlag
-		}
-		return command
-	},
+	inRepo: func(rel, args string) string { return "${CLAUDE_PROJECT_DIR}/" + rel + " " + args },
 	activate: func(out io.Writer, path string, opts installOpts) error {
 		if !opts.dryRun {
 			fmt.Fprintln(out, "  Reload hooks with /hooks in Claude Code (or start a fresh session) to activate.")
