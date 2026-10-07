@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -218,9 +219,21 @@ type hookPayload struct {
 	Prompt         string `json:"prompt"`
 	ToolName       string `json:"tool_name"`
 	ToolInput      struct {
-		FilePath string `json:"file_path"`
-		Command  string `json:"command"`
+		FilePath string     `json:"file_path"`
+		Command  textOrNone `json:"command"`
 	} `json:"tool_input"`
+}
+
+// textOrNone is a string field that agents may also send as something else
+// (an argv array, say), which reads as empty instead of failing the record.
+type textOrNone string
+
+func (t *textOrNone) UnmarshalJSON(data []byte) error {
+	var s string
+	if json.Unmarshal(data, &s) == nil {
+		*t = textOrNone(s)
+	}
+	return nil
 }
 
 // Fold merges records into sessions (keyed by id), creating sessions as
@@ -242,9 +255,13 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		} else {
 			seen[key] = true
 		}
+		agent := rec.Agent
+		if agent == "" {
+			agent = attribution.AgentClaudeCode
+		}
 		s, ok := sessions[p.SessionID]
 		if !ok {
-			s = &Session{ID: p.SessionID, Agent: "claude-code", StartedAt: at, AILinesByPath: map[string]int{}}
+			s = &Session{ID: p.SessionID, Agent: agent, StartedAt: at, AILinesByPath: map[string]int{}}
 			sessions[p.SessionID] = s
 		}
 		if s.AILinesByPath == nil {
@@ -265,17 +282,28 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 				s.Model = p.Model
 			}
 			s.Ended = false // resumed
-		case "SessionEnd":
-			s.Ended = true
 		case "UserPromptSubmit":
 			s.Prompts = append(s.Prompts, Prompt{At: at, Text: p.Prompt})
+			if s.Model == "" && p.Model != "" { // Codex sends the model with every event
+				s.Model = p.Model
+			}
+		case "SessionEnd":
+			s.Ended = true
 		case "PostToolUse", "PostToolUseFailure":
-			s.Tools = append(s.Tools, Tool{At: at, Name: p.ToolName, File: p.ToolInput.FilePath, Command: p.ToolInput.Command})
 			root := fallbackRoot
 			if rec.Git != nil && rec.Git.Root != "" {
 				root = rec.Git.Root
 			}
-			if e, ok := attribution.ClaudeEdit(rec.Event, root); ok {
+			edits := attribution.Edits(agent, rec.Event, root)
+			tool := Tool{At: at, Name: p.ToolName, File: p.ToolInput.FilePath, Command: string(p.ToolInput.Command)}
+			if agent == attribution.AgentCodex && attribution.IsCodexPatchTool(p.ToolName) {
+				tool.Command = "" // the patch itself, not a command
+				if len(edits) > 0 {
+					tool.File = filepath.Join(root, filepath.FromSlash(edits[0].Path))
+				}
+			}
+			s.Tools = append(s.Tools, tool)
+			for _, e := range edits {
 				s.addEdit(Edit{At: at, Path: e.Path, Hunks: encode(e.Hunks)}, e.After, e.AfterKnown)
 			}
 			for _, fc := range rec.Changes { // what a shell command authored

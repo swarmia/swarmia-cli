@@ -161,8 +161,8 @@ cap the decompressed size, see Limits).
 
 | Field | Type | Description |
 |---|---|---|
-| `session_id` | string | The agent's session id (a UUID for Claude Code). Unique per agent session; together with the organization (from the token) it identifies the session. Treat it as opaque. |
-| `agent` | string | Which coding agent: currently always `claude-code`. Future values: `codex`, `cursor`, `copilot-cli`, `gemini-cli`. Accept unknown values. |
+| `session_id` | string | The agent's session id (a UUID for Claude Code and Codex). Unique per agent session; together with the organization (from the token) it identifies the session. Treat it as opaque. |
+| `agent` | string | Which coding agent: `claude-code` or `codex`. Future values: `cursor`, `copilot-cli`, `gemini-cli`. Accept unknown values. |
 | `model` | string, optional | The model the session started with, as the agent reports it (e.g. `claude-opus-4-8[1m]`). Omitted if unknown. |
 | `matcher_version` | string (semver) | Version of the client's attribution rules. If a version is later found to attribute wrongly, the server can discount or flag results from it. |
 | `cli_version` | string | Client version that built this payload. |
@@ -183,20 +183,23 @@ cap the decompressed size, see Limits).
 
 One bucket per (model, speed, main session vs subagents). The client doesn't
 compute cost — prices change and depend on contracts — so the server prices
-these counts. Each API response counts once (agents write one transcript line
-per content block; the client deduplicates by message and request id).
+these counts. Each API response counts once (Claude Code writes one transcript
+line per content block, which the client deduplicates by message and request
+id; Codex records cumulative totals, which the client turns into per-response
+differences).
 
 | Field | Type | Description |
 |---|---|---|
-| `model` | string | Model id as the agent reports it, e.g. `claude-opus-4-8`. |
-| `speed` | string | `standard` or `fast` (fast mode is priced differently). Accept other values. |
-| `subagent` | boolean, optional | `true` for calls made by the session's subagents (e.g. Claude Code's Task tool); absent for the main session. |
+| `model` | string | Model id as the agent reports it, e.g. `claude-opus-4-8` or `gpt-6`; `unknown` if a Codex rollout didn't name it. |
+| `speed` | string | `standard` or `fast` (fast mode is priced differently). Always `standard` for Codex. Accept other values. |
+| `subagent` | boolean, optional | `true` for calls made by the session's subagents (e.g. Claude Code's Task tool); absent for the main session. Not yet reported for Codex. |
 | `requests` | integer | Model calls (API responses). |
 | `input_tokens` | integer | Uncached input tokens. |
-| `output_tokens` | integer | Output tokens (including thinking). |
+| `output_tokens` | integer | Output tokens (including thinking and reasoning). |
+| `reasoning_output_tokens` | integer, optional | Of `output_tokens`, those spent on reasoning (Codex). |
 | `cache_read_input_tokens` | integer | Input tokens read from the prompt cache. |
-| `cache_creation_5m_input_tokens` | integer | Input tokens written to the 5-minute cache. |
-| `cache_creation_1h_input_tokens` | integer | Input tokens written to the 1-hour cache. |
+| `cache_creation_5m_input_tokens` | integer | Input tokens written to the 5-minute cache (0 for Codex, whose caching is automatic). |
+| `cache_creation_1h_input_tokens` | integer | Input tokens written to the 1-hour cache (0 for Codex). |
 | `web_search_requests` | integer, optional | Server-side web searches. |
 | `web_fetch_requests` | integer, optional | Server-side web fetches. |
 
@@ -212,8 +215,8 @@ per content block; the client deduplicates by message and request id).
 | Field | Type | Description |
 |---|---|---|
 | `at` | string, RFC 3339 UTC | When the tool call finished. |
-| `name` | string | The agent's tool name, e.g. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, `WebFetch`, `Task`, `mcp__<server>__<tool>`. Agent-specific; accept anything. |
-| `file` | string, optional | The file the tool acted on, relative to the repository root, `/`-separated. Omitted if the tool has no file or it lies outside the repository. |
+| `name` | string | The agent's tool name, e.g. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, `WebFetch`, `Task`, `mcp__<server>__<tool>` (Claude Code) or `apply_patch`, `Bash` (Codex). Agent-specific; accept anything. |
+| `file` | string, optional | The file the tool acted on, relative to the repository root, `/`-separated (for Codex's `apply_patch`, which can change several, the first). Omitted if the tool has no file or it lies outside the repository. |
 | `command` | string, optional | For shell tools: the command, with heredoc bodies replaced by `[N lines omitted]`, inline interpreter scripts (`python -c`, `node -e`, …) by `'[script omitted]'`, quoted strings over 120 characters by `'[N chars omitted]'`, secrets redacted, local paths masked, and capped at ~1000 characters (truncation ends with `…`). |
 
 #### CommitAttribution

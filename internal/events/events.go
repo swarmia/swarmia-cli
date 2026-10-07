@@ -11,9 +11,12 @@ import (
 
 // Record is one line of the log.
 type Record struct {
-	LoggedAt string          `json:"logged_at"`     // RFC 3339, UTC
-	Git      *Git            `json:"git,omitempty"` // omitted outside a repo
-	Event    json.RawMessage `json:"event"`         // the hook payload, verbatim
+	LoggedAt string `json:"logged_at"`     // RFC 3339, UTC
+	Git      *Git   `json:"git,omitempty"` // omitted outside a repo
+	// Agent is the coding agent that sent the event: "codex", or empty for
+	// Claude Code (which predates the field).
+	Agent string          `json:"agent,omitempty"`
+	Event json.RawMessage `json:"event"` // the hook payload, verbatim
 	// Changes holds what a shell command authored in the working tree, on the
 	// record of the hook event that ended it (see internal/snapshot).
 	Changes []FileChange `json:"changes,omitempty"`
