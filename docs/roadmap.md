@@ -200,10 +200,15 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
     (`latest` and `stable`, installed from npm) does a task in `unjs/ufo` (MIT,
     TypeScript, prettier) with our hooks, in a fully isolated environment;
     checks capture completeness, usage, attribution against an oracle built
-    from the transcript, and payload privacy. Phase 1 done 2026-10-07 (setup
-    verified locally; agent steps need credentials). CI uses workload identity
-    federation like the monorepo — needs the org's `ANTHROPIC_*` variables
-    shared with this repo and the federation rule to accept its OIDC subject.
+    from the transcript, and payload privacy. Phase 1 done 2026-10-07 and
+    passing in CI: workload identity federation works for this repo as
+    configured for the monorepo (no rule changes needed). First green run:
+    5/5 tool calls captured, precision and recall 1.000 on 30 agent lines,
+    planted secret redacted, $0.05 per run. The first run found two product
+    bugs, both fixed: local `origin` paths leaked into `repo`, and headless
+    sessions had no model. Phase 2 must make prettier matter (the agent wrote
+    already-formatted code, so everything was `exact`), e.g. ask for single
+    quotes.
     Watch: Claude Code's docs say `--bare` "will become the default for `-p`";
     bare mode skips hooks, so headless sessions would stop reaching us — the
     nightly `latest` run is what would catch it.
