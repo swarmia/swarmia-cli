@@ -93,9 +93,13 @@ type agentConfig struct {
 	*agent.Agent
 	detected func(repoDir string, scope agent.Scope) (ok bool, why string)
 	// inRepo is a hook command running the swarmia-cli at rel, relative to the
-	// repository root, with args.
+	// repository root, with args. It does nothing, quietly, when there's no
+	// swarmia-cli at rel: a fresh clone or worktree has no node_modules yet.
 	inRepo func(rel, args string) string
-	hooks  []hookSpec
+	// legacyInRepo is the command earlier versions wrote for inRepo's, if they
+	// differ; install rewrites it to the current one. nil when there's none.
+	legacyInRepo func(rel, args string) string
+	hooks        []hookSpec
 	// activate tells the user what's left to do once hooks are installed at
 	// path (and does it, where asked and possible).
 	activate func(out io.Writer, path string, opts installOpts) error
@@ -112,6 +116,7 @@ type binaryRef struct {
 // agent's settings.
 type hookChanges struct {
 	added   int
+	updated int
 	removed int
 }
 
@@ -127,7 +132,7 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 		if scope == agent.ScopeProject {
 			ref = detectBinaryRef(repoDir)
 		} else {
-			ref = executableRef()
+			ref = executableRef(repoDir, scope)
 		}
 	}
 	fmt.Fprintf(out, "swarmia-cli: %s (%s)\n", ref, ref.source)
@@ -148,7 +153,7 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			continue
 		}
 		detected++
-		res, err := installHooks(path, ag.hookCommand(ref, scope), ag.hooks, opts.dryRun)
+		res, err := installHooks(path, ag.hookCommand(ref, scope), ag.legacyHookCommand(ref, scope), ag.hooks, opts.dryRun)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ag.Title, err)
 		}
@@ -157,7 +162,7 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			fmt.Fprintf(out, "Warning: %s already runs swarmia-cli log-hook for this project; with both, every event is logged twice. Remove the hooks from one of them.\n",
 				displayPath(repoDir, dup))
 		}
-		if res.added == 0 && res.removed == 0 {
+		if res.added == 0 && res.updated == 0 && res.removed == 0 {
 			fmt.Fprintf(out, "%s (%s): already configured\n", ag.Title, rel)
 		} else {
 			verb := "added"
@@ -165,6 +170,9 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 				verb = "would add"
 			}
 			msg := fmt.Sprintf("%s %d hook(s)", verb, res.added)
+			if res.updated > 0 {
+				msg += fmt.Sprintf(", updated %d hook(s) to the current command", res.updated)
+			}
 			if res.removed > 0 {
 				msg += fmt.Sprintf(", removed %d obsolete hook(s)", res.removed)
 			}
@@ -203,6 +211,23 @@ func duplicateHooks(ag *agent.Agent, repoDir string, scope agent.Scope) []string
 // hookCommand is the command the agent's hooks run: log-hook, telling it
 // which agent calls, and in user scope to stand down for project hooks.
 func (ag agentConfig) hookCommand(ref binaryRef, scope agent.Scope) string {
+	args := ag.hookArgs(scope)
+	if ref.rel != "" {
+		return ag.inRepo(ref.rel, args)
+	}
+	return ref.cmd + " " + args
+}
+
+// legacyHookCommand is the command an earlier version wrote where hookCommand
+// now writes another, or "" if there's none.
+func (ag agentConfig) legacyHookCommand(ref binaryRef, scope agent.Scope) string {
+	if ref.rel == "" || ag.legacyInRepo == nil {
+		return ""
+	}
+	return ag.legacyInRepo(ref.rel, ag.hookArgs(scope))
+}
+
+func (ag agentConfig) hookArgs(scope agent.Scope) string {
 	args := "log-hook"
 	if ag.Agent != agent.ClaudeCode { // the default
 		args += " --agent " + ag.Name
@@ -210,10 +235,7 @@ func (ag agentConfig) hookCommand(ref binaryRef, scope agent.Scope) string {
 	if scope == agent.ScopeUser {
 		args += " " + skipIfProjectHooksFlag
 	}
-	if ref.rel != "" {
-		return ag.inRepo(ref.rel, args)
-	}
-	return ref.cmd + " " + args
+	return args
 }
 
 func (r binaryRef) String() string {
@@ -231,11 +253,8 @@ func detectBinaryRef(repoDir string) binaryRef {
 	if isExecutable(filepath.Join(repoDir, binaryName)) {
 		return binaryRef{rel: binaryName, source: "local binary at repo root"}
 	}
-	// The package's own launcher, not node_modules/.bin: pnpm's .bin shim is
-	// itself a shell script that forks several processes, doubling the cost of
-	// every hook. npm and pnpm both provide this path for direct dependencies.
-	if isExecutable(filepath.Join(repoDir, "node_modules", "@swarmia", "cli", "bin", binaryName)) {
-		return binaryRef{rel: "node_modules/@swarmia/cli/bin/" + binaryName, source: "npm dependency (@swarmia/cli)"}
+	if ref, ok := npmLauncherRef(repoDir); ok {
+		return ref
 	}
 	if isExecutable(filepath.Join(repoDir, "node_modules", ".bin", binaryName)) {
 		return binaryRef{rel: "node_modules/.bin/" + binaryName, source: "npm dependency (node_modules/.bin)"}
@@ -246,16 +265,47 @@ func detectBinaryRef(repoDir string) binaryRef {
 	return binaryRef{cmd: binaryName, source: "not found; assuming it will be on $PATH"}
 }
 
-// executableRef is the absolute path of the running swarmia-cli, shell-quoted
-// if needed: personal installs (local, user scope) point straight at the binary
-// that installed them, so it needn't be on $PATH.
-func executableRef() binaryRef {
+// npmLauncherRef is the repository's @swarmia/cli dependency's launcher, if
+// it has one. It's the package's own launcher, not node_modules/.bin: pnpm's
+// .bin shim is itself a shell script that forks several processes, doubling the
+// cost of every hook. npm and pnpm both provide this path for direct
+// dependencies.
+func npmLauncherRef(repoDir string) (binaryRef, bool) {
+	rel := "node_modules/@swarmia/cli/bin/" + binaryName
+	if !isExecutable(filepath.Join(repoDir, filepath.FromSlash(rel))) {
+		return binaryRef{}, false
+	}
+	return binaryRef{rel: rel, source: "npm dependency (@swarmia/cli)"}, true
+}
+
+// executableRef is how personal installs (local, user scope) run swarmia-cli:
+// the binary that installed them, so it needn't be on $PATH.
+func executableRef(repoDir string, scope agent.Scope) binaryRef {
 	exe, err := os.Executable()
 	if err == nil {
 		exe, err = filepath.EvalSymlinks(exe)
 	}
 	if err != nil {
 		return binaryRef{cmd: binaryName, source: "can't resolve this binary's path; assuming swarmia-cli is on $PATH"}
+	}
+	return refForExecutable(exe, repoDir, scope)
+}
+
+// refForExecutable is the reference to the binary at exe, a real path, for
+// hooks in scope: its absolute path, shell-quoted if needed. Run from the
+// repository's npm dependency, though, exe is a platform package's binary at
+// a path that can change with every upgrade (pnpm's is versioned:
+// node_modules/.pnpm/@swarmia+cli-darwin-arm64@0.1.0/…), so hooks run the
+// package's launcher instead, which finds whichever version is installed.
+func refForExecutable(exe, repoDir string, scope agent.Scope) binaryRef {
+	if root, err := filepath.EvalSymlinks(repoDir); err == nil &&
+		strings.HasPrefix(exe, filepath.Join(root, "node_modules")+string(filepath.Separator)) {
+		if ref, ok := npmLauncherRef(root); ok {
+			if scope == agent.ScopeUser { // for every repository, not just this one
+				ref = binaryRef{cmd: shellQuote(filepath.Join(root, filepath.FromSlash(ref.rel))), source: ref.source}
+			}
+			return ref
+		}
 	}
 	return binaryRef{cmd: shellQuote(exe), source: "this swarmia-cli binary"}
 }
@@ -292,7 +342,10 @@ var claudeCodeAgent = agentConfig{
 		}
 		return dirExists(filepath.Join(repoDir, agent.ClaudeCode.ConfigDir)), "not detected"
 	},
-	inRepo: func(rel, args string) string { return "${CLAUDE_PROJECT_DIR}/" + rel + " " + args },
+	inRepo: func(rel, args string) string {
+		return `[ ! -x "${CLAUDE_PROJECT_DIR}/` + rel + `" ] || exec "${CLAUDE_PROJECT_DIR}/` + rel + `" ` + args
+	},
+	legacyInRepo: func(rel, args string) string { return "${CLAUDE_PROJECT_DIR}/" + rel + " " + args },
 	activate: func(out io.Writer, path string, opts installOpts) error {
 		if !opts.dryRun {
 			fmt.Fprintln(out, "  Reload hooks with /hooks in Claude Code (or start a fresh session) to activate.")
@@ -321,20 +374,24 @@ var claudeHookSpecs = []hookSpec{
 }
 
 // installHooks adds log-hook, run by command, to an agent's settings file for
-// each spec, and removes obsolete swarmia-cli hooks. The file is only written
-// when something changed, and never in a dry run.
-func installHooks(path, command string, specs []hookSpec, dryRun bool) (hookChanges, error) {
+// each spec, rewrites hooks running legacy (if not "") to command, and removes
+// obsolete swarmia-cli hooks. The file is only written when something changed,
+// and never in a dry run.
+func installHooks(path, command, legacy string, specs []hookSpec, dryRun bool) (hookChanges, error) {
 	doc, err := readJSONObject(path)
 	if err != nil {
 		return hookChanges{}, err
 	}
 	res := hookChanges{removed: removeObsoleteHooks(doc)}
+	if legacy != "" {
+		res.updated = replaceHookCommand(doc, legacy, command)
+	}
 	for _, s := range specs {
 		if ensureHook(doc, s, command) {
 			res.added++
 		}
 	}
-	if (res.added > 0 || res.removed > 0) && !dryRun {
+	if (res.added > 0 || res.updated > 0 || res.removed > 0) && !dryRun {
 		if err := writeJSONObject(path, doc); err != nil {
 			return hookChanges{}, err
 		}
@@ -385,6 +442,26 @@ func ensureHook(doc map[string]any, spec hookSpec, command string) bool {
 	}
 	hooks[event] = append(arr, group)
 	return true
+}
+
+// replaceHookCommand rewrites every hook running exactly from to run to
+// instead, returning how many it rewrote.
+func replaceHookCommand(doc map[string]any, from, to string) int {
+	hooks, _ := doc["hooks"].(map[string]any)
+	n := 0
+	for _, v := range hooks {
+		groups, _ := v.([]any)
+		for _, g := range groups {
+			gm, _ := g.(map[string]any)
+			for _, h := range asSlice(gm, "hooks") {
+				if hm, ok := h.(map[string]any); ok && hookCommand(hm) == from {
+					hm["command"] = to
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 // obsoleteSubcommands are swarmia-cli subcommands that earlier versions wired

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -552,9 +553,46 @@ func TestInstallUserScope(t *testing.T) {
 
 // Without --binary, personal scopes point at this binary by absolute path.
 func TestExecutableRefIsAbsolute(t *testing.T) {
-	ref := executableRef().cmd
+	ref := executableRef(t.TempDir(), agent.ScopeLocal).cmd
 	if !filepath.IsAbs(strings.Trim(ref, "'")) {
 		t.Errorf("executableRef = %q, want an absolute path", ref)
+	}
+}
+
+// Run from the repository's npm dependency, personal installs point at the
+// package's launcher, not the platform binary's versioned path, so upgrading
+// the dependency doesn't break them.
+func TestRefForExecutableFromNpmDependency(t *testing.T) {
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(repo, "node_modules", ".pnpm", "@swarmia+cli-darwin-arm64@0.1.0",
+		"node_modules", "@swarmia", "cli-darwin-arm64", "bin", binaryName)
+	elsewhere := filepath.Join(t.TempDir(), "node_modules", "@swarmia", "cli-darwin-arm64", "bin", binaryName)
+
+	// Without the launcher (say, a dependency of a workspace package only),
+	// there's nothing better than the binary itself.
+	if got := refForExecutable(exe, repo, agent.ScopeLocal); got.cmd != exe {
+		t.Errorf("without a launcher: %+v, want the binary", got)
+	}
+
+	launcher := filepath.Join(repo, "node_modules", "@swarmia", "cli", "bin", binaryName)
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := refForExecutable(exe, repo, agent.ScopeLocal); got.rel != "node_modules/@swarmia/cli/bin/swarmia-cli" {
+		t.Errorf("local scope: %+v, want the launcher relative to the repository", got)
+	}
+	if got := refForExecutable(exe, repo, agent.ScopeUser); got.cmd != launcher {
+		t.Errorf("user scope: %+v, want the launcher's absolute path", got)
+	}
+	// Another repository's or a global npm install is used as is.
+	if got := refForExecutable(elsewhere, repo, agent.ScopeLocal); got.cmd != elsewhere {
+		t.Errorf("binary outside the repository: %+v, want the binary", got)
 	}
 }
 
@@ -599,5 +637,76 @@ func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
 // claudeRef is how a Claude Code project hook would invoke swarmia-cli.
 func claudeRef(repo string) (ref, source string) {
 	r := detectBinaryRef(repo)
-	return strings.TrimSuffix(claudeCodeAgent.hookCommand(r, agent.ScopeProject), " log-hook"), r.source
+	if r.rel != "" {
+		return "${CLAUDE_PROJECT_DIR}/" + r.rel, r.source
+	}
+	return r.cmd, r.source
+}
+
+// A project hook runs the repository's swarmia-cli with its arguments, stdin
+// and exit code, and does nothing, quietly, until there is one (a fresh clone
+// or worktree has no node_modules yet). The repository path may hold spaces.
+func TestClaudeProjectHookCommand(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "my repo")
+	rel := "node_modules/@swarmia/cli/bin/swarmia-cli"
+	command := claudeCodeAgent.hookCommand(binaryRef{rel: rel}, agent.ScopeProject)
+	run := func() (string, error) {
+		cmd := exec.Command("sh", "-c", command)
+		cmd.Env = append(os.Environ(), "CLAUDE_PROJECT_DIR="+repo)
+		cmd.Stdin = strings.NewReader("payload")
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	if out, err := run(); err != nil || out != "" {
+		t.Errorf("without the binary: output %q, err %v; want nothing, exit 0", out, err)
+	}
+
+	bin := filepath.Join(repo, rel)
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\necho \"args: $*\"; cat; exit 3\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run()
+	if want := "args: log-hook\npayload"; out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
+		t.Errorf("err = %v, want exit status 3", err)
+	}
+}
+
+// Project hooks written by earlier versions, which failed on every event
+// before node_modules was installed, are rewritten to the current command.
+func TestInstallUpdatesLegacyProjectHooks(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, binaryName), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "${CLAUDE_PROJECT_DIR}/swarmia-cli log-hook"
+	writeSettings(t, repo, map[string]any{"hooks": map[string]any{
+		"Stop":       []any{grp("", legacy)},
+		"PreToolUse": []any{grp("*", legacy), grp("Bash", "${CLAUDE_PROJECT_DIR}/other-tool")},
+	}})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	want := claudeCodeAgent.hookCommand(binaryRef{rel: binaryName}, agent.ScopeProject)
+	doc := readSettings(t, repo)
+	for _, ev := range []string{"Stop", "PreToolUse", "SessionStart"} {
+		if got := commandsFor(t, doc, ev); !contains(got, want) || contains(got, legacy) {
+			t.Errorf("%s = %v, want %q in place of the legacy command", ev, got, want)
+		}
+	}
+	if got := commandsFor(t, doc, "PreToolUse"); !contains(got, "${CLAUDE_PROJECT_DIR}/other-tool") {
+		t.Errorf("PreToolUse lost an unrelated hook: %v", got)
+	}
+	if !strings.Contains(out.String(), "updated 2 hook(s)") {
+		t.Errorf("output doesn't report the updates:\n%s", out.String())
+	}
 }

@@ -501,10 +501,17 @@ Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
   Project-scope hooks call the package's launcher, bypassing pnpm's `.bin`
   shim (28 → 14 ms). Verified with packed tarballs: pnpm isolated, npm local,
   npm global, and a path containing a space.
-- **Missing `node_modules`:** project-scope hooks pointing at
-  `node_modules/.bin/swarmia-cli` fail on every tool call in a fresh clone or
-  new worktree before `pnpm install`. `install` should write commands that
-  quietly do nothing when the binary isn't there.
+- ✅ **Missing `node_modules`** (fixed 2026-10-07): project-scope hooks
+  failed on every tool call in a fresh clone or new worktree before
+  `pnpm install`. Claude Code hooks now check for the binary first
+  (`[ ! -x … ] || exec …`, no fork), as Codex hooks already did, and
+  `install` rewrites hooks in the old form.
+- ✅ **Personal installs from npm** (fixed 2026-10-07): `install --scope
+  local|user` pointed at the running binary's real path, which under pnpm is
+  versioned (`node_modules/.pnpm/@swarmia+cli-darwin-arm64@0.1.0/…`), so an
+  upgrade broke the hooks. Run from the repository's npm dependency, they now
+  point at its launcher. Global npm/pnpm installs still record the binary's
+  path (pnpm's global store is versioned too).
 - **Release workflow:** tag-triggered build of the four binaries with the
   version baked in, versions synced across the five `package.json` files,
   publish platform packages then `@swarmia/cli`.
