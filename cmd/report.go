@@ -18,6 +18,7 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/payload"
 	"github.com/swarmia/swarmia-cli/internal/report"
+	"github.com/swarmia/swarmia-cli/internal/snapshot"
 	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
@@ -131,6 +132,9 @@ func writeSessionText(out io.Writer, s *report.Session) {
 		shell = fmt.Sprintf(" (%d via shell)", n)
 	}
 	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), len(s.Edits), shell, s.AILines())
+	if s.ShellUnrecorded > 0 {
+		fmt.Fprintf(out, "  %d shell command(s) not checked for edits: the worktree snapshot took over %v or failed\n", s.ShellUnrecorded, snapshot.Budget)
+	}
 	if s.Usage != nil {
 		if line := usageSummary(s.Usage.Totals()); line != "" {
 			fmt.Fprintf(out, "  %s\n", line)

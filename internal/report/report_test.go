@@ -389,3 +389,21 @@ func TestBuildAttributesCodexPatch(t *testing.T) {
 		t.Errorf("commits = %+v, want one with 3 lines", s.Commits())
 	}
 }
+
+// Shell commands whose snapshot ran out of time or failed are counted, so a
+// gap in a session's shell edits shows; read-only ones aren't gaps.
+func TestFoldCountsUnrecordedShellCommands(t *testing.T) {
+	rec := func(event, marker string) events.Record {
+		return events.Record{LoggedAt: t0.Format(time.RFC3339), Snapshot: marker,
+			Event: json.RawMessage(`{"hook_event_name":"` + event + `","session_id":"s","tool_name":"Bash","tool_use_id":"toolu_` + marker + `"}`)}
+	}
+	sessions := map[string]*Session{}
+	Fold(sessions, []events.Record{
+		rec("PreToolUse", events.SnapshotReadOnly),
+		rec("PreToolUse", events.SnapshotOverBudget),
+		rec("PostToolUse", events.SnapshotFailed),
+	}, "")
+	if got := sessions["s"].ShellUnrecorded; got != 2 {
+		t.Errorf("ShellUnrecorded = %d, want 2", got)
+	}
+}

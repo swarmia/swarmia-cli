@@ -54,7 +54,10 @@ type Session struct {
 	// were still there after its last edit to the file — lines it wrote and then
 	// replaced itself don't count.
 	AILinesByPath map[string]int `json:"ai_lines_by_path,omitempty"`
-	Attribution   *Attribution   `json:"attribution,omitempty"`
+	// ShellUnrecorded counts shell commands whose changes weren't recorded:
+	// snapshotting the worktree around them ran out of time or failed.
+	ShellUnrecorded int          `json:"shell_unrecorded,omitempty"`
+	Attribution     *Attribution `json:"attribution,omitempty"`
 	// Ended is set once the agent reported the session's end.
 	Ended bool `json:"ended,omitempty"`
 	// TranscriptPath is the agent's transcript of the session (from its hook
@@ -253,6 +256,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		}
 		if ev.TranscriptPath != "" {
 			s.TranscriptPath = ev.TranscriptPath
+		}
+		if rec.Snapshot == events.SnapshotOverBudget || rec.Snapshot == events.SnapshotFailed {
+			s.ShellUnrecorded++
 		}
 		switch ev.Name {
 		case "SessionStart":

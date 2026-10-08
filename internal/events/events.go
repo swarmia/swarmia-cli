@@ -31,7 +31,18 @@ type Record struct {
 	// Changes holds what a shell command authored in the working tree, on the
 	// record of the hook event that ended it (see internal/snapshot).
 	Changes []FileChange `json:"changes,omitempty"`
+	// Snapshot, on a shell command's records, says why its changes weren't
+	// looked for: SnapshotReadOnly, or SnapshotOverBudget / SnapshotFailed
+	// when they went unrecorded. Older binaries ignore it, losing only that.
+	Snapshot string `json:"snapshot,omitempty"`
 }
+
+// Values of Record.Snapshot.
+const (
+	SnapshotReadOnly   = "read-only"
+	SnapshotOverBudget = "over-budget"
+	SnapshotFailed     = "failed"
+)
 
 // FileChange is one file a shell command changed: hunks in diff-style lines,
 // "+" for lines it authored, " " for context.

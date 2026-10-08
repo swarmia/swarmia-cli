@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,7 +68,7 @@ func (f *fixture) commit(files map[string]string) {
 // path (non-blank added lines only).
 func (f *fixture) run(command func()) map[string][]string {
 	f.t.Helper()
-	pre, err := f.store.Take(f.repo)
+	pre, err := f.store.Take(context.Background(), f.repo)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -79,7 +81,7 @@ func (f *fixture) run(command func()) map[string][]string {
 	if !ok {
 		f.t.Fatal("snapshot not found after Save")
 	}
-	changes, err := f.store.Changes(f.repo, loaded)
+	changes, err := f.store.Changes(context.Background(), f.repo, loaded)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -169,7 +171,7 @@ func TestTakeReusesBlobsForUnchangedFiles(t *testing.T) {
 	f := newFixture(t)
 	f.commit(map[string]string{"a.go": "package a\n"})
 	f.write("a.go", "package a\n\nfunc Dirty() {}\n")
-	first, err := f.store.Take(f.repo)
+	first, err := f.store.Take(context.Background(), f.repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +180,7 @@ func TestTakeReusesBlobsForUnchangedFiles(t *testing.T) {
 	if err := os.Chtimes(blob, old, old); err != nil {
 		t.Fatal(err)
 	}
-	second, _ := f.store.Take(f.repo)
+	second, _ := f.store.Take(context.Background(), f.repo)
 	if second.Files["a.go"].Blob != first.Files["a.go"].Blob {
 		t.Fatal("blob changed for an unchanged file")
 	}
@@ -205,5 +207,25 @@ func TestPruneRemovesStalePendingSnapshots(t *testing.T) {
 	}
 	if _, ok := f.store.Load("fresh"); !ok {
 		t.Error("fresh snapshot was pruned")
+	}
+}
+
+// Out of time, both sides give up with ErrBudget rather than record partial
+// (or, with a base missing, inflated) changes.
+func TestSnapshotsStopAtTheBudget(t *testing.T) {
+	f := newFixture(t)
+	f.commit(map[string]string{"a.go": "package a\n"})
+	f.write("a.go", "package a\n\nfunc A() {}\n")
+	pre, err := f.store.Take(context.Background(), f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.store.Take(done, f.repo); !errors.Is(err, ErrBudget) {
+		t.Errorf("Take err = %v, want ErrBudget", err)
+	}
+	if _, err := f.store.Changes(done, f.repo, pre); !errors.Is(err, ErrBudget) {
+		t.Errorf("Changes err = %v, want ErrBudget", err)
 	}
 }

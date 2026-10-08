@@ -5,11 +5,13 @@
 //
 // It runs inside agent hooks, so it is built to be cheap: one `git status`
 // per snapshot, and file contents are only re-read when size or mtime changed
-// since the previous snapshot.
+// since the previous snapshot. Each side of a command gets at most Budget, so
+// a huge repository delays the agent by that much at worst.
 package snapshot
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +26,13 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 )
+
+// Budget is the most time Take or Changes may spend; past it they give up
+// with ErrBudget and the command's changes go unrecorded.
+const Budget = 500 * time.Millisecond
+
+// ErrBudget means a snapshot ran out of its Budget.
+var ErrBudget = errors.New("snapshot exceeded its time budget")
 
 // maxFileSize skips files too large to be hand-written source (bundles,
 // fixtures, lockfiles of huge projects); they're never diffed.
@@ -64,18 +73,21 @@ func (s Store) blobPath(sum string) string { return filepath.Join(s.Dir, "blobs"
 func (s Store) lastPath() string           { return filepath.Join(s.Dir, "last.json") }
 
 // Take snapshots the worktree's dirty files.
-func (s Store) Take(repo gitrepo.Repo) (Snapshot, error) {
+func (s Store) Take(ctx context.Context, repo gitrepo.Repo) (Snapshot, error) {
 	st, err := repo.ReadState()
 	if err != nil {
 		return Snapshot{}, err
 	}
-	dirty, err := dirtyPaths(repo.Root)
+	dirty, err := dirtyPaths(ctx, repo.Root)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	last := s.readLast()
 	snap := Snapshot{Head: st.Head, Files: map[string]Entry{}}
 	for _, path := range dirty {
+		if ctx.Err() != nil {
+			return Snapshot{}, ErrBudget
+		}
 		snap.Files[path] = s.entry(repo.Root, path, last[path])
 	}
 	s.writeLast(snap.Files)
@@ -143,12 +155,12 @@ func (s Store) Load(id string) (Snapshot, bool) {
 // returns the lines the command authored in each file. Files the command
 // deleted contribute nothing; lines it only reformatted or restored from git
 // are excluded (see attribution.AuthoredOnly).
-func (s Store) Changes(repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
+func (s Store) Changes(ctx context.Context, repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
 	st, err := repo.ReadState()
 	if err != nil {
 		return nil, err
 	}
-	dirty, err := dirtyPaths(repo.Root)
+	dirty, err := dirtyPaths(ctx, repo.Root)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +174,9 @@ func (s Store) Changes(repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
 
 	var changes []Change
 	for _, path := range sortedKeys(candidates) {
+		if ctx.Err() != nil {
+			return nil, ErrBudget
+		}
 		full := filepath.Join(repo.Root, filepath.FromSlash(path))
 		fi, err := os.Lstat(full)
 		if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxFileSize {
@@ -180,7 +195,10 @@ func (s Store) Changes(repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
 		}
 		after := string(data)
 
-		preHead := s.gitShow(repo.Root, pre.Head, path)
+		preHead, err := gitShow(ctx, repo.Root, pre.Head, path)
+		if err != nil {
+			return nil, err
+		}
 		before := preHead
 		if wasDirty {
 			before = ""
@@ -197,7 +215,11 @@ func (s Store) Changes(repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
 		}
 		refs := []string{before, preHead}
 		if st.Head != pre.Head {
-			refs = append(refs, s.gitShow(repo.Root, st.Head, path))
+			head, err := gitShow(ctx, repo.Root, st.Head, path)
+			if err != nil {
+				return nil, err
+			}
+			refs = append(refs, head)
 		}
 		hunks := attribution.AuthoredOnly(attribution.DiffHunks(before, after), after, refs...)
 		if len(hunks) > 0 {
@@ -207,15 +229,21 @@ func (s Store) Changes(repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
 	return changes, nil
 }
 
-func (s Store) gitShow(root, rev, path string) string {
+// gitShow returns a file's content at rev: "" if it isn't there. The only
+// error is running out of the budget, since an empty base for a file that
+// does exist would credit the command with all of it.
+func gitShow(ctx context.Context, root, rev, path string) (string, error) {
 	if rev == "" {
-		return ""
+		return "", nil
 	}
-	out, err := exec.Command("git", "-C", root, "show", rev+":"+path).Output()
+	out, err := exec.CommandContext(ctx, "git", "-C", root, "show", rev+":"+path).Output()
+	if ctx.Err() != nil {
+		return "", ErrBudget
+	}
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	return string(out)
+	return string(out), nil
 }
 
 // Prune removes snapshots of commands that never reported back (the agent was
@@ -254,9 +282,12 @@ func removeOlderThan(dir string, cutoff time.Time, keep map[string]bool) {
 // not ignored ones), relative to the worktree root. --no-optional-locks keeps
 // git status from refreshing the index, which takes index.lock: a git command
 // the agent runs at the same time (parallel tool calls) would fail on it.
-func dirtyPaths(root string) ([]string, error) {
-	out, err := exec.Command("git", "-C", root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
+func dirtyPaths(ctx context.Context, root string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
 		"--untracked-files=all", "--no-renames", "--ignore-submodules=all").Output()
+	if ctx.Err() != nil {
+		return nil, ErrBudget
+	}
 	if err != nil {
 		return nil, err
 	}

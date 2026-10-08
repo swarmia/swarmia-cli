@@ -246,6 +246,9 @@ func TestLogHookSkipsReadOnlyShellCommands(t *testing.T) {
 	if recs[1].Changes != nil {
 		t.Errorf("read-only command has changes: %+v", recs[1].Changes)
 	}
+	if recs[0].Snapshot != events.SnapshotReadOnly || recs[1].Snapshot != "" {
+		t.Errorf("snapshot markers = %q, %q; want %q, none", recs[0].Snapshot, recs[1].Snapshot, events.SnapshotReadOnly)
+	}
 }
 
 // Session end, or a log past the size threshold, starts a background fold.

@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,7 +110,7 @@ func runLogHook(stdin io.Reader) error {
 		if st, err := repo.ReadState(); err == nil {
 			rec.Git = &events.Git{Root: repo.Root, Head: st.Head, Branch: st.Branch}
 		}
-		rec.Changes = snapshotShellCommand(repo, ev, filepath.Join(filepath.Dir(path), "snapshots"))
+		rec.Changes, rec.Snapshot = snapshotShellCommand(repo, ev, filepath.Join(filepath.Dir(path), "snapshots"))
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -196,29 +198,33 @@ func hooksFileRunsLogHook(path string) bool {
 // what the command authored. Edits through the agent's own edit tools are in
 // their payloads already, so only shell calls need this, and not read-only
 // ones. Errors just mean no changes are recorded — logging the event matters
-// more.
-func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) []events.FileChange {
+// more — and the returned marker (see events.Record.Snapshot) says so.
+func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) ([]events.FileChange, string) {
 	if !ev.Tool.Shell || ev.Tool.UseID == "" {
-		return nil
+		return nil, ""
 	}
 	store := snapshot.Store{Dir: dir}
+	ctx, cancel := context.WithTimeout(context.Background(), snapshot.Budget)
+	defer cancel()
 	switch ev.Name {
 	case "PreToolUse":
 		store.Prune(time.Now())
 		if snapshot.ReadOnly(ev.Tool.Command) {
-			return nil // no snapshot, so the command's end has nothing to diff
+			return nil, events.SnapshotReadOnly // so the command's end has nothing to diff
 		}
-		if snap, err := store.Take(repo); err == nil {
-			_ = store.Save(ev.Tool.UseID, snap)
+		snap, err := store.Take(ctx, repo)
+		if err == nil {
+			err = store.Save(ev.Tool.UseID, snap)
 		}
+		return nil, snapshotMarker(err)
 	case "PostToolUse", "PostToolUseFailure":
 		pre, ok := store.Load(ev.Tool.UseID)
 		if !ok {
-			return nil
+			return nil, "" // read-only, or its start already says what went wrong
 		}
-		changes, err := store.Changes(repo, pre)
+		changes, err := store.Changes(ctx, repo, pre)
 		if err != nil {
-			return nil
+			return nil, snapshotMarker(err)
 		}
 		var out []events.FileChange
 		for _, c := range changes {
@@ -228,9 +234,19 @@ func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) []event
 			}
 			out = append(out, fc)
 		}
-		return out
+		return out, ""
 	}
-	return nil
+	return nil, ""
+}
+
+func snapshotMarker(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, snapshot.ErrBudget):
+		return events.SnapshotOverBudget
+	}
+	return events.SnapshotFailed
 }
 
 // shouldProcess decides when to fold the log in the background: when a session
