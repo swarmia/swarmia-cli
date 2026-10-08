@@ -251,9 +251,11 @@ func removeOlderThan(dir string, cutoff time.Time, keep map[string]bool) {
 }
 
 // dirtyPaths lists files that differ from HEAD (including untracked ones, but
-// not ignored ones), relative to the worktree root.
+// not ignored ones), relative to the worktree root. --no-optional-locks keeps
+// git status from refreshing the index, which takes index.lock: a git command
+// the agent runs at the same time (parallel tool calls) would fail on it.
 func dirtyPaths(root string) ([]string, error) {
-	out, err := exec.Command("git", "-C", root, "status", "--porcelain=v1", "-z",
+	out, err := exec.Command("git", "-C", root, "--no-optional-locks", "status", "--porcelain=v1", "-z",
 		"--untracked-files=all", "--no-renames", "--ignore-submodules=all").Output()
 	if err != nil {
 		return nil, err
