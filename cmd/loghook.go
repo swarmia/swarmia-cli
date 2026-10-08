@@ -194,8 +194,9 @@ func hooksFileRunsLogHook(path string) bool {
 // snapshotShellCommand brackets a shell tool call: before it runs, it snapshots
 // the worktree's dirty files; when it finishes (successfully or not), it returns
 // what the command authored. Edits through the agent's own edit tools are in
-// their payloads already, so only shell calls need this. Errors just mean no
-// changes are recorded — logging the event matters more.
+// their payloads already, so only shell calls need this, and not read-only
+// ones. Errors just mean no changes are recorded — logging the event matters
+// more.
 func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) []events.FileChange {
 	if !ev.Tool.Shell || ev.Tool.UseID == "" {
 		return nil
@@ -204,6 +205,9 @@ func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) []event
 	switch ev.Name {
 	case "PreToolUse":
 		store.Prune(time.Now())
+		if snapshot.ReadOnly(ev.Tool.Command) {
+			return nil // no snapshot, so the command's end has nothing to diff
+		}
 		if snap, err := store.Take(repo); err == nil {
 			_ = store.Save(ev.Tool.UseID, snap)
 		}

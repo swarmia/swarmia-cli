@@ -219,6 +219,35 @@ func TestLogHookRecordsShellCommandChanges(t *testing.T) {
 	}
 }
 
+// Read-only commands aren't snapshotted: a file changed meanwhile (by the
+// developer) isn't recorded as the command's.
+func TestLogHookSkipsReadOnlyShellCommands(t *testing.T) {
+	repo := initRepo(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", repo)
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+
+	bash := func(event string) string {
+		return `{"hook_event_name":"` + event + `","session_id":"s","tool_name":"Bash","tool_use_id":"toolu_42","tool_input":{"command":"grep -n 'func' *.go | head"}}`
+	}
+	if err := runLogHook(strings.NewReader(bash("PreToolUse"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "human.go"), []byte("package human\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runLogHook(strings.NewReader(bash("PostToolUse"))); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := events.ReadFile(path)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("got %d records, %v", len(recs), err)
+	}
+	if recs[1].Changes != nil {
+		t.Errorf("read-only command has changes: %+v", recs[1].Changes)
+	}
+}
+
 // Session end, or a log past the size threshold, starts a background fold.
 func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	var started []string
