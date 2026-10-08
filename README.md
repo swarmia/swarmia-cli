@@ -72,7 +72,7 @@ as a budget:
 | Hook | Typical cost |
 |---|---|
 | Prompts, edits, reads and other tool calls | ~5–7 ms per event: an append to a local file and a read of `.git/HEAD`, with no `git` process |
-| Shell commands (Bash) | one `git status` before and after, for the snapshot: ~35 ms per command in a small repository, ~140 ms in a 14k-file one |
+| Shell commands (Bash) | read-only ones (`grep`, `cat`, `sed -n`, `git log`, …): like other tool calls; the rest: one `git status` before and after, for the snapshot: ~35 ms per command in a small repository, ~140 ms in a 14k-file one, at most 500 ms per side |
 | Session end | starts the background run and returns immediately |
 
 - Anything heavier — folding the log, matching edits to commits, delivery —
@@ -277,6 +277,12 @@ afterwards than in the file before the command or in HEAD, which excludes
 formatter runs over human code and content restored by git (`stash`,
 `checkout`, `pull`). Files over 1 MB and binary files are skipped; human edits
 saved while a command runs are indistinguishable from the command's.
+
+Commands that can only read (`grep`, `cat`, `sed -n 1,80p`, `git log`,
+`gh pr view`, …, recognized conservatively: no redirections to files, command
+substitution or unknown programs) aren't snapshotted. Each snapshot gets at
+most 500 ms; past that the command's edits go unrecorded, its record is marked
+`snapshot: over-budget`, and `report` counts such commands per session.
 
 The log file is `--file`, else `$SWARMIA_LOG_FILE`, else the state directory's
 `events.jsonl`. Appends are serialized with a file lock. User-scope hooks run

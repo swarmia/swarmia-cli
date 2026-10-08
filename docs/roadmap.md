@@ -56,7 +56,7 @@ code we don't need.
 | D16 | Endpoint | **`https://hook.swarmia.com/cli`** default, overridable | Received by Swarmia's `hook` service. |
 | D17 | Ingest feedback | **Shape checks synchronous, the rest asynchronous** | `hook` validates the request and each session's shape, queues each session for processing, and answers `200` with per-session `accepted` (= queued) / `rejected` (`invalid payload: <field>`, `repository unknown`, `session too large`); `503` if nothing could be queued, `401` for tokens not matching `swm_cli_[0-9a-f]{64,}`. The repo-in-org check, token→org resolution and storage happen downstream and aren't visible to the client. The client also treats a bare `2xx` as "all queued". **Planned:** a synchronous endpoint on `https://app.swarmia.com/` where the CLI, using the same write-only token, can check whether its sessions were received and stored or dropped (and why) — without exposing any session content, since the token may be public. Surfaced in `report`/`config` when it exists. |
 | D11 | Windows | **Later, but design for it now** | Abstract file locking (flock) and paths behind small interfaces; keep state dir resolution OS-aware. |
-| D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. |
+| D12 | Non-Edit/Write changes | **Snapshot around Bash** | Pre/PostToolUse on Bash records a cheap working-tree fingerprint (`git status --porcelain` + hashes of dirty files); diffs between the two are AI-made changes (codegen, sed, agent-run formatters). Budget: tens of ms per Bash call; must stay off the hook's critical path where possible. Read-only commands aren't snapshotted, and each side gives up after 500 ms (milestone 16). |
 | D13 | Local state location | **User state dir**: `~/.local/state/swarmia/<repo-id>/` (macOS: `~/Library/Application Support/swarmia/…`) | Never in `git status`, survives `git clean -fdx`, same for global and per-repo installs. Replaces in-repo `.swarmia/`. `<repo-id>` = hash of the common git dir so worktrees share state. |
 | D14 | Sessions with no commits | **Sent when they end** (revised from "after a quiet period") | Every send is the session's full payload and the server keeps the latest per session, so there's nothing to batch up: sessions go when they end (or when they change, at most every 15 min while running), and commit attribution follows as replacements when commits are pushed. |
 
@@ -213,6 +213,53 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
     Watch: Claude Code's docs say `--bare` "will become the default for `-p`";
     bare mode skips hooks, so headless sessions would stop reaching us — the
     nightly `latest` run is what would catch it.
+16. 🟡 **Snapshot cost** (cheap fixes done 2026-10-08). Measured in the
+    monorepo (14k tracked files, 250k ignored): `git status` ≈ 60 ms per
+    snapshot, two per Bash call; about two-thirds of it is the untracked-file
+    scan (tracked files only: 22 ms). Non-Bash hooks cost ≈ 8 ms, the same as
+    starting the binary.
+    - ✅ `git status --no-optional-locks`: plain status refreshes the index
+      under `index.lock`, which can fail a git command the agent runs in a
+      parallel tool call.
+    - ✅ **Read-only commands skip both snapshots** (`snapshot.ReadOnly`):
+      a quote-aware lexer plus an allowlist (`sed -n N,Mp`, `grep`, `cat`,
+      `git log/diff/show/status`, `gh … view/list`, …), rejecting command
+      substitution, subshells, here-documents, background jobs and
+      redirections other than to `/dev/null`. 213 of 680 recorded Bash calls
+      (31%); such a call now costs 31 ms instead of 134 ms in the monorepo.
+      A misclassified write loses its edits to unknown, never misattributes.
+    - ✅ **Budget:** each side of a command gets 500 ms (git is killed
+      past it); the command's changes then go unrecorded. Records carry
+      `snapshot: read-only | over-budget | failed`; sessions count the latter
+      two (`shell_unrecorded`) and `report` shows them. Watch these in
+      dogfooding before doing more.
+    - **Next, if dogfooding shows it matters:** use git's own caches when
+      the developer has them on — with `core.untrackedCache`, run status
+      with `--untracked-files=normal` (60 → 25 ms in the monorepo; `all`
+      bypasses the cache) and list new untracked directories ourselves; with
+      `core.fsmonitor` status gets cheaper on its own. Recommend both for
+      large repos in the README; don't set them in anyone's git config. On a
+      synthetic repo (60k tracked, 100k ignored files) fsmonitor plus the
+      untracked cache took status from 89 to 30 ms, but only once the
+      index had been written with them, which `--no-optional-locks` avoids,
+      and git leaves a daemon running per repository (macOS and Windows
+      only).
+    - **Later, maybe: a per-repo daemon** (would revise D5's "no daemon").
+      Only change notifications beat a full scan (FSEvents on macOS — needs
+      cgo, fine with the per-platform release runners; inotify on Linux;
+      not Go's portable watcher, which holds a descriptor per file on
+      macOS), making a snapshot cost what changed rather than the repo's
+      size: ≈ 70 → ≈ 10 ms per Bash hook (process start is the floor).
+      Timestamped change events would also help milestone 12. Constraints
+      if built: a cache only — hooks fall back to `git status` when it is
+      missing, slow (≈ 20 ms connect timeout), restarted or blocked by a
+      sandbox, so no state lives only in it; started detached by a hook,
+      one per repository (lock + socket in the state dir, mode 0700), exits
+      after ~30 idle minutes and when its executable changes; socket path
+      includes the protocol version so mixed versions (worktrees, user +
+      project installs) never talk across versions. Weigh against
+      perception: a background process watching every file change, from an
+      employer's tool, gets noticed.
 
 Added after reviewing git-ai (2026-10-06; see "Lessons from git-ai"), in
 suggested order:
@@ -324,6 +371,7 @@ suggested order:
   agent. Files > 1 MB and binary files are skipped.
 - **Latency:** 35 ms per Pre+Post pair here, 139 ms in the monorepo, dominated by
   `git status`. Option later: use fsmonitor when the repo has it configured.
+  See milestone 16 for what was done about it.
 
 ## Findings from milestone 5
 
@@ -521,6 +569,7 @@ Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
 ## Still open
 
 - Order among the four next agents.
+- Whether snapshot cost justifies a per-repo daemon (milestone 16).
 - Retention window: 30 days implemented; revisit with dogfood data.
 - Which remote counts as "pushed" with multiple remotes / forks (proposal: any
   remote whose URL maps to the token's org).
