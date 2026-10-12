@@ -147,6 +147,61 @@ func TestMatchLinesJoinedByFormatter(t *testing.T) {
 	checkFrom(t, m, map[int][]int{1: {0, 1, 2, 3}, 2: {4}})
 }
 
+// A formatter sorts the agent's two imports: both survived unchanged, though an
+// order-preserving alignment would pair each with the other as `modified`.
+func TestMatchLinesReorderedByFormatter(t *testing.T) {
+	h := hunk(
+		"= import { CreateOrganizationFactory } from 'src/factory/Organization.js'",
+		"import { randomName } from 'src/lib/testing/random.js'",
+		"import { setMockAuditedOperationContext } from 'src/lib/testing/auditLogTestHelpers.js'",
+		"= ",
+		"= describe('findExistingOrganization', () => {",
+	)
+	f := file(
+		"import { CreateOrganizationFactory } from 'src/factory/Organization.js'",
+		"import { setMockAuditedOperationContext } from 'src/lib/testing/auditLogTestHelpers.js'",
+		"import { randomName } from 'src/lib/testing/random.js'",
+		"",
+		"describe('findExistingOrganization', () => {",
+	)
+	m := MatchHunk(h, f)
+	check(t, m, []string{"2:exact", "3:exact"}, 2)
+	checkFrom(t, m, map[int][]int{2: {2}, 3: {1}})
+}
+
+// From a real session: oxfmt sorted the agent's imports and wrapped the long
+// one, moving an import that was already there (context in the hunk) in among
+// them. That line isn't the agent's, so it's not attributed at all.
+func TestMatchPreexistingLineMovedAmongAgentLines(t *testing.T) {
+	h := hunk(
+		"=   SwarmiaIssueStatus,",
+		"= } from 'src/graphql/generated/types.js'",
+		"= import { simulateMaterialization } from 'src/lib/testing/materializationHelpers.js'",
+		"import { createJiraIssueStatusMappings, swarmiaStatusToJiraValue } from 'src/lib/testing/jiraTestHelpers.js'",
+		"import { createTestOnPremiseGithubInstallation } from 'src/lib/testing/githubInstallationTestHelpers.js'",
+		"import { randomName } from 'src/lib/testing/random.js'",
+		"= ",
+		"= describe('JiraIssueChangelogItem', () => {",
+		"=   let organizationId: string",
+	)
+	f := file(
+		"  SwarmiaIssueStatus,",
+		"} from 'src/graphql/generated/types.js'",
+		"import { createTestOnPremiseGithubInstallation } from 'src/lib/testing/githubInstallationTestHelpers.js'",
+		"import {",
+		"  createJiraIssueStatusMappings,",
+		"  swarmiaStatusToJiraValue,",
+		"} from 'src/lib/testing/jiraTestHelpers.js'",
+		"import { simulateMaterialization } from 'src/lib/testing/materializationHelpers.js'",
+		"import { randomName } from 'src/lib/testing/random.js'",
+		"",
+		"describe('JiraIssueChangelogItem', () => {",
+		"  let organizationId: string",
+	)
+	m := MatchHunk(h, f)
+	check(t, m, []string{"3:exact", "4:normalized", "5:normalized", "6:normalized", "7:normalized", "9:exact"}, 3)
+}
+
 // A human edits one of the agent's lines, inserts a line of their own, and
 // deletes another of the agent's lines.
 func TestMatchHumanEdits(t *testing.T) {
