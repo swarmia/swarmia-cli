@@ -568,6 +568,8 @@ Packaging works (pnpm 10 isolated layout verified with packed tarballs), but:
 
 ## Still open
 
+- Known data-quality issues and which way they skew the numbers:
+  [data-quality.md](data-quality.md).
 - Order among the four next agents.
 - Whether snapshot cost justifies a per-repo daemon (milestone 16).
 - Retention window: 30 days implemented; revisit with dogfood data.
