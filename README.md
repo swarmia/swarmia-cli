@@ -276,8 +276,13 @@ diffs what changed and stores it as `changes` on that record. Only lines the
 command *authored* count: a line's normalized text must occur more often
 afterwards than in the file before the command or in HEAD, which excludes
 formatter runs over human code and content restored by git (`stash`,
-`checkout`, `pull`). Files over 1 MB and binary files are skipped; human edits
-saved while a command runs are indistinguishable from the command's.
+`checkout`, `pull`). When a rebase, cherry-pick, revert or merge stops part
+way, the commits it's applying (`REBASE_HEAD` and the like) and the conflict
+markers count as references too, and so does a stash entry the command popped.
+If the command leaves such an operation stopped without naming the commit it
+applies (a rebase at a `break`), nothing is recorded: the record is marked
+`snapshot: git-operation`. Files over 1 MB and binary files are skipped; human
+edits saved while a command runs are indistinguishable from the command's.
 
 Commands that can only read (`grep`, `cat`, `sed -n 1,80p`, `git log`,
 `gh pr view`, …, recognized conservatively: no redirections to files, command

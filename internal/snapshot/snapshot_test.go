@@ -44,6 +44,18 @@ func (f *fixture) git(dir string, args ...string) {
 	}
 }
 
+// gitMayFail runs git where failure is expected, e.g. a rebase that stops on
+// a conflict, with env added to the fixture's.
+func (f *fixture) gitMayFail(env []string, args ...string) {
+	f.t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", f.repo.Root}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_EDITOR=true")
+	cmd.Env = append(cmd.Env, env...)
+	_ = cmd.Run()
+}
+
 func (f *fixture) write(path, content string) {
 	f.t.Helper()
 	full := filepath.Join(f.repo.Root, path)
@@ -228,4 +240,86 @@ func TestSnapshotsStopAtTheBudget(t *testing.T) {
 	if _, err := f.store.Changes(done, f.repo, pre); !errors.Is(err, ErrBudget) {
 		t.Errorf("Changes err = %v, want ErrBudget", err)
 	}
+}
+
+// branches sets up main and feature diverging from a common base: feature adds
+// a function to app.go, and both change conflict.txt. HEAD ends on feature.
+func (f *fixture) branches() {
+	f.t.Helper()
+	f.commit(map[string]string{"app.go": "package app\n", "conflict.txt": "base\n"})
+	f.git(f.repo.Root, "checkout", "-q", "-b", "feature")
+	f.commit(map[string]string{"app.go": "package app\n\nfunc Feature() { return computeFeature() }\n", "conflict.txt": "feature\n"})
+	f.git(f.repo.Root, "checkout", "-q", "main")
+	f.commit(map[string]string{"conflict.txt": "main\n", "other.go": "package app\n"})
+	f.git(f.repo.Root, "checkout", "-q", "feature")
+}
+
+// A rebase stopped on a conflict leaves the commit it's replaying staged
+// but uncommitted: those lines, and the conflict markers, are git's.
+func TestStoppedRebaseAuthorsNothing(t *testing.T) {
+	f := newFixture(t)
+	f.branches()
+	got := f.run(func() { f.gitMayFail(nil, "rebase", "main") })
+	if _, busy := f.repo.InProgress(); !busy {
+		t.Fatal("rebase didn't stop")
+	}
+	check(t, got, nil)
+}
+
+func TestStoppedCherryPickAuthorsNothing(t *testing.T) {
+	f := newFixture(t)
+	f.branches()
+	f.git(f.repo.Root, "checkout", "-q", "main")
+	got := f.run(func() { f.gitMayFail(nil, "cherry-pick", "feature") })
+	check(t, got, nil)
+}
+
+func TestStoppedMergeAuthorsNothing(t *testing.T) {
+	f := newFixture(t)
+	f.branches()
+	f.git(f.repo.Root, "checkout", "-q", "main")
+	got := f.run(func() { f.gitMayFail(nil, "merge", "-q", "feature") })
+	check(t, got, nil)
+}
+
+// While a rebase is stopped, the agent's own resolution still counts.
+func TestEditDuringStoppedRebaseIsAuthored(t *testing.T) {
+	f := newFixture(t)
+	f.branches()
+	f.gitMayFail(nil, "rebase", "main")
+	got := f.run(func() { f.write("conflict.txt", "main\nfeature\nresolved by the agent\n") })
+	check(t, got, map[string][]string{"conflict.txt": {"resolved by the agent"}})
+}
+
+// A rebase stopped at `break` names no commit; whatever the command left in
+// the worktree can't be told apart from git's, so nothing is recorded.
+func TestRebaseStoppedWithoutSourceFailsClosed(t *testing.T) {
+	f := newFixture(t)
+	f.branches()
+	editor := filepath.Join(t.TempDir(), "break.sh") // puts a `break` first in the todo list
+	if err := os.WriteFile(editor, []byte("#!/bin/sh\n{ echo break; cat \"$1\"; } > \"$1.new\" && mv \"$1.new\" \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pre, err := f.store.Take(context.Background(), f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.gitMayFail([]string{"GIT_SEQUENCE_EDITOR=" + editor}, "rebase", "-i", "HEAD~1")
+	if op, busy := f.repo.InProgress(); !busy || len(op.Sources) != 0 {
+		t.Fatalf("want a rebase stopped at break, got busy=%v %+v", busy, op)
+	}
+	if _, err := f.store.Changes(context.Background(), f.repo, pre); !errors.Is(err, ErrUnknownSource) {
+		t.Errorf("Changes err = %v, want ErrUnknownSource", err)
+	}
+}
+
+// Popping a stash restores earlier changes, untracked files included.
+func TestGitStashPopAuthorsNothing(t *testing.T) {
+	f := newFixture(t)
+	f.commit(map[string]string{"app.go": "package app\n"})
+	f.write("app.go", "package app\n\nfunc Stashed() { return earlierWork() }\n")
+	f.write("new.go", "package app\n\nfunc Untracked() { return earlierWork() }\n")
+	f.git(f.repo.Root, "stash", "-q", "-u")
+	got := f.run(func() { f.git(f.repo.Root, "stash", "pop", "-q") })
+	check(t, got, nil)
 }

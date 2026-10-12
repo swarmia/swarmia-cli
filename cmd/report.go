@@ -133,7 +133,7 @@ func writeSessionText(out io.Writer, s *report.Session) {
 	}
 	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), len(s.Edits), shell, s.AILines())
 	if s.ShellUnrecorded > 0 {
-		fmt.Fprintf(out, "  %d shell command(s) not checked for edits: the worktree snapshot took over %v or failed\n", s.ShellUnrecorded, snapshot.Budget)
+		fmt.Fprintf(out, "  %d shell command(s) not checked for edits: the worktree snapshot took over %v, failed, or found a git operation stopped part way\n", s.ShellUnrecorded, snapshot.Budget)
 	}
 	if s.Usage != nil {
 		if line := usageSummary(s.Usage.Totals()); line != "" {

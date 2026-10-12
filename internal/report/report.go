@@ -55,7 +55,8 @@ type Session struct {
 	// replaced itself don't count.
 	AILinesByPath map[string]int `json:"ai_lines_by_path,omitempty"`
 	// ShellUnrecorded counts shell commands whose changes weren't recorded:
-	// snapshotting the worktree around them ran out of time or failed.
+	// snapshotting the worktree around them ran out of time or failed, or the
+	// command left a git operation stopped on an unknown commit.
 	ShellUnrecorded int          `json:"shell_unrecorded,omitempty"`
 	Attribution     *Attribution `json:"attribution,omitempty"`
 	// Ended is set once the agent reported the session's end.
@@ -285,7 +286,8 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		if ev.TranscriptPath != "" {
 			s.TranscriptPath = ev.TranscriptPath
 		}
-		if rec.Snapshot == events.SnapshotOverBudget || rec.Snapshot == events.SnapshotFailed {
+		switch rec.Snapshot {
+		case events.SnapshotOverBudget, events.SnapshotFailed, events.SnapshotGitOperation:
 			s.ShellUnrecorded++
 		}
 		switch ev.Name {

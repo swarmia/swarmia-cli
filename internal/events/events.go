@@ -32,8 +32,8 @@ type Record struct {
 	// record of the hook event that ended it (see internal/snapshot).
 	Changes []FileChange `json:"changes,omitempty"`
 	// Snapshot, on a shell command's records, says why its changes weren't
-	// looked for: SnapshotReadOnly, or SnapshotOverBudget / SnapshotFailed
-	// when they went unrecorded. Older binaries ignore it, losing only that.
+	// looked for: SnapshotReadOnly, or SnapshotOverBudget / SnapshotFailed /
+	// SnapshotGitOperation when they went unrecorded. Older binaries ignore it, losing only that.
 	Snapshot string `json:"snapshot,omitempty"`
 }
 
@@ -42,6 +42,9 @@ const (
 	SnapshotReadOnly   = "read-only"
 	SnapshotOverBudget = "over-budget"
 	SnapshotFailed     = "failed"
+	// SnapshotGitOperation: the command left a rebase or the like stopped
+	// without naming the commit it applies (see snapshot.ErrUnknownSource).
+	SnapshotGitOperation = "git-operation"
 )
 
 // FileChange is one file a shell command changed: hunks in diff-style lines,
