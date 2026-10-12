@@ -245,6 +245,8 @@ func snapshotMarker(err error) string {
 		return ""
 	case errors.Is(err, snapshot.ErrBudget):
 		return events.SnapshotOverBudget
+	case errors.Is(err, snapshot.ErrUnknownSource):
+		return events.SnapshotGitOperation
 	}
 	return events.SnapshotFailed
 }

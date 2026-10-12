@@ -146,3 +146,42 @@ func (r Repo) readStateWithGit() State {
 	}
 	return st
 }
+
+// Operation is a git operation stopped part way in the worktree: a rebase,
+// cherry-pick, revert or merge, waiting on conflicts or an interactive stop.
+// Sources are the commits it is applying (REBASE_HEAD, CHERRY_PICK_HEAD,
+// REVERT_HEAD, MERGE_HEAD), as far as git recorded them; a rebase stopped at a
+// `break`, for one, has none.
+type Operation struct {
+	Sources []string `json:"sources,omitempty"`
+}
+
+// InProgress reports the operation stopped in the worktree, if any.
+func (r Repo) InProgress() (Operation, bool) {
+	var op Operation
+	busy := false
+	for _, name := range []string{"REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "MERGE_HEAD"} {
+		data, err := os.ReadFile(filepath.Join(r.GitDir, name))
+		if err != nil {
+			continue
+		}
+		busy = true
+		op.Sources = append(op.Sources, strings.Fields(string(data))...) // MERGE_HEAD lists one per parent
+	}
+	for _, dir := range []string{"rebase-merge", "rebase-apply", "sequencer"} {
+		if _, err := os.Stat(filepath.Join(r.GitDir, dir)); err == nil {
+			busy = true
+		}
+	}
+	return op, busy
+}
+
+// Stash returns the commit of the latest stash entry, "" if there is none.
+func (r Repo) Stash() string {
+	if _, err := os.Stat(filepath.Join(r.CommonDir, "reftable")); err == nil {
+		out, _ := exec.Command("git", "-C", r.Root, "rev-parse", "-q", "--verify", "refs/stash").Output()
+		return strings.TrimSpace(string(out))
+	}
+	sha, _ := resolveRef(r.CommonDir, "refs/stash")
+	return sha
+}

@@ -34,15 +34,24 @@ const Budget = 500 * time.Millisecond
 // ErrBudget means a snapshot ran out of its Budget.
 var ErrBudget = errors.New("snapshot exceeded its time budget")
 
+// ErrUnknownSource means the command left a git operation stopped part way
+// without saying which commit it is applying, so the worktree holds content
+// from an unknown commit that must not be credited to the command.
+var ErrUnknownSource = errors.New("git operation in progress with no known source commit")
+
 // maxFileSize skips files too large to be hand-written source (bundles,
 // fixtures, lockfiles of huge projects); they're never diffed.
 const maxFileSize = 1 << 20
 
 // Snapshot is the working tree's state before a command: HEAD plus every dirty
-// file (modified, added, untracked or deleted, relative to HEAD).
+// file (modified, added, untracked or deleted, relative to HEAD). Busy says a
+// git operation was already stopped part way (see gitrepo.Operation), and Stash
+// is the latest stash entry.
 type Snapshot struct {
 	Head  string           `json:"head"`
 	Files map[string]Entry `json:"files"`
+	Busy  bool             `json:"busy,omitempty"`
+	Stash string           `json:"stash,omitempty"`
 }
 
 // Entry is one dirty file. Blob names its content in the store; it is empty for
@@ -83,7 +92,8 @@ func (s Store) Take(ctx context.Context, repo gitrepo.Repo) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	last := s.readLast()
-	snap := Snapshot{Head: st.Head, Files: map[string]Entry{}}
+	_, busy := repo.InProgress()
+	snap := Snapshot{Head: st.Head, Files: map[string]Entry{}, Busy: busy, Stash: repo.Stash()}
 	for _, path := range dirty {
 		if ctx.Err() != nil {
 			return Snapshot{}, ErrBudget
@@ -154,11 +164,23 @@ func (s Store) Load(id string) (Snapshot, bool) {
 // Changes diffs the worktree against the snapshot taken before a command and
 // returns the lines the command authored in each file. Files the command
 // deleted contribute nothing; lines it only reformatted or restored from git
-// are excluded (see attribution.AuthoredOnly).
+// are excluded (see attribution.AuthoredOnly). Restored from git includes the
+// commits a stopped rebase, cherry-pick, revert or merge is applying, their
+// conflict markers, and a stash entry the command popped. If the command left
+// such an operation stopped without saying which commit it applies, nothing
+// is recorded (ErrUnknownSource): a gap beats crediting someone else's lines.
 func (s Store) Changes(ctx context.Context, repo gitrepo.Repo, pre Snapshot) ([]Change, error) {
 	st, err := repo.ReadState()
 	if err != nil {
 		return nil, err
+	}
+	op, busy := repo.InProgress()
+	if busy && len(op.Sources) == 0 && (!pre.Busy || st.Head != pre.Head) {
+		return nil, ErrUnknownSource
+	}
+	sources := op.Sources
+	if pre.Stash != "" && repo.Stash() != pre.Stash {
+		sources = append(sources, pre.Stash, pre.Stash+"^3") // popped or dropped; ^3 holds untracked files
 	}
 	dirty, err := dirtyPaths(ctx, repo.Root)
 	if err != nil {
@@ -214,12 +236,19 @@ func (s Store) Changes(ctx context.Context, repo gitrepo.Repo, pre Snapshot) ([]
 			continue
 		}
 		refs := []string{before, preHead}
+		revs := sources
 		if st.Head != pre.Head {
-			head, err := gitShow(ctx, repo.Root, st.Head, path)
+			revs = append([]string{st.Head}, revs...)
+		}
+		for _, rev := range revs {
+			content, err := gitShow(ctx, repo.Root, rev, path)
 			if err != nil {
 				return nil, err
 			}
-			refs = append(refs, head)
+			refs = append(refs, content)
+		}
+		if busy {
+			refs = append(refs, conflictMarkers(after))
 		}
 		hunks := attribution.AuthoredOnly(attribution.DiffHunks(before, after), after, refs...)
 		if len(hunks) > 0 {
@@ -227,6 +256,20 @@ func (s Store) Changes(ctx context.Context, repo gitrepo.Repo, pre Snapshot) ([]
 		}
 	}
 	return changes, nil
+}
+
+// conflictMarkers returns the lines of content that are git's conflict
+// markers, as a reference version: the command didn't write them, git did.
+func conflictMarkers(content string) string {
+	var out []string
+	for _, l := range strings.Split(content, "\n") {
+		for _, m := range []string{"<<<<<<<", "|||||||", "=======", ">>>>>>>"} {
+			if rest, ok := strings.CutPrefix(l, m); ok && (rest == "" || rest[0] == ' ') {
+				out = append(out, l)
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // gitShow returns a file's content at rev: "" if it isn't there. The only
