@@ -32,6 +32,18 @@ func classes(m Match) []string {
 	return out
 }
 
+// checkFrom compares, per committed line, the hunk lines it came from.
+func checkFrom(t *testing.T, m Match, want map[int][]int) {
+	t.Helper()
+	got := map[int][]int{}
+	for _, l := range m.Lines {
+		got[l.Line] = l.From
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("from = %v, want %v", got, want)
+	}
+}
+
 func check(t *testing.T, m Match, want []string, survived int) {
 	t.Helper()
 	if got := classes(m); !reflect.DeepEqual(got, want) {
@@ -112,7 +124,9 @@ func TestMatchLineWrappedByFormatter(t *testing.T) {
 		`});`,
 		`console.log('done');`,
 	)
-	check(t, MatchHunk(h, f), []string{"1:normalized", "2:normalized", "3:normalized", "4:normalized", "5:normalized"}, 2)
+	m := MatchHunk(h, f)
+	check(t, m, []string{"1:normalized", "2:normalized", "3:normalized", "4:normalized", "5:normalized"}, 2)
+	checkFrom(t, m, map[int][]int{1: {0}, 2: {0}, 3: {0}, 4: {0}, 5: {1}})
 }
 
 // The reverse: a formatter joins lines the agent wrote separately.
@@ -128,7 +142,9 @@ func TestMatchLinesJoinedByFormatter(t *testing.T) {
 		`items := []string{"alpha", "beta"}`,
 		"sort.Strings(items)",
 	)
-	check(t, MatchHunk(h, f), []string{"1:normalized", "2:exact"}, 5)
+	m := MatchHunk(h, f)
+	check(t, m, []string{"1:normalized", "2:exact"}, 5)
+	checkFrom(t, m, map[int][]int{1: {0, 1, 2, 3}, 2: {4}})
 }
 
 // A human edits one of the agent's lines, inserts a line of their own, and
@@ -165,7 +181,9 @@ func TestMatchContextIsNotAttributed(t *testing.T) {
 		"	timeout := 30 * time.Second",
 		"	user := currentUser(ctx)",
 	)
-	check(t, MatchHunk(h, f), []string{"3:exact"}, 1)
+	m := MatchHunk(h, f)
+	check(t, m, []string{"3:exact"}, 1)
+	checkFrom(t, m, map[int][]int{3: {2}}) // index in the hunk, context included
 }
 
 // A human then tweaks that single line: context pins it, so it's modified.

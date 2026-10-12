@@ -146,7 +146,6 @@ func writeSessionText(out io.Writer, s *report.Session) {
 		}
 		return
 	}
-	survived := 0
 	for _, c := range s.Commits() {
 		state := "local "
 		if c.Pushed {
@@ -156,9 +155,9 @@ func writeSessionText(out io.Writer, s *report.Session) {
 		for _, f := range c.Files {
 			fmt.Fprintf(out, "      %-44s %4d line(s)%s\n", f.Path, f.Total(), classBreakdown(f))
 		}
-		survived += c.Survived()
 	}
 	if ai := s.AILines(); ai > 0 {
+		survived := s.Survived(func(report.Commit) bool { return true })
 		fmt.Fprintf(out, "  %d of %d AI line(s) committed unchanged or reformatted (%d%%)\n",
 			survived, ai, 100*survived/ai)
 	}

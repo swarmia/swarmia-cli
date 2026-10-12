@@ -109,13 +109,23 @@ type Attribution struct {
 	Commits    []Commit  `json:"commits"`
 }
 
-// Commit is a commit containing lines the session wrote.
+// Commit is a commit containing lines the session wrote. Kept lists the
+// session's added lines (numbered by lineIDs) that the commit holds exact or
+// only reformatted, so a line carried by several commits — e.g. a commit and
+// its rebased copy — can be counted once (see Session.Survived).
 type Commit struct {
 	SHA     string    `json:"sha"`
 	At      time.Time `json:"at"`
 	Subject string    `json:"subject"`
 	Pushed  bool      `json:"pushed"`
 	Files   []File    `json:"files"`
+	Kept    []Span    `json:"kept,omitempty"`
+}
+
+// Span is a run of numbers [Start, End].
+type Span struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 // File lists the attributed lines of one path in a commit: only lines that
@@ -152,14 +162,32 @@ func (f File) Total() int {
 	return n
 }
 
-// Survived counts the session's lines in the commit that are exact or only
+// Survived counts the session's added lines the commit holds exact or only
 // reformatted.
 func (c Commit) Survived() int {
 	n := 0
-	for _, f := range c.Files {
-		n += f.Count(attribution.Exact) + f.Count(attribution.Normalized)
+	for _, sp := range c.Kept {
+		n += sp.End - sp.Start + 1
 	}
 	return n
+}
+
+// Survived counts the session's added lines that some commit accepted by
+// include holds exact or only reformatted. Each line counts once, however many
+// commits hold it.
+func (s *Session) Survived(include func(Commit) bool) int {
+	seen := map[int]bool{}
+	for _, c := range s.Commits() {
+		if !include(c) {
+			continue
+		}
+		for _, sp := range c.Kept {
+			for id := sp.Start; id <= sp.End; id++ {
+				seen[id] = true
+			}
+		}
+	}
+	return len(seen)
 }
 
 // AILines is the session's total of AILinesByPath.
@@ -467,12 +495,15 @@ var rank = map[attribution.Class]int{attribution.Exact: 3, attribution.Normalize
 
 // attribute matches the edits' hunks against each candidate commit that
 // touched the edited file after the edit, keeping only lines the commit itself
-// added. A line claimed by several hunks gets the strongest class.
+// added. A line claimed by several hunks gets the strongest class, and is
+// credited to that hunk's added lines alone.
 func attribute(r *repo, edits []Edit, commits []commit) []Commit {
 	var out []Commit
 	paths := editedPaths(edits)
+	ids := lineIDs(edits)
 	for _, c := range commits {
 		var files []File
+		var kept []int
 		for _, path := range paths {
 			if !c.Paths[path] {
 				continue
@@ -483,14 +514,19 @@ func attribute(r *repo, edits []Edit, commits []commit) []Commit {
 			}
 			introduced := r.addedLines(c.SHA, path)
 			best := map[int]attribution.Class{}
-			for _, e := range edits {
+			from := map[int][]int{} // committed line -> ids of the added lines it came from
+			for ei, e := range edits {
 				if e.Path != path || e.At.After(c.At.Add(clockSlack)) {
 					continue // a different file, or edited after this commit
 				}
-				for _, enc := range e.Hunks {
+				for hi, enc := range e.Hunks {
 					for _, l := range attribution.MatchHunk(attribution.DecodeHunk(enc), content).Lines {
 						if introduced[l.Line] && rank[l.Class] > rank[best[l.Line]] {
 							best[l.Line] = l.Class
+							from[l.Line] = nil
+							for _, i := range l.From {
+								from[l.Line] = append(from[l.Line], ids[ei][hi]+i)
+							}
 						}
 					}
 				}
@@ -501,13 +537,46 @@ func attribute(r *repo, edits []Edit, commits []commit) []Commit {
 			var lines []attribution.LineMatch
 			for line, class := range best {
 				lines = append(lines, attribution.LineMatch{Line: line, Class: class})
+				if class != attribution.Modified {
+					kept = append(kept, from[line]...)
+				}
 			}
 			sort.Slice(lines, func(a, b int) bool { return lines[a].Line < lines[b].Line })
 			files = append(files, File{Path: path, Lines: Ranges(lines)})
 		}
 		if len(files) > 0 {
-			out = append(out, Commit{SHA: c.SHA, At: c.At, Subject: c.Subject, Files: files})
+			out = append(out, Commit{SHA: c.SHA, At: c.At, Subject: c.Subject, Files: files, Kept: spans(kept)})
 		}
+	}
+	return out
+}
+
+// lineIDs numbers the lines of the edits' hunks across the session:
+// ids[e][h] + i is line i of hunk h of edit e. Numbering by encoded lines
+// (which DecodeHunk only ever drops) keeps the ids unique.
+func lineIDs(edits []Edit) [][]int {
+	ids := make([][]int, len(edits))
+	next := 0
+	for ei, e := range edits {
+		ids[ei] = make([]int, len(e.Hunks))
+		for hi, enc := range e.Hunks {
+			ids[ei][hi] = next
+			next += len(enc)
+		}
+	}
+	return ids
+}
+
+// spans sorts and deduplicates ids into runs.
+func spans(ids []int) []Span {
+	sort.Ints(ids)
+	var out []Span
+	for _, id := range ids {
+		if n := len(out); n > 0 && id <= out[n-1].End+1 {
+			out[n-1].End = max(out[n-1].End, id)
+			continue
+		}
+		out = append(out, Span{Start: id, End: id})
 	}
 	return out
 }

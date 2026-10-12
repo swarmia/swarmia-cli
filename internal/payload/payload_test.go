@@ -27,8 +27,8 @@ func session() *report.Session {
 		},
 		AILinesByPath: map[string]int{"internal/x.go": 5},
 		Attribution: &report.Attribution{Commits: []report.Commit{
-			{SHA: "pushed1", Pushed: true, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}},
-			{SHA: "local1", Pushed: false, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 4, End: 5, Class: attribution.Exact}}}}},
+			{SHA: "pushed1", Pushed: true, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 0, End: 2}}},
+			{SHA: "local1", Pushed: false, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 4, End: 5, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 3, End: 4}}},
 		}},
 	}
 }
