@@ -109,8 +109,8 @@ func Build(s *report.Session, ctx Context) Payload {
 		for _, f := range c.Files {
 			p.Commits = append(p.Commits, Commit{SHA: c.SHA, Path: f.Path, Lines: f.Lines})
 		}
-		p.AILinesKept += c.Survived()
 	}
+	p.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed })
 	return p
 }
 

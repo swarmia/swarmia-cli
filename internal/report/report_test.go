@@ -202,6 +202,40 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 	}
 }
 
+// A commit and its rebased copy, both reachable, each hold the agent's lines,
+// but the session's survived total counts each line once.
+func TestSurvivedCountsLinesOnceAcrossCommits(t *testing.T) {
+	f := newFixture(t)
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	content := "package x\n\nfunc A() string { return compute(\"a\") }\nfunc B() string { return compute(\"b\") }\n"
+	f.agentWrite(t0, "x.go", content, nil)
+	first := f.commit(t0.Add(time.Minute), "me@example.com", "Add x", map[string]string{"x.go": content})
+	f.git(t0.Add(2*time.Minute), "me@example.com", "checkout", "-q", "-b", "rebased", "HEAD~1")
+	f.commit(t0.Add(2*time.Minute), "me@example.com", "Unrelated", map[string]string{"README": "hello\n"})
+	second := f.commit(t0.Add(2*time.Minute), "me@example.com", "Add x", map[string]string{"x.go": content})
+
+	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sessions[0]
+	if len(s.Commits()) != 2 {
+		t.Fatalf("commits = %+v, want %s and %s", s.Commits(), first[:7], second[:7])
+	}
+	for _, c := range s.Commits() {
+		if c.Survived() != 3 {
+			t.Errorf("%s: Survived = %d, want 3", c.SHA[:7], c.Survived())
+		}
+	}
+	all := s.Survived(func(Commit) bool { return true })
+	if all != 3 || s.AILines() != 3 {
+		t.Errorf("session survived = %d of %d AI lines, want 3 of 3", all, s.AILines())
+	}
+	if got := s.Survived(func(c Commit) bool { return c.SHA == second }); got != 3 {
+		t.Errorf("survived in %s alone = %d, want 3", second[:7], got)
+	}
+}
+
 // Lines the agent wrote and then replaced itself don't count toward AILines.
 func TestAILinesExcludesSelfReplacedLines(t *testing.T) {
 	f := newFixture(t)

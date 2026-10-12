@@ -32,9 +32,12 @@ const (
 )
 
 // LineMatch attributes one line of the committed file (1-based) to the agent.
+// From lists the hunk's added lines it came from, as indices into Hunk.Lines:
+// usually one, several when a formatter joined them into this line.
 type LineMatch struct {
 	Line  int
 	Class Class
+	From  []int
 }
 
 // Match is the outcome of locating a hunk in a committed file.
@@ -144,6 +147,7 @@ func MatchHunk(h Hunk, content string) Match {
 	usedH := make([]bool, len(H))
 	usedF := make([]bool, len(F))
 	classes := map[int]Class{}
+	from := map[int][]int{}
 	replaced := map[string]bool{}
 	for _, r := range h.Replaced {
 		if n := normalize(r); n != "" {
@@ -171,13 +175,20 @@ func MatchHunk(h Hunk, content string) Match {
 			if !anyAdded(H, p.h) {
 				continue // context: locates the hunk, but isn't the agent's
 			}
+			var added []int
+			for _, i := range p.h {
+				if H[i].added {
+					added = append(added, H[i].num-1)
+				}
+			}
 			for _, j := range p.f {
 				classes[F[j].num] = p.class
+				from[F[j].num] = added
 			}
 		}
 	}
 	for num, c := range classes {
-		m.Lines = append(m.Lines, LineMatch{Line: num, Class: c})
+		m.Lines = append(m.Lines, LineMatch{Line: num, Class: c, From: from[num]})
 	}
 	sort.Slice(m.Lines, func(a, b int) bool { return m.Lines[a].Line < m.Lines[b].Line })
 	return m
