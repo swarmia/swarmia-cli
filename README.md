@@ -175,7 +175,8 @@ Things to know:
   but a token in your *user* config applies everywhere, and Swarmia only drops
   repositories outside your organization after they've been sent. Prefer
   `project` or `local` scope for work repositories.
-- `install` is idempotent, keeps your other settings and hooks, and warns if a
+- `install` is idempotent, keeps your other settings and hooks — and their
+  order and formatting, so the diff is just the added hooks — and warns if a
   repository would end up with hooks in both of its settings files (every
   event would be logged twice).
 
@@ -402,6 +403,7 @@ internal/
   report/          folding the log into sessions; attributing them to commits
   usage/           token usage from agent transcripts (Claude Code) and rollouts (Codex)
   codex/           Codex's hooks files and hook trust
+  jsonedit/        rewriting edited settings files without reformatting them
   config/          layered configuration
   redact/          secret redaction and code stripping
   payload/         what delivery sends, with the privacy rules applied
