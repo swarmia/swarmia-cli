@@ -501,6 +501,67 @@ func TestInstallPreservesUnmanagedHooksAndTopLevelKeys(t *testing.T) {
 	}
 }
 
+// Installing into a committed settings file only adds lines: existing keys
+// keep their order and formatting, and && isn't escaped, so the diff is just
+// the hooks.
+func TestInstallOnlyAddsLines(t *testing.T) {
+	repo := t.TempDir()
+	original := `{
+  "permissions": {
+    "allow": ["Bash(git*)", "Read"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && ./guard.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "FOO": "bar"
+  }
+}
+`
+	path := filepath.Join(repo, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(string(data), "\n")
+	i := 0 // the original's lines must appear in order, with only additions between
+	for _, line := range got {
+		if want := strings.Split(original, "\n"); i < len(want) && line == want[i] {
+			i++
+		}
+	}
+	if n := len(strings.Split(original, "\n")); i != n {
+		t.Errorf("only %d of the original's %d lines kept in place:\n%s", i, n, data)
+	}
+	if bytes.Contains(data, []byte("\\u0026")) {
+		t.Errorf("& was escaped:\n%s", data)
+	}
+	if !strings.Contains(string(data), "\"matcher\": \"*\",\n        \"hooks\": [") {
+		t.Errorf("new hook groups should list matcher before hooks:\n%s", data)
+	}
+}
+
 // Local scope writes the gitignored settings.local.json and leaves the shared
 // settings.json alone.
 func TestInstallLocalScope(t *testing.T) {

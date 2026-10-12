@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/swarmia/swarmia-cli/internal/agent"
+	"github.com/swarmia/swarmia-cli/internal/jsonedit"
 )
 
 const binaryName = "swarmia-cli"
@@ -378,7 +378,7 @@ var claudeHookSpecs = []hookSpec{
 // obsolete swarmia-cli hooks. The file is only written when something changed,
 // and never in a dry run.
 func installHooks(path, command, legacy string, specs []hookSpec, dryRun bool) (hookChanges, error) {
-	doc, err := readJSONObject(path)
+	doc, layout, err := readJSONDocument(path)
 	if err != nil {
 		return hookChanges{}, err
 	}
@@ -392,7 +392,7 @@ func installHooks(path, command, legacy string, specs []hookSpec, dryRun bool) (
 		}
 	}
 	if (res.added > 0 || res.updated > 0 || res.removed > 0) && !dryRun {
-		if err := writeJSONObject(path, doc); err != nil {
+		if err := writeJSONObject(path, doc, layout, newKeyOrder(specs)); err != nil {
 			return hookChanges{}, err
 		}
 	}
@@ -559,35 +559,61 @@ func matcherEquals(v any, matcher string) bool {
 // --- small JSON / fs helpers ----------------------------------------------
 
 func readJSONObject(path string) (map[string]any, error) {
+	doc, _, err := readJSONDocument(path)
+	return doc, err
+}
+
+// readJSONDocument reads a JSON object for editing, and its layout so that
+// writeJSONObject can keep its formatting. A missing or empty file is an
+// empty object, with no layout.
+func readJSONDocument(path string) (map[string]any, *jsonedit.Layout, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]any{}, nil
+			return map[string]any{}, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return map[string]any{}, nil
+		return map[string]any{}, nil, nil
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	v, layout, err := jsonedit.Parse(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	if doc == nil {
-		doc = map[string]any{}
+	if v == nil {
+		return map[string]any{}, nil, nil
 	}
-	return doc, nil
+	doc, ok := v.(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("parsing %s: not a JSON object", path)
+	}
+	return doc, layout, nil
 }
 
-func writeJSONObject(path string, doc map[string]any) error {
+// writeJSONObject writes doc to path, formatted like the file it was read
+// from (layout, nil for a new file) wherever it didn't change, so the diff
+// shows only the edit. New keys are written in keyOrder where it has them.
+func writeJSONObject(path string, doc map[string]any, layout *jsonedit.Layout, keyOrder []string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	data, err := jsonedit.Marshal(doc, layout, keyOrder)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return os.WriteFile(path, data, 0o644)
+}
+
+// newKeyOrder is how keys install adds are ordered: a hook group's matcher
+// before its hooks, a hook's type, command and timeout in that order, and
+// new events in the order of specs.
+func newKeyOrder(specs []hookSpec) []string {
+	order := []string{"matcher", "hooks", "type", "command", "timeout"}
+	for _, s := range specs {
+		order = append(order, s.event)
+	}
+	return order
 }
 
 func childMap(parent map[string]any, key string) map[string]any {
