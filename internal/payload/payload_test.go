@@ -107,16 +107,65 @@ func TestBuildWithholdsPrompts(t *testing.T) {
 
 func TestRepoSlug(t *testing.T) {
 	for in, want := range map[string]string{
-		"git@github.com:acme/app.git":                 "github.com/acme/app",
-		"https://github.com/acme/app.git":             "github.com/acme/app",
-		"https://x-token:secret@github.com/acme/app":  "github.com/acme/app",
-		"ssh://git@gitlab.example.com/group/sub/repo": "gitlab.example.com/group/sub/repo",
-		"/tmp/e2e/origin.git":                         "",
-		"../origin":                                   "",
-		"file:///srv/git/app.git":                     "",
-		"":                                            "",
+		// GitHub
+		"git@github.com:acme/app.git":                "github.com/acme/app",
+		"git@github.com:acme/app":                    "github.com/acme/app",
+		"https://github.com/acme/app.git":            "github.com/acme/app",
+		"https://github.com/acme/app/":               "github.com/acme/app",
+		"https://github.com/acme/app.git/":           "github.com/acme/app",
+		"https://x-token:secret@github.com/acme/app": "github.com/acme/app",
+		"https://x:p@ss@github.com/acme/app":         "github.com/acme/app",
+		"https://GitHub.com/Acme/App":                "github.com/Acme/App",
+		"ssh://git@github.com/acme/app.git":          "github.com/acme/app",
+		"ssh://git@ssh.github.com:443/acme/app.git":  "github.com/acme/app",
+		"git+ssh://git@github.com/acme/app.git":      "github.com/acme/app",
+		"git://github.com/acme/app.git":              "github.com/acme/app",
+		"https://github.com/acme/app.git?foo=1#bar":  "github.com/acme/app",
+		"https://github.com//acme/app":               "github.com/acme/app",
+		"https://github.com/":                        "",
+		"https://github.com":                         "",
+		// GitHub Enterprise Server
+		"git@ghe.example.com:acme/app.git":          "ghe.example.com/acme/app",
+		"https://ghe.example.com:8443/acme/app.git": "ghe.example.com/acme/app",
+		// GitLab, with subgroups, self-hosted and under a path prefix
+		"git@gitlab.com:group/sub/repo.git":                      "gitlab.com/group/sub/repo",
+		"https://oauth2:glpat-xyz@gitlab.com/group/sub/repo.git": "gitlab.com/group/sub/repo",
+		"ssh://git@altssh.gitlab.com:443/group/repo.git":         "gitlab.com/group/repo",
+		"ssh://git@gitlab.example.com/group/sub/repo":            "gitlab.example.com/group/sub/repo",
+		"ssh://git@gitlab.example.com:2222/group/sub/repo.git":   "gitlab.example.com/group/sub/repo",
+		"https://example.com/gitlab/group/repo.git":              "example.com/gitlab/group/repo",
+		"git@[gitlab.example.com]:group/repo.git":                "gitlab.example.com/group/repo",
+		// Bitbucket Cloud and Data Center (whose HTTPS URLs add scm/, kept as is)
+		"git@bitbucket.org:workspace/repo.git":               "bitbucket.org/workspace/repo",
+		"https://user@bitbucket.org/workspace/repo.git":      "bitbucket.org/workspace/repo",
+		"ssh://git@bitbucket.example.com:7999/proj/repo.git": "bitbucket.example.com/proj/repo",
+		"https://bitbucket.example.com/scm/proj/repo.git":    "bitbucket.example.com/scm/proj/repo",
+		// local remotes
+		"/tmp/e2e/origin.git":     "",
+		"../origin":               "",
+		"./origin":                "",
+		"origin/repo":             "",
+		"~/src/origin.git":        "",
+		"file:///srv/git/app.git": "",
+		"file://srv/git/app.git":  "",
+		"":                        "",
 	} {
-		if got := RepoSlug(in); got != want {
+		if got := RepoSlug(in, nil); got != want {
+			t.Errorf("RepoSlug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRepoSlugSSHAlias(t *testing.T) {
+	aliases := map[string]string{"github-work": "github.com", "gh": "GitHub.com"}
+	resolve := func(alias string) string { return aliases[alias] }
+	for in, want := range map[string]string{
+		"git@github-work:acme/app.git":      "github.com/acme/app",
+		"ssh://git@gh/acme/app.git":         "github.com/acme/app",
+		"git@gitlab.example.com:group/repo": "gitlab.example.com/group/repo", // not an alias
+		"https://github-work/acme/app.git":  "github-work/acme/app",          // not SSH
+	} {
+		if got := RepoSlug(in, resolve); got != want {
 			t.Errorf("RepoSlug(%q) = %q, want %q", in, got, want)
 		}
 	}
