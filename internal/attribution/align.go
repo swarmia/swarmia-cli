@@ -148,6 +148,7 @@ func MatchHunk(h Hunk, content string) Match {
 	usedF := make([]bool, len(F))
 	classes := map[int]Class{}
 	from := map[int][]int{}
+	looseContext := map[int]bool{} // file lines only paired with context by similarity
 	replaced := map[string]bool{}
 	for _, r := range h.Replaced {
 		if n := normalize(r); n != "" {
@@ -165,14 +166,14 @@ func MatchHunk(h Hunk, content string) Match {
 		for _, p := range pairs {
 			for _, i := range p.h {
 				usedH[i] = true
-				if H[i].added && p.class != Modified {
-					m.Survived++
-				}
 			}
 			for _, j := range p.f {
 				usedF[j] = true
 			}
 			if !anyAdded(H, p.h) {
+				for _, j := range p.f {
+					looseContext[F[j].num] = p.class == Modified
+				}
 				continue // context: locates the hunk, but isn't the agent's
 			}
 			var added []int
@@ -187,11 +188,79 @@ func MatchHunk(h Hunk, content string) Match {
 			}
 		}
 	}
+	repairReorders(H, F, usedF, looseContext, replaced, classes, from)
+	survived := map[int]bool{}
 	for num, c := range classes {
 		m.Lines = append(m.Lines, LineMatch{Line: num, Class: c, From: from[num]})
+		if c != Modified {
+			for _, i := range from[num] {
+				survived[i] = true
+			}
+		}
 	}
+	m.Survived = len(survived)
 	sort.Slice(m.Lines, func(a, b int) bool { return m.Lines[a].Line < m.Lines[b].Line })
 	return m
+}
+
+// repairReorders fixes what an order-preserving alignment gets wrong when lines
+// were reordered, e.g. a formatter sorting imports: it pairs each line with a
+// similar neighbour and calls both `modified`. Near the located hunk, a file
+// line that is `modified`, unpaired, or paired with context only by similarity
+// is credited to an added line it equals, if that line isn't credited yet; failing that, a `modified` line
+// equal to a context or replaced line is dropped, since the agent didn't write
+// it. Only exact text counts as evidence here, never similarity.
+func repairReorders(H, F []line, usedF []bool, looseContext map[int]bool, replaced map[string]bool, classes map[int]Class, from map[int][]int) {
+	if len(classes) == 0 {
+		return
+	}
+	index := map[int]int{} // file line number -> index in F
+	for j, l := range F {
+		index[l.num] = j
+	}
+	lo, hi := len(F), -1
+	credited := map[int]bool{}
+	for num, c := range classes {
+		lo, hi = min(lo, index[num]), max(hi, index[num])
+		if c != Modified {
+			for _, i := range from[num] {
+				credited[i] = true
+			}
+		}
+	}
+	lo, hi = max(lo-len(H), 0), min(hi+len(H), len(F)-1) // a reordered line may land a little outside
+
+	byIndex := map[int]line{}      // index in Hunk.Lines -> line
+	open := map[string][]int{}     // norm -> uncredited added lines
+	notAgents := map[string]bool{} // norm of context and replaced lines
+	for n := range replaced {
+		notAgents[n] = true
+	}
+	for _, l := range H {
+		byIndex[l.num-1] = l
+		switch {
+		case !l.added:
+			notAgents[l.norm] = true
+		case !l.trivial && !credited[l.num-1]:
+			open[l.norm] = append(open[l.norm], l.num-1)
+		}
+	}
+	for j := lo; j <= hi; j++ {
+		f := F[j]
+		c, claimed := classes[f.num]
+		if claimed && c != Modified || !claimed && usedF[j] && !looseContext[f.num] {
+			continue // already credited, or matching context
+		}
+		if is := open[f.norm]; len(is) > 0 {
+			open[f.norm] = is[1:]
+			classes[f.num], from[f.num] = classify(byIndex[is[0]], f), []int{is[0]}
+			continue
+		}
+		if claimed && notAgents[f.norm] {
+			delete(classes, f.num)
+			delete(from, f.num)
+		}
+	}
 }
 
 // withoutPreEditLines drops `modified` pairs whose file line is a line the

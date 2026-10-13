@@ -345,7 +345,10 @@ and before `report`. A lock keeps it to one run at a time.
   (equal once whitespace, quotes, trailing commas and line wrapping are
   ignored) or `modified` (at least half the tokens shared). A `modified` match
   against a line the edit itself replaced is dropped: that commit holds the
-  pre-edit version.
+  pre-edit version. The alignment keeps lines in order, so after it, lines a
+  formatter reordered (sorted imports) are fixed up on exact text alone: a
+  `modified` or unmatched line equal to one of the hunk's added lines is
+  credited to it, and a `modified` one equal to a context line is dropped.
 - **Introduced lines only:** a commit is credited only with lines it added
   relative to its parent.
 - **Matcher version** (`internal/attribution.Version`) travels with every
