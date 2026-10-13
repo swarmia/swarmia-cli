@@ -12,6 +12,7 @@ package payload
 import (
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -197,10 +198,64 @@ func RepoSlug(remote string, sshHostName func(alias string) string) string {
 			parts = parts[:n-1]
 		}
 	}
+	if org, project, repo, ok := azureDevOps(host, parts); ok {
+		host, parts = "dev.azure.com", []string{org, project, repo}
+	}
 	if host == "" || len(parts) == 0 {
 		return ""
 	}
 	return host + "/" + strings.Join(parts, "/")
+}
+
+// azureDevOps reads an Azure DevOps Services remote, whose HTTPS and SSH URLs
+// name a repository differently, so that both give dev.azure.com/org/project/repo:
+//
+//	https://dev.azure.com/org/project/_git/repo
+//	https://org.visualstudio.com/[DefaultCollection/]project/_git/repo
+//	git@ssh.dev.azure.com:v3/org/project/repo
+//	org@vs-ssh.visualstudio.com:v3/org/project/repo
+//
+// An HTTPS URL may leave out the project when the repository has its name, and
+// put _full/ or _optimized/ after _git/. (Azure DevOps Server keeps the same
+// path over both, so it needs nothing.)
+func azureDevOps(host string, parts []string) (org, project, repo string, ok bool) {
+	switch {
+	case host == "ssh.dev.azure.com" || host == "vs-ssh.visualstudio.com":
+		if len(parts) == 4 && parts[0] == "v3" {
+			return parts[1], parts[2], parts[3], true
+		}
+		return "", "", "", false
+	case host == "dev.azure.com":
+		if len(parts) == 0 {
+			return "", "", "", false
+		}
+		org, parts = parts[0], parts[1:]
+	case strings.HasSuffix(host, ".visualstudio.com"):
+		org = strings.TrimSuffix(host, ".visualstudio.com")
+		if len(parts) > 0 && strings.EqualFold(parts[0], "DefaultCollection") {
+			parts = parts[1:]
+		}
+	default:
+		return "", "", "", false
+	}
+	// [project/]_git/[_full/|_optimized/]repo
+	git := slices.Index(parts, "_git")
+	if git < 0 || git > 1 || org == "" || strings.Contains(org, ".") {
+		return "", "", "", false
+	}
+	rest := parts[git+1:]
+	if len(rest) == 2 && (rest[0] == "_full" || rest[0] == "_optimized") {
+		rest = rest[1:]
+	}
+	if len(rest) != 1 {
+		return "", "", "", false
+	}
+	repo = rest[0]
+	project = repo
+	if git == 1 {
+		project = parts[0]
+	}
+	return org, project, repo, true
 }
 
 // sshHosts maps the hosts that cloud Git services accept SSH on, e.g. through
@@ -248,5 +303,8 @@ func parseRemote(remote string) (host, path string, ssh bool) {
 		host = host[at+1:]
 	}
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]") // [host]:path
+	if p, err := url.PathUnescape(path); err == nil {
+		path = p // as url.Parse gives it for URLs: My%20Project → My Project
+	}
 	return host, path, true
 }
