@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -236,7 +237,7 @@ func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Rep
 func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
 	ctx := payload.Context{
 		RepoRoot:    repo.Root,
-		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin")),
+		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin"), sshHostName),
 		AuthorEmail: authorEmail(repo.Root),
 		CLIVersion:  version,
 		Prompts:     cfg.Prompts,
@@ -270,6 +271,27 @@ func gitOutput(dir string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// sshHostName resolves an SSH host alias from ~/.ssh/config to the host it
+// connects to, as ssh would: `ssh -G` prints the resolved configuration without
+// connecting. It gives "" if ssh isn't available or doesn't answer in time.
+func sshHostName(alias string) string {
+	if alias == "" || strings.HasPrefix(alias, "-") {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ssh", "-G", "--", alias).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if name, ok := strings.CutPrefix(line, "hostname "); ok {
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
 }
 
 func shortID(id string) string {

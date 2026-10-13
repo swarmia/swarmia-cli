@@ -10,7 +10,9 @@
 package payload
 
 import (
+	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -156,22 +158,153 @@ func mainModel(totals []usage.Totals) string {
 	return best
 }
 
-// RepoSlug turns a remote URL into host/owner/name, e.g.
-// git@github.com:acme/app.git → github.com/acme/app. A remote on the local
-// filesystem (a path or file:// URL) gives "": it names no repository Swarmia
-// could know, and would reveal a local path.
-func RepoSlug(remote string) string {
-	remote = strings.TrimSpace(remote)
-	if remote == "" || strings.HasPrefix(remote, "/") || strings.HasPrefix(remote, ".") ||
-		strings.HasPrefix(remote, "~") || strings.HasPrefix(remote, "file:") || filepath.IsAbs(remote) {
+// RepoSlug turns a remote URL into host/path, e.g. git@github.com:acme/app.git
+// → github.com/acme/app, so every clone of a repository gives the same slug
+// whichever way it was cloned. It keeps the host, lowercased, and the path, with
+// credentials, port, query and a trailing .git or / dropped. The path isn't
+// otherwise interpreted: GitLab subgroups and self-hosted instances under a path
+// prefix keep all of it, and the server matches it to the repositories it knows.
+//
+// sshHostName, if not nil, resolves the host of an SSH remote, which may be an
+// alias from ~/.ssh/config (git@github-work:acme/app), to the real host name.
+// Hosts that the cloud services accept SSH on besides their own (ssh.github.com)
+// are mapped back to it.
+//
+// A remote on the local filesystem (a path or file:// URL) gives "": it names
+// no repository Swarmia could know, and would reveal a local path.
+func RepoSlug(remote string, sshHostName func(alias string) string) string {
+	host, path, ssh := parseRemote(strings.TrimSpace(remote))
+	if host == "" {
 		return ""
 	}
-	s := strings.TrimSuffix(remote, ".git")
-	for _, prefix := range []string{"https://", "http://", "ssh://", "git://"} {
-		s = strings.TrimPrefix(s, prefix)
+	if ssh && sshHostName != nil {
+		if h := sshHostName(host); h != "" {
+			host = h
+		}
 	}
-	if at := strings.Index(s, "@"); at >= 0 {
-		s = s[at+1:]
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if canonical, ok := sshHosts[host]; ok {
+		host = canonical
 	}
-	return strings.Replace(s, ":", "/", 1)
+	var parts []string
+	for _, p := range strings.Split(path, "/") {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if n := len(parts); n > 0 {
+		parts[n-1] = strings.TrimSuffix(parts[n-1], ".git")
+		if parts[n-1] == "" {
+			parts = parts[:n-1]
+		}
+	}
+	if org, project, repo, ok := azureDevOps(host, parts); ok {
+		host, parts = "dev.azure.com", []string{org, project, repo}
+	}
+	if host == "" || len(parts) == 0 {
+		return ""
+	}
+	return host + "/" + strings.Join(parts, "/")
+}
+
+// azureDevOps reads an Azure DevOps Services remote, whose HTTPS and SSH URLs
+// name a repository differently, so that both give dev.azure.com/org/project/repo:
+//
+//	https://dev.azure.com/org/project/_git/repo
+//	https://org.visualstudio.com/[DefaultCollection/]project/_git/repo
+//	git@ssh.dev.azure.com:v3/org/project/repo
+//	org@vs-ssh.visualstudio.com:v3/org/project/repo
+//
+// An HTTPS URL may leave out the project when the repository has its name, and
+// put _full/ or _optimized/ after _git/. (Azure DevOps Server keeps the same
+// path over both, so it needs nothing.)
+func azureDevOps(host string, parts []string) (org, project, repo string, ok bool) {
+	switch {
+	case host == "ssh.dev.azure.com" || host == "vs-ssh.visualstudio.com":
+		if len(parts) == 4 && parts[0] == "v3" {
+			return parts[1], parts[2], parts[3], true
+		}
+		return "", "", "", false
+	case host == "dev.azure.com":
+		if len(parts) == 0 {
+			return "", "", "", false
+		}
+		org, parts = parts[0], parts[1:]
+	case strings.HasSuffix(host, ".visualstudio.com"):
+		org = strings.TrimSuffix(host, ".visualstudio.com")
+		if len(parts) > 0 && strings.EqualFold(parts[0], "DefaultCollection") {
+			parts = parts[1:]
+		}
+	default:
+		return "", "", "", false
+	}
+	// [project/]_git/[_full/|_optimized/]repo
+	git := slices.Index(parts, "_git")
+	if git < 0 || git > 1 || org == "" || strings.Contains(org, ".") {
+		return "", "", "", false
+	}
+	rest := parts[git+1:]
+	if len(rest) == 2 && (rest[0] == "_full" || rest[0] == "_optimized") {
+		rest = rest[1:]
+	}
+	if len(rest) != 1 {
+		return "", "", "", false
+	}
+	repo = rest[0]
+	project = repo
+	if git == 1 {
+		project = parts[0]
+	}
+	return org, project, repo, true
+}
+
+// sshHosts maps the hosts that cloud Git services accept SSH on, e.g. through
+// port 443, to the service's own host.
+var sshHosts = map[string]string{
+	"ssh.github.com":       "github.com",
+	"altssh.gitlab.com":    "gitlab.com",
+	"altssh.bitbucket.org": "bitbucket.org",
+}
+
+// parseRemote splits a remote URL into its host and path, and reports whether
+// it's reached over SSH. It reads the forms git accepts: scheme://[user@]host
+// [:port]/path and the scp-like [user@]host:path. A local path gives no host.
+func parseRemote(remote string) (host, path string, ssh bool) {
+	if remote == "" || filepath.IsAbs(remote) {
+		return "", "", false
+	}
+	if scheme, rest, ok := strings.Cut(remote, "://"); ok {
+		u, err := url.Parse(remote)
+		if err != nil {
+			// e.g. a userinfo with characters url.Parse refuses; drop it by hand
+			authority, p, _ := strings.Cut(rest, "/")
+			if at := strings.LastIndex(authority, "@"); at >= 0 {
+				authority = authority[at+1:]
+			}
+			if u, err = url.Parse(scheme + "://" + authority + "/" + p); err != nil {
+				return "", "", false
+			}
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "ssh", "git+ssh", "ssh+git":
+			return u.Hostname(), u.Path, true
+		case "https", "http", "git":
+			return u.Hostname(), u.Path, false
+		}
+		return "", "", false // file:// or a transport we don't know
+	}
+	// scp-like: a colon before any slash. Without one it's a local path.
+	colon := strings.Index(remote, ":")
+	if colon < 0 || strings.Contains(remote[:colon], "/") {
+		return "", "", false
+	}
+	host, path = remote[:colon], remote[colon+1:]
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]") // [host]:path
+	if p, err := url.PathUnescape(path); err == nil {
+		path = p // as url.Parse gives it for URLs: My%20Project → My Project
+	}
+	return host, path, true
 }
