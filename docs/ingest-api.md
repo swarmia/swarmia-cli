@@ -171,7 +171,7 @@ cap the decompressed size, see Limits).
 | `started_at` | string, RFC 3339 UTC | First event of the session. |
 | `ended_at` | string, RFC 3339 UTC | Last event seen so far (not necessarily the end — see `ended`). |
 | `ended` | boolean | Whether the agent reported the session's end. A later version may flip it back to `false` if the session is resumed. |
-| `prompts` | array of Prompt | The developer's prompts in order. Empty when withheld. |
+| `prompts` | array of Prompt | The developer's prompts in order. Empty when withheld. Messages the agent submits itself (a background task's notification, a subagent's report) aren't prompts and aren't sent. |
 | `prompts_withheld` | boolean | `true` if the developer or the repository configuration opted out of sharing prompts. Then `prompts` is empty — that is not the same as a session without prompts. |
 | `tools` | array of Tool | The agent's tool calls, in order (only completed calls, successful or failed). |
 | `commits` | array of CommitAttribution | Line attribution, one entry per (commit, file). Only commits that were **pushed** (contained in a remote-tracking branch on the developer's machine) when the payload was built. Empty if nothing has been pushed yet. |

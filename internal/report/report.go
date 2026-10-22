@@ -300,7 +300,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 			}
 			s.Ended = false // resumed
 		case "UserPromptSubmit":
-			s.Prompts = append(s.Prompts, Prompt{At: at, Text: ev.Prompt})
+			if !ev.Injected {
+				s.Prompts = append(s.Prompts, Prompt{At: at, Text: ev.Prompt})
+			}
 			if s.Model == "" && ev.Model != "" { // Codex sends the model with every event
 				s.Model = ev.Model
 			}

@@ -40,9 +40,12 @@ type Agent struct {
 	// PostToolUseFailure, so a PostToolUse is a success. Other agents send both
 	// as PostToolUse.
 	reportsFailures bool
-	isEditTool      func(name string) bool
-	isShellTool     func(name string) bool
-	edits           func(payload []byte, root string) []attribution.Edit
+	// injectedPrompt matches a prompt the agent submitted itself, such as a
+	// background task's notification, which its prompt hook also sees.
+	injectedPrompt *regexp.Regexp
+	isEditTool     func(name string) bool
+	isShellTool    func(name string) bool
+	edits          func(payload []byte, root string) []attribution.Edit
 }
 
 var ClaudeCode = &Agent{
@@ -53,6 +56,7 @@ var ClaudeCode = &Agent{
 	userDir:         claudeConfigDir,
 	Transcript:      usage.ClaudeTranscript,
 	reportsFailures: true,
+	injectedPrompt:  claudeInjectedPrompt,
 	isEditTool:      attribution.IsClaudeEditTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
 	edits: func(payload []byte, root string) []attribution.Edit {
@@ -75,6 +79,11 @@ var Codex = &Agent{
 	isShellTool:     func(name string) bool { return name == "Bash" },
 	edits:           attribution.CodexEdits,
 }
+
+// claudeInjectedPrompt matches a prompt made only of the blocks Claude Code
+// submits for a background task (<task-notification>) or a subagent reporting
+// back (<agent-message>).
+var claudeInjectedPrompt = regexp.MustCompile(`^\s*(?:<(?:task-notification|agent-message)\b[^>]*>(?s:.*?)</(?:task-notification|agent-message)>\s*)+$`)
 
 // claudeConfigDir is Claude Code's user configuration directory.
 func claudeConfigDir() (string, error) {
@@ -120,6 +129,8 @@ type Event struct {
 	TranscriptPath string
 	Model          string
 	Prompt         string
+	// Injected is set for a prompt the agent submitted itself, not the person.
+	Injected bool
 	// Tool is the tool call a tool event is about.
 	Tool Tool
 }
@@ -181,6 +192,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 	}
 	ev = Event{Name: p.HookEventName, SessionID: p.SessionID, TranscriptPath: p.TranscriptPath,
 		Model: p.Model, Prompt: p.Prompt}
+	ev.Injected = a.injectedPrompt != nil && a.injectedPrompt.MatchString(p.Prompt)
 	if p.ToolName != "" {
 		ev.Tool = Tool{Name: p.ToolName, UseID: p.ToolUseID, File: p.ToolInput.FilePath,
 			Edits: a.isEditTool(p.ToolName), Shell: a.isShellTool(p.ToolName)}
