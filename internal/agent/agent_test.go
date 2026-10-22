@@ -27,10 +27,28 @@ func TestParse(t *testing.T) {
 			Event{Name: "UserPromptSubmit", SessionID: "s", TranscriptPath: "/t.jsonl", Prompt: "hi"}},
 		{"claude edit", ClaudeCode,
 			`{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Edit","tool_use_id":"t1","tool_input":{"file_path":"/r/a.go"}}`,
-			Event{Name: "PostToolUse", SessionID: "s", Tool: Tool{Name: "Edit", UseID: "t1", File: "/r/a.go", Edits: true}}},
+			Event{Name: "PostToolUse", SessionID: "s", Tool: Tool{Name: "Edit", UseID: "t1", File: "/r/a.go", Edits: true, Status: StatusOK}}},
 		{"claude shell", ClaudeCode,
 			`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_use_id":"t2","tool_input":{"command":"ls"}}`,
 			Event{Name: "PreToolUse", SessionID: "s", Tool: Tool{Name: "Bash", UseID: "t2", Command: "ls", Shell: true}}},
+		{"claude shell, nonzero exit counted as success", ClaudeCode,
+			`{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"grep x f"},"tool_response":{"stdout":"","interrupted":false,"returnCodeInterpretation":"No matches found"}}`,
+			Event{Name: "PostToolUse", Tool: Tool{Name: "Bash", Command: "grep x f", Shell: true, Status: StatusOK}}},
+		{"claude shell interrupted", ClaudeCode,
+			`{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"sleep 9"},"tool_response":{"stdout":"","interrupted":true}}`,
+			Event{Name: "PostToolUse", Tool: Tool{Name: "Bash", Command: "sleep 9", Shell: true, Status: StatusInterrupted}}},
+		{"claude shell failed", ClaudeCode,
+			`{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"make"},"error":"Exit code 2\nmake: *** [test] Error 1","is_interrupt":false}`,
+			Event{Name: "PostToolUseFailure", Tool: Tool{Name: "Bash", Command: "make", Shell: true, Status: StatusFailed, ExitCode: ptr(2)}}},
+		{"claude shell failed without an exit code", ClaudeCode,
+			`{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"make"},"error":"Command timed out"}`,
+			Event{Name: "PostToolUseFailure", Tool: Tool{Name: "Bash", Command: "make", Shell: true, Status: StatusFailed}}},
+		{"claude shell interrupted by the user", ClaudeCode,
+			`{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"make"},"error":"Exit code 130","is_interrupt":true}`,
+			Event{Name: "PostToolUseFailure", Tool: Tool{Name: "Bash", Command: "make", Shell: true, Status: StatusInterrupted, ExitCode: ptr(130)}}},
+		{"claude edit failed: not a shell, so no exit code", ClaudeCode,
+			`{"hook_event_name":"PostToolUseFailure","tool_name":"Edit","tool_input":{"file_path":"/r/a.go"},"error":"Exit code 1"}`,
+			Event{Name: "PostToolUseFailure", Tool: Tool{Name: "Edit", File: "/r/a.go", Edits: true, Status: StatusFailed}}},
 		{"codex patch: its command is the patch", Codex,
 			`{"hook_event_name":"PostToolUse","session_id":"s","model":"gpt","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch"}}`,
 			Event{Name: "PostToolUse", SessionID: "s", Model: "gpt", Tool: Tool{Name: "apply_patch", Edits: true}}},
@@ -47,6 +65,8 @@ func TestParse(t *testing.T) {
 		t.Error("parsed a JSON string")
 	}
 }
+
+func ptr(n int) *int { return &n }
 
 // Claude Code's project is the directory it passes; Codex's is the enclosing
 // repository, wherever in it the session runs.

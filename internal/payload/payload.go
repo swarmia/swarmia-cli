@@ -51,10 +51,12 @@ type Prompt struct {
 }
 
 type Tool struct {
-	At      time.Time `json:"at"`
-	Name    string    `json:"name"`
-	File    string    `json:"file,omitempty"`
-	Command string    `json:"command,omitempty"`
+	At       time.Time `json:"at"`
+	Name     string    `json:"name"`
+	File     string    `json:"file,omitempty"`
+	Command  string    `json:"command,omitempty"`
+	Status   string    `json:"status,omitempty"`
+	ExitCode *int      `json:"exit_code,omitempty"`
 }
 
 type Commit struct {
@@ -98,7 +100,8 @@ func Build(s *report.Session, ctx Context) Payload {
 		}
 	}
 	for _, t := range s.Tools {
-		tool := Tool{At: t.At, Name: t.Name, File: relativePath(ctx.RepoRoot, t.File)}
+		tool := Tool{At: t.At, Name: t.Name, File: relativePath(ctx.RepoRoot, t.File),
+			Status: t.Status, ExitCode: t.ExitCode}
 		if t.Command != "" {
 			tool.Command = ctx.maskLocal(redact.Command(t.Command))
 		}

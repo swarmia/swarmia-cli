@@ -77,6 +77,26 @@ func TestBuildMasksLocalPaths(t *testing.T) {
 	}
 }
 
+func TestBuildSendsToolStatus(t *testing.T) {
+	s := session()
+	code := 1
+	s.Tools = []report.Tool{
+		{At: at, Name: "Bash", Command: "go test ./...", Status: "failed", ExitCode: &code},
+		{At: at, Name: "Edit", File: "/src/app/x.go", Status: "ok"},
+		{At: at, Name: "apply_patch"}, // an agent that doesn't say
+	}
+	data, err := json.Marshal(Build(s, Context{RepoRoot: "/src/app"}).Tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"at":"2026-10-01T12:00:00Z","name":"Bash","command":"go test ./...","status":"failed","exit_code":1},` +
+		`{"at":"2026-10-01T12:00:00Z","name":"Edit","file":"x.go","status":"ok"},` +
+		`{"at":"2026-10-01T12:00:00Z","name":"apply_patch"}]`
+	if string(data) != want {
+		t.Errorf("tools =\n%s\nwant\n%s", data, want)
+	}
+}
+
 // Headless sessions don't report their model at start; the main session's
 // usage names it.
 func TestBuildFallsBackToTheUsageModel(t *testing.T) {

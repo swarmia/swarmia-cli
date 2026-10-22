@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/codex"
@@ -34,20 +36,25 @@ type Agent struct {
 	// directory without saying where the project is: their project is the
 	// enclosing repository.
 	hooksAtRepoRoot bool
+	// reportsFailures is set for agents that send failed tool calls as
+	// PostToolUseFailure, so a PostToolUse is a success. Other agents send both
+	// as PostToolUse.
+	reportsFailures bool
 	isEditTool      func(name string) bool
 	isShellTool     func(name string) bool
 	edits           func(payload []byte, root string) []attribution.Edit
 }
 
 var ClaudeCode = &Agent{
-	Name:        "claude-code",
-	Title:       "Claude Code",
-	ConfigDir:   ".claude",
-	hooksFiles:  map[Scope]string{ScopeProject: "settings.json", ScopeLocal: "settings.local.json", ScopeUser: "settings.json"},
-	userDir:     claudeConfigDir,
-	Transcript:  usage.ClaudeTranscript,
-	isEditTool:  attribution.IsClaudeEditTool,
-	isShellTool: func(name string) bool { return name == "Bash" },
+	Name:            "claude-code",
+	Title:           "Claude Code",
+	ConfigDir:       ".claude",
+	hooksFiles:      map[Scope]string{ScopeProject: "settings.json", ScopeLocal: "settings.local.json", ScopeUser: "settings.json"},
+	userDir:         claudeConfigDir,
+	Transcript:      usage.ClaudeTranscript,
+	reportsFailures: true,
+	isEditTool:      attribution.IsClaudeEditTool,
+	isShellTool:     func(name string) bool { return name == "Bash" },
 	edits: func(payload []byte, root string) []attribution.Edit {
 		if e, ok := attribution.ClaudeEdit(payload, root); ok {
 			return []attribution.Edit{e}
@@ -131,7 +138,25 @@ type Tool struct {
 	// Shell is set for shell tools, whose changes are found by snapshotting
 	// the worktree around the call.
 	Shell bool
+	// Status is how a finished call ended: StatusOK, StatusFailed or
+	// StatusInterrupted, or empty if the agent doesn't say.
+	Status string
+	// ExitCode is a failed shell command's exit status, when the agent
+	// reports it. Successful calls have none: an agent may count some
+	// nonzero exits (grep finding nothing) as success.
+	ExitCode *int
 }
+
+// Tool call statuses.
+const (
+	StatusOK          = "ok"
+	StatusFailed      = "failed"
+	StatusInterrupted = "interrupted"
+)
+
+// exitCodeRE matches the exit status Claude Code puts at the start of a failed
+// shell command's error.
+var exitCodeRE = regexp.MustCompile(`^Exit code (-?\d+)`)
 
 // Parse reads a hook payload. ok is false if it isn't a JSON object.
 func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
@@ -147,6 +172,9 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 			FilePath string     `json:"file_path"`
 			Command  textOrNone `json:"command"`
 		} `json:"tool_input"`
+		ToolResponse json.RawMessage `json:"tool_response"`
+		Error        string          `json:"error"`
+		IsInterrupt  bool            `json:"is_interrupt"`
 	}
 	if json.Unmarshal(payload, &p) != nil {
 		return Event{}, false
@@ -159,8 +187,38 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		if !ev.Tool.Edits { // an edit tool's command, if any, is its patch
 			ev.Tool.Command = string(p.ToolInput.Command)
 		}
+		if a.reportsFailures {
+			ev.Tool.Status, ev.Tool.ExitCode = toolStatus(p.HookEventName, p.ToolResponse, p.Error, p.IsInterrupt, ev.Tool.Shell)
+		}
 	}
 	return ev, true
+}
+
+// toolStatus reads how a finished tool call ended from an agent that reports
+// failures separately (see Agent.reportsFailures).
+func toolStatus(hook string, response json.RawMessage, errText string, interrupt, shell bool) (string, *int) {
+	switch hook {
+	case "PostToolUse":
+		var r struct {
+			Interrupted bool `json:"interrupted"`
+		}
+		if json.Unmarshal(response, &r) == nil && r.Interrupted {
+			return StatusInterrupted, nil
+		}
+		return StatusOK, nil
+	case "PostToolUseFailure":
+		var code *int
+		if m := exitCodeRE.FindStringSubmatch(errText); shell && m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				code = &n
+			}
+		}
+		if interrupt {
+			return StatusInterrupted, code
+		}
+		return StatusFailed, code
+	}
+	return "", nil
 }
 
 // textOrNone is a string field that agents may also send as something else
