@@ -89,6 +89,9 @@ type Tool struct {
 	Name    string    `json:"name"`
 	File    string    `json:"file,omitempty"`
 	Command string    `json:"command,omitempty"`
+	// Status and ExitCode are as in agent.Tool.
+	Status   string `json:"status,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
 }
 
 // Edit is one change the agent made to a file: hunks in diff-style lines (see
@@ -309,7 +312,8 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 				root = rec.Git.Root
 			}
 			edits := ag.Edits(rec.Event, root)
-			tool := Tool{At: at, Name: ev.Tool.Name, File: ev.Tool.File, Command: ev.Tool.Command}
+			tool := Tool{At: at, Name: ev.Tool.Name, File: ev.Tool.File, Command: ev.Tool.Command,
+				Status: ev.Tool.Status, ExitCode: ev.Tool.ExitCode}
 			if tool.File == "" && len(edits) > 0 { // e.g. a patch, which names its files inside
 				tool.File = filepath.Join(root, filepath.FromSlash(edits[0].Path))
 			}

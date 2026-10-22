@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -211,7 +212,7 @@ func TestProcessLeavesNewerFormatsAlone(t *testing.T) {
 	writeLog(t, logPath, f.recs)
 
 	newerRecord := `{"format":2,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-2"},"from_the_future":[1,2]}` + "\n"
-	newerSession := `{"format":2,"id":"sess-3","agent":"claude-code","from_the_future":true}`
+	newerSession := fmt.Sprintf(`{"format":%d,"id":"sess-3","agent":"claude-code","from_the_future":true}`, SessionFormat+1)
 	ofNewerSession := `{"format":1,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-3","hook_event_name":"Stop"}}` + "\n"
 	sessions := filepath.Join(state, "sessions")
 	if err := os.MkdirAll(sessions, 0o700); err != nil {
@@ -239,7 +240,7 @@ func TestProcessLeavesNewerFormatsAlone(t *testing.T) {
 			t.Errorf("run %d: newer session rewritten: %s", run, got)
 		}
 	}
-	if got, _ := os.ReadFile(filepath.Join(sessions, "sess-1.json")); !strings.Contains(string(got), `"format":1`) {
+	if got, _ := os.ReadFile(filepath.Join(sessions, "sess-1.json")); !strings.Contains(string(got), fmt.Sprintf(`"format":%d`, SessionFormat)) {
 		t.Errorf("saved session lacks its format: %.80s…", got)
 	}
 }

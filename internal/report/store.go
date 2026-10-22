@@ -23,7 +23,7 @@ const Retention = 30 * 24 * time.Hour
 // worktree does, and each may have its own swarmia-cli), so bump it when an
 // older binary would lose or misread something in a new session file: older
 // binaries then leave such sessions, and their events, alone.
-const SessionFormat = 1
+const SessionFormat = 2 // 2: tools carry status and exit_code
 
 // Store keeps one JSON file per session under Dir. Files are owner-only: they
 // hold prompts and the agent's code.
