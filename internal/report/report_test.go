@@ -121,6 +121,10 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 
 	f.log(t0, map[string]any{"hook_event_name": "SessionStart", "model": "claude-test"})
 	f.log(t0.Add(time.Second), map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "add helpers"})
+	// Claude Code submits a background task's notification as a prompt: not
+	// the person's.
+	f.log(t0.Add(2*time.Second), map[string]any{"hook_event_name": "UserPromptSubmit",
+		"prompt": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"})
 
 	// The agent appends five functions to app.go...
 	agentCode := lines(5, "func helper%d() string { return \"helper result\" }")
