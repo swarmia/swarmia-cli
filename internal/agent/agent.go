@@ -127,8 +127,11 @@ type Event struct {
 	Name           string
 	SessionID      string
 	TranscriptPath string
-	Model          string
-	Prompt         string
+	// Cwd is the agent's working directory when it sent the event: where a
+	// shell command runs.
+	Cwd    string
+	Model  string
+	Prompt string
 	// Injected is set for a prompt the agent submitted itself, not the person.
 	Injected bool
 	// Tool is the tool call a tool event is about.
@@ -175,6 +178,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		HookEventName  string `json:"hook_event_name"`
 		SessionID      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
+		Cwd            string `json:"cwd"`
 		Model          string `json:"model"`
 		Prompt         string `json:"prompt"`
 		ToolName       string `json:"tool_name"`
@@ -191,7 +195,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		return Event{}, false
 	}
 	ev = Event{Name: p.HookEventName, SessionID: p.SessionID, TranscriptPath: p.TranscriptPath,
-		Model: p.Model, Prompt: p.Prompt}
+		Cwd: p.Cwd, Model: p.Model, Prompt: p.Prompt}
 	ev.Injected = a.injectedPrompt != nil && a.injectedPrompt.MatchString(p.Prompt)
 	if p.ToolName != "" {
 		ev.Tool = Tool{Name: p.ToolName, UseID: p.ToolUseID, File: p.ToolInput.FilePath,

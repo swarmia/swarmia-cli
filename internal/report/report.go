@@ -41,9 +41,12 @@ type Options struct {
 type Session struct {
 	// Format is the session file's format (see SessionFormat); 0 in files
 	// from before the field, which are format 1.
-	Format    int       `json:"format,omitempty"`
-	ID        string    `json:"id"`
-	Agent     string    `json:"agent"`
+	Format int    `json:"format,omitempty"`
+	ID     string `json:"id"`
+	Agent  string `json:"agent"`
+	// Root is the worktree the session was started in, if it was started in
+	// one.
+	Root      string    `json:"root,omitempty"`
 	Model     string    `json:"model,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at"`
@@ -68,13 +71,15 @@ type Session struct {
 	// payloads); Usage holds the token counts read from it.
 	TranscriptPath string         `json:"transcript_path,omitempty"`
 	Usage          *usage.Tracker `json:"usage,omitempty"`
-	// Delivery records the last payload sent to Swarmia for this session.
-	Delivery *Delivery `json:"delivery,omitempty"`
+	// Deliveries records the last payload sent to Swarmia for this session,
+	// per delivery target (see payload.Target): each gets the part of the
+	// session in its repositories.
+	Deliveries map[string]*Delivery `json:"deliveries,omitempty"`
 }
 
 // Delivery is the outcome of the last delivery attempt that reached the
-// server for a session. Hash identifies the payload, so an unchanged session
-// isn't sent again; Rejected holds the server's reason if it refused it.
+// server for a session's part. Hash identifies the payload, so an unchanged
+// part isn't sent again; Rejected holds the server's reason if it refused it.
 type Delivery struct {
 	Hash     string    `json:"hash"`
 	SentAt   time.Time `json:"sent_at"`
@@ -87,9 +92,12 @@ type Prompt struct {
 }
 
 // Tool is one tool call. File and Command are set when the tool has them.
+// Root is the worktree it worked in: its file's, else its working
+// directory's; "" if neither is in a repository.
 type Tool struct {
 	At      time.Time `json:"at"`
 	Name    string    `json:"name"`
+	Root    string    `json:"root,omitempty"`
 	File    string    `json:"file,omitempty"`
 	Command string    `json:"command,omitempty"`
 	// Status and ExitCode are as in agent.Tool.
@@ -220,9 +228,19 @@ func (s *Session) AILinesIn(root string) int {
 	return n
 }
 
-// upgrade brings a session stored in format 2 or earlier up to date: its
-// edits, commits and AI lines were all in the project's worktree, root.
+// upgrade brings a session stored in format 2 or earlier up to date: it was
+// started in the project's worktree, root, and its edits, commits and AI
+// lines were all there, as were its tool calls without a file elsewhere.
 func (s *Session) upgrade(root string) {
+	if s.Format >= 3 || root == "" {
+		return
+	}
+	s.Root = root
+	for i, t := range s.Tools {
+		if t.File == "" || insideDir(root, t.File) {
+			s.Tools[i].Root = root
+		}
+	}
 	for i := range s.Edits {
 		if s.Edits[i].Root == "" {
 			s.Edits[i].Root = root
@@ -299,7 +317,7 @@ func sortedSessions(m map[string]*Session) []*Session {
 // (the record's, else fallbackRoot).
 func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot string) {
 	seen := map[string]bool{}
-	locate := locator()
+	loc := newLocator()
 	for _, rec := range recs {
 		ag := agent.OfRecord(rec.Agent)
 		if ag == nil {
@@ -335,6 +353,13 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		if ev.TranscriptPath != "" {
 			s.TranscriptPath = ev.TranscriptPath
 		}
+		root := fallbackRoot
+		if rec.Git != nil && rec.Git.Root != "" {
+			root = rec.Git.Root
+		}
+		if s.Root == "" {
+			s.Root = root
+		}
 		switch rec.Snapshot {
 		case events.SnapshotOverBudget, events.SnapshotFailed, events.SnapshotGitOperation:
 			s.ShellUnrecorded++
@@ -355,15 +380,19 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		case "SessionEnd":
 			s.Ended = true
 		case "PostToolUse", "PostToolUseFailure":
-			root := fallbackRoot
-			if rec.Git != nil && rec.Git.Root != "" {
-				root = rec.Git.Root
-			}
-			edits := ag.Edits(rec.Event, locate)
+			edits := ag.Edits(rec.Event, loc.locate)
 			tool := Tool{At: at, Name: ev.Tool.Name, File: ev.Tool.File, Command: ev.Tool.Command,
 				Status: ev.Tool.Status, ExitCode: ev.Tool.ExitCode}
 			if tool.File == "" && len(edits) > 0 { // e.g. a patch, which names its files inside
 				tool.File = filepath.Join(edits[0].Root, filepath.FromSlash(edits[0].Path))
+			}
+			switch {
+			case filepath.IsAbs(tool.File):
+				tool.Root, _, _ = loc.locate(filepath.Clean(tool.File))
+			case ev.Cwd != "":
+				tool.Root = loc.dirRoot(ev.Cwd)
+			default:
+				tool.Root = root
 			}
 			s.Tools = append(s.Tools, tool)
 			for _, e := range edits {
@@ -395,24 +424,43 @@ func encode(hunks []attribution.Hunk) [][]string {
 	return out
 }
 
-// locator places a file in the worktree of the repository it is in, so edits
-// count in any repository, not only the project's. Paths are resolved through
-// symlinks first, as worktree roots are; the part of a path that no longer
-// exists (a file or directory deleted since) is kept as it is.
-func locator() attribution.Locator {
-	roots := map[string]string{} // directory -> its worktree root, "" for none
-	return func(path string) (string, string, bool) {
-		path = resolveExisting(path)
-		dir := filepath.Dir(path)
-		root, ok := roots[dir]
-		if !ok {
-			if repo, err := gitrepo.Find(dir); err == nil {
-				root = repo.Root
-			}
-			roots[dir] = root
+// locator places files and directories in the worktree of the repository
+// they are in, so edits and tool calls count in any repository, not only the
+// project's. Paths are resolved through symlinks first, as worktree roots
+// are; the part of a path that no longer exists (a file or directory deleted
+// since) is kept as it is.
+type locator struct {
+	roots map[string]string // resolved directory -> its worktree root, "" for none
+}
+
+func newLocator() *locator { return &locator{roots: map[string]string{}} }
+
+// locate is an attribution.Locator.
+func (l *locator) locate(path string) (string, string, bool) {
+	path = resolveExisting(path)
+	return attribution.Within(l.rootOf(filepath.Dir(path)))(path)
+}
+
+// dirRoot is the worktree a directory is in, "" if none.
+func (l *locator) dirRoot(dir string) string {
+	return l.rootOf(resolveExisting(filepath.Clean(dir)))
+}
+
+func (l *locator) rootOf(dir string) string {
+	root, ok := l.roots[dir]
+	if !ok {
+		if repo, err := gitrepo.Find(dir); err == nil {
+			root = repo.Root
 		}
-		return attribution.Within(root)(path)
+		l.roots[dir] = root
 	}
+	return root
+}
+
+// insideDir reports whether path is dir or below it.
+func insideDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolveExisting resolves symlinks in the longest part of path that exists.

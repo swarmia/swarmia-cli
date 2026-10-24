@@ -50,8 +50,7 @@ Everything assumes the project dir is exactly one repo:
 
 ## Delivery
 
-The contract in `docs/ingest-api.md` describes the target shape; the client
-doesn't implement it yet.
+The contract is in `docs/ingest-api.md`.
 
 ### Options considered
 
@@ -177,12 +176,12 @@ section in `docs/optimization-roadmap.md` for the same issues.
 
 ## Next steps
 
-1. Resolve each edit's repo in log-hook and fold; attribute per repo; make
-   `process` work outside a repo. E2E scenarios: launch in a parent dir,
-   edit two child repos, commit in both; a single-repo session editing a
-   sibling.
-2. Build payloads in the new shape, grouped by delivery target, with
-   per-target delivery state.
+1. ~~Resolve each edit's repo in fold; attribute per repo; make `process`
+   work outside a repo.~~ Done.
+2. ~~Build payloads in the new shape, grouped by delivery target, with
+   per-target delivery state.~~ Done.
 3. Snapshot tiers 1 and 2, recording which repos each command covered.
-4. Sampled background sweep while dogfooding; feed the misses back into
+4. E2E scenarios: launch in a parent dir, edit two child repos, commit in
+   both; a single-repo session editing a sibling.
+5. Sampled background sweep while dogfooding; feed the misses back into
    tests and tier rules.

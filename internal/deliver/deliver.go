@@ -5,10 +5,13 @@
 // per-session results is still honoured, should the endpoint ever return one.)
 //
 // Each session is sent as its complete current payload; the server keeps the
-// latest version per session. A session is sent again only when its payload
-// changes (more activity, a commit pushed), at most every MinResendInterval
-// unless it has just ended. Failures back off; nothing is lost, since the
-// sessions stay in the local store until retention.
+// latest version per session. A session that worked in repositories
+// configured with different tokens is split into one part per delivery target
+// (see payload.Build), each sent, tracked and backed off on its own. A part is
+// sent again only when its payload changes (more activity, a commit pushed),
+// at most every MinResendInterval unless the session has just ended. Failures
+// back off; nothing is lost, since the sessions stay in the local store until
+// retention.
 //
 // The server can also ask this CLI version to upgrade: with a notice in a
 // 2xx reply (it's deprecated, still accepted), or by refusing it with 426
@@ -98,10 +101,8 @@ type Result struct {
 
 // Options configures Deliver.
 type Options struct {
-	Endpoint   string
-	Token      string
 	CLIVersion string
-	Context    payload.Context // shared by every session's payload
+	Context    payload.Context // builds each session's parts, and says where they go
 	StateDir   string          // where delivery.json (backoff state) lives
 	Client     *http.Client    // nil uses a client with a 30 s timeout
 	Now        time.Time
@@ -115,15 +116,25 @@ type Outcome struct {
 	Skipped                  string // why nothing was attempted, if so
 }
 
-// state is the backoff bookkeeping kept across runs.
+// state is the delivery bookkeeping kept across runs.
 type state struct {
-	Failures    int       `json:"failures"`
-	NextAttempt time.Time `json:"next_attempt"`
-	LastError   string    `json:"last_error,omitempty"`
+	// Targets holds each delivery target's backoff, by payload.Target.ID.
+	Targets map[string]*backoff `json:"targets,omitempty"`
 	// Upgrades holds what the server said about CLI versions, by version:
 	// worktrees with different versions share this state.
 	Upgrades map[string]Upgrade `json:"upgrades,omitempty"`
 }
+
+// backoff is one target's failed attempts.
+type backoff struct {
+	Failures    int       `json:"failures"`
+	NextAttempt time.Time `json:"next_attempt"`
+	LastError   string    `json:"last_error,omitempty"`
+}
+
+// NoToken is Outcome.Skipped when no repository any session worked in has a
+// token configured.
+const NoToken = "no token configured"
 
 // ErrUpgradeRequired is the server refusing this CLI version.
 var ErrUpgradeRequired = errors.New("Swarmia no longer accepts sessions from this swarmia-cli version")
@@ -163,13 +174,19 @@ func (st *state) setUpgrade(version string, u *Upgrade, now time.Time) bool {
 	return true
 }
 
-// Deliver sends the sessions whose payloads changed since they were last
-// delivered, updating each one's Delivery. Sessions are only modified for
-// attempts that reached the server and got an answer about them.
+// Deliver sends the parts of sessions whose payloads changed since they were
+// last delivered, updating each session's Deliveries. Sessions are only
+// modified for attempts that reached the server and got an answer about them.
+// A target that fails backs off without holding up the others; the errors are
+// returned together.
 func Deliver(sessions []*report.Session, opts Options) (Outcome, error) {
 	var out Outcome
-	if opts.Token == "" {
-		out.Skipped = "no token configured"
+	due, targets, err := dueParts(sessions, opts)
+	if err != nil {
+		return out, err
+	}
+	if len(targets) == 0 {
+		out.Skipped = NoToken
 		return out, nil
 	}
 	st := loadState(opts.StateDir)
@@ -177,22 +194,50 @@ func Deliver(sessions []*report.Session, opts Options) (Outcome, error) {
 		out.Skipped = fmt.Sprintf("%v (%s): %s", ErrUpgradeRequired, opts.CLIVersion, u.Message)
 		return out, nil
 	}
-	if !opts.Force && opts.Now.Before(st.NextAttempt) {
-		out.Skipped = fmt.Sprintf("backing off until %s after: %s", st.NextAttempt.Local().Format(time.DateTime), st.LastError)
-		return out, nil
-	}
-
-	due, err := dueSessions(sessions, opts)
-	if err != nil {
-		return out, err
-	}
 
 	client := opts.Client
 	if client == nil {
 		client = &http.Client{Timeout: requestTimeout}
 	}
+	if st.Targets == nil {
+		st.Targets = map[string]*backoff{}
+	}
+	var errs []error
+	for _, t := range targets {
+		id := t.ID()
+		bo := st.Targets[id]
+		if bo == nil {
+			bo = &backoff{}
+		}
+		if !opts.Force && opts.Now.Before(bo.NextAttempt) {
+			out.Skipped = fmt.Sprintf("backing off until %s after: %s", bo.NextAttempt.Local().Format(time.DateTime), bo.LastError)
+			continue
+		}
+		err := deliverTo(client, t, due[id], opts, &st, &out)
+		var refused *upgradeRequiredError
+		switch {
+		case errors.As(err, &refused):
+			// Not a failure to back off from: nothing more is sent from this
+			// version, and its sessions are sent as they are once upgraded.
+			st.setUpgrade(opts.CLIVersion, &Upgrade{Required: true, Message: refused.message, At: opts.Now}, opts.Now)
+			saveState(opts.StateDir, st)
+			return out, errors.Join(append(errs, fmt.Errorf("%w (%s): %s", ErrUpgradeRequired, opts.CLIVersion, refused.message))...)
+		case err != nil:
+			bo.fail(err, opts.Now)
+			st.Targets[id] = bo
+			errs = append(errs, err)
+		default:
+			delete(st.Targets, id)
+		}
+	}
+	saveState(opts.StateDir, st)
+	return out, errors.Join(errs...)
+}
+
+// deliverTo sends one target's due parts in batches, recording what the
+// server answered.
+func deliverTo(client *http.Client, t payload.Target, due []pending, opts Options, st *state, out *Outcome) error {
 	limit := maxBatchSessions // halved on 413
-	stateChanged := false
 	for start := 0; start < len(due); {
 		end, size := start, 0
 		for end < len(due) && end-start < limit && (end == start || size+due[end].size <= maxBatchBytes) {
@@ -205,16 +250,7 @@ func Deliver(sessions []*report.Session, opts Options) (Outcome, error) {
 			payloads[i] = p.payload
 		}
 
-		results, notice, err := post(client, opts, payloads)
-		var refused *upgradeRequiredError
-		if errors.As(err, &refused) {
-			// Not a failure to back off from: nothing more is sent from this
-			// version, and its sessions are sent as they are once upgraded.
-			st.Failures, st.NextAttempt, st.LastError = 0, time.Time{}, ""
-			st.setUpgrade(opts.CLIVersion, &Upgrade{Required: true, Message: refused.message, At: opts.Now}, opts.Now)
-			saveState(opts.StateDir, st)
-			return out, fmt.Errorf("%w (%s): %s", ErrUpgradeRequired, opts.CLIVersion, refused.message)
-		}
+		results, notice, err := post(client, t, opts, payloads)
 		if errors.Is(err, errTooLarge) {
 			if len(batch) > 1 {
 				limit = max(len(batch)/2, 1)
@@ -226,12 +262,10 @@ func Deliver(sessions []*report.Session, opts Options) (Outcome, error) {
 			if notice != nil {
 				u = &Upgrade{Message: notice.Message, At: opts.Now}
 			}
-			stateChanged = st.setUpgrade(opts.CLIVersion, u, opts.Now) || stateChanged
+			st.setUpgrade(opts.CLIVersion, u, opts.Now)
 		}
 		if err != nil {
-			st.fail(err, opts.Now)
-			saveState(opts.StateDir, st)
-			return out, err
+			return err
 		}
 		out.Sent += len(batch)
 		byID := map[string]Result{}
@@ -253,18 +287,14 @@ func Deliver(sessions []*report.Session, opts Options) (Outcome, error) {
 				}
 				out.Rejected++
 			}
-			p.session.Delivery = d
+			if p.session.Deliveries == nil {
+				p.session.Deliveries = map[string]*report.Delivery{}
+			}
+			p.session.Deliveries[t.ID()] = d
 		}
 		start = end
 	}
-	if st.Failures > 0 || st.LastError != "" || !st.NextAttempt.IsZero() {
-		st.Failures, st.NextAttempt, st.LastError = 0, time.Time{}, ""
-		stateChanged = true
-	}
-	if stateChanged {
-		saveState(opts.StateDir, st)
-	}
-	return out, nil
+	return nil
 }
 
 type pending struct {
@@ -274,34 +304,51 @@ type pending struct {
 	size    int
 }
 
-// dueSessions picks the sessions to send: new ones, and changed ones that have
-// ended or weren't sent within MinResendInterval (any changed one when forced).
-func dueSessions(sessions []*report.Session, opts Options) ([]pending, error) {
-	var due []pending
+// dueParts picks the parts to send, by target ID: new ones, and changed ones
+// whose session has ended or that weren't sent within MinResendInterval (any
+// changed one when forced). targets lists every target with a token that some
+// session has a part for, due or not.
+func dueParts(sessions []*report.Session, opts Options) (map[string][]pending, []payload.Target, error) {
+	due := map[string][]pending{}
+	var targets []payload.Target
+	seen := map[string]bool{}
 	for _, s := range sessions {
-		p := payload.Build(s, opts.Context)
-		data, err := json.Marshal(p)
-		if err != nil {
-			return nil, err
-		}
-		hash := hashOf(data)
-		if s.Delivery != nil {
-			if s.Delivery.Hash == hash {
-				continue // unchanged since last delivered
+		for _, part := range payload.Build(s, opts.Context) {
+			if part.Target.Token == "" {
+				continue // built for `report --json`, never sent
 			}
-			if !opts.Force && !s.Ended && opts.Now.Sub(s.Delivery.SentAt) < MinResendInterval {
-				continue // changed, but sent recently and still going
+			id := part.Target.ID()
+			if !seen[id] {
+				seen[id] = true
+				targets = append(targets, part.Target)
 			}
+			data, err := json.Marshal(part.Payload)
+			if err != nil {
+				return nil, nil, err
+			}
+			hash := hashOf(data)
+			if d := s.Deliveries[id]; d != nil {
+				if d.Hash == hash {
+					continue // unchanged since last delivered
+				}
+				if !opts.Force && !s.Ended && opts.Now.Sub(d.SentAt) < MinResendInterval {
+					continue // changed, but sent recently and still going
+				}
+			}
+			due[id] = append(due[id], pending{s, part.Payload, hash, len(data)})
 		}
-		due = append(due, pending{s, p, hash, len(data)})
 	}
-	return due, nil
+	return due, targets, nil
 }
 
-// Pending counts the sessions Deliver would send now.
+// Pending counts the parts Deliver would send now.
 func Pending(sessions []*report.Session, opts Options) int {
-	due, _ := dueSessions(sessions, opts)
-	return len(due)
+	due, _, _ := dueParts(sessions, opts)
+	n := 0
+	for _, d := range due {
+		n += len(d)
+	}
+	return n
 }
 
 // errTooLarge is a 413 reply: the caller splits the batch, or rejects a lone
@@ -315,7 +362,7 @@ func (e *upgradeRequiredError) Error() string { return "upgrade required (426): 
 
 // post sends one batch and decodes the per-session results, and any upgrade
 // notice for this CLI version.
-func post(client *http.Client, opts Options, sessions []payload.Payload) ([]Result, *UpgradeNotice, error) {
+func post(client *http.Client, t payload.Target, opts Options, sessions []payload.Payload) ([]Result, *UpgradeNotice, error) {
 	body, err := json.Marshal(Request{SchemaVersion: SchemaVersion, CLIVersion: opts.CLIVersion, SentAt: opts.Now.UTC(), Sessions: sessions})
 	if err != nil {
 		return nil, nil, err
@@ -325,11 +372,11 @@ func post(client *http.Client, opts Options, sessions []payload.Payload) ([]Resu
 	w.Write(body)
 	w.Close()
 
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(opts.Endpoint, "/")+"/sessions", &gz)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(t.Endpoint, "/")+"/sessions", &gz)
 	if err != nil {
 		return nil, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+opts.Token)
+	req.Header.Set("Authorization", "Bearer "+t.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set("User-Agent", "swarmia-cli/"+opts.CLIVersion)
@@ -405,7 +452,7 @@ func (e *httpError) Error() string {
 
 // fail records a failed attempt and schedules the next one: a long pause for
 // an unusable token, Retry-After when given, else exponential backoff.
-func (st *state) fail(err error, now time.Time) {
+func (st *backoff) fail(err error, now time.Time) {
 	st.Failures++
 	st.LastError = err.Error()
 	wait := min(time.Minute<<min(st.Failures-1, 10), maxBackoff)

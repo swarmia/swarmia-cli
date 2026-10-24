@@ -16,7 +16,6 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/config"
-	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/payload"
 	"github.com/swarmia/swarmia-cli/internal/report"
 	"github.com/swarmia/swarmia-cli/internal/snapshot"
@@ -62,7 +61,7 @@ func init() {
 }
 
 func runReport(out io.Writer) error {
-	opts, repo, err := processOptions(reportFile, !reportAllAuth, true)
+	opts, _, err := processOptions(reportFile, !reportAllAuth, true)
 	if err != nil {
 		return err
 	}
@@ -73,17 +72,13 @@ func runReport(out io.Writer) error {
 	sessions := selectSessions(res.Sessions)
 
 	if reportJSON {
-		return writeReportJSON(out, sessions, repo)
+		return writeReportJSON(out, sessions)
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", opts.StateDir)
 		return nil
 	}
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return err
-	}
-	showDelivery = cfg.Token != ""
+	showDelivery = anyToken(sessions)
 	if w := upgradeWarning(opts.StateDir); showDelivery && w != "" {
 		fmt.Fprintf(out, "Warning: %s\n\n", w)
 	}
@@ -192,15 +187,36 @@ func humanCount(n int64) string {
 	}
 }
 
+// deliveryState sums up how a session's parts were delivered: a rejection
+// if any was rejected, else when the last one was sent.
 func deliveryState(s *report.Session) string {
-	switch d := s.Delivery; {
-	case d == nil:
-		return "not sent yet"
-	case d.Rejected != "":
-		return "rejected by Swarmia: " + d.Rejected
-	default:
-		return "sent " + d.SentAt.Local().Format("2006-01-02 15:04")
+	var last time.Time
+	for _, d := range s.Deliveries {
+		if d.Rejected != "" {
+			return "rejected by Swarmia: " + d.Rejected
+		}
+		if d.SentAt.After(last) {
+			last = d.SentAt
+		}
 	}
+	if last.IsZero() {
+		return "not sent yet"
+	}
+	return "sent " + last.Local().Format("2006-01-02 15:04")
+}
+
+// anyToken reports whether a token is configured for any repository the
+// sessions worked in, so that delivery is worth showing.
+func anyToken(sessions []*report.Session) bool {
+	ctx := payloadContext()
+	for _, s := range sessions {
+		for _, part := range payload.Build(s, ctx) {
+			if part.Target.Token != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func classBreakdown(f report.File) string {
@@ -217,40 +233,51 @@ func classBreakdown(f report.File) string {
 }
 
 // writeReportJSON prints the payloads delivery would send for the sessions —
-// the same builder, with redaction, prompt opt-out and the pushed-only rule.
-func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Repo) error {
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return err
-	}
-	ctx := payloadContext(repo, cfg)
-	payloads := make([]payload.Payload, 0, len(sessions))
+// the same builder, with redaction, prompt opt-out and the pushed-only rule —
+// one per session and delivery target, including those with no token.
+func writeReportJSON(out io.Writer, sessions []*report.Session) error {
+	ctx := payloadContext()
+	payloads := []payload.Payload{}
 	for _, s := range sessions {
-		payloads = append(payloads, payload.Build(s, ctx))
+		for _, part := range payload.Build(s, ctx) {
+			payloads = append(payloads, part.Payload)
+		}
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payloads)
 }
 
-// payloadContext gathers what payloads need beyond the session itself.
-func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
-	ctx := payload.Context{
-		RepoRoot: repo.Root,
-		InRepo: func(root string) bool {
-			r, err := gitrepo.Find(root)
-			return err == nil && r.CommonDir == repo.CommonDir
-		},
-		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin"), sshHostName),
-		AuthorEmail: authorEmail(repo.Root),
-		CLIVersion:  version,
-		Prompts:     cfg.Prompts,
+// payloadContext gathers what payloads need beyond the session itself: for
+// each worktree, its repository, the configuration that decides where its part
+// goes, and the developer's email there.
+func payloadContext() payload.Context {
+	ctx := payload.Context{CLIVersion: version, ProjectDir: projectDir()}
+	if dir, err := filepath.EvalSymlinks(ctx.ProjectDir); err == nil {
+		ctx.ProjectDir = dir // as worktree roots are
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		ctx.Home, ctx.UserName = home, filepath.Base(home)
 	}
 	if u, err := user.Current(); err == nil {
 		ctx.UserName = u.Username
+	}
+	known := map[string]payload.RepoInfo{} // it spawns git: once per worktree
+	ctx.Repo = func(root string) payload.RepoInfo {
+		if ri, ok := known[root]; ok {
+			return ri
+		}
+		var ri payload.RepoInfo // a broken config sends nothing
+		if cfg, err := config.Load(root); err == nil {
+			ri = payload.RepoInfo{
+				Slug:        payload.RepoSlug(gitOutput(root, "remote", "get-url", "origin"), sshHostName),
+				Target:      payload.Target{Endpoint: cfg.Endpoint, Token: cfg.Token},
+				Prompts:     cfg.Prompts,
+				AuthorEmail: authorEmail(root),
+			}
+		}
+		known[root] = ri
+		return ri
 	}
 	return ctx
 }

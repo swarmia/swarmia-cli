@@ -5,14 +5,20 @@
 //     inline scripts stripped, and tool output never included;
 //   - secrets redacted from prompts and commands;
 //   - prompts withheld entirely when configuration opts out;
-//   - only pushed commits, file paths relative to the repository, and local
-//     paths and the user name masked in free text.
+//   - only pushed commits, file paths relative to their repository, and local
+//     paths and the user name masked in free text;
+//   - a session is split by delivery target: each gets only the repositories
+//     configured with it, and nothing about the others.
 package payload
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,27 +28,34 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
-// Payload is one session as sent to Swarmia.
+// Payload is one session, or the part of it in one delivery target's
+// repositories, as sent to Swarmia.
 type Payload struct {
 	SessionID       string    `json:"session_id"`
 	Agent           string    `json:"agent"`
 	Model           string    `json:"model,omitempty"`
 	MatcherVersion  string    `json:"matcher_version"`
 	CLIVersion      string    `json:"cli_version"`
-	Repo            string    `json:"repo,omitempty"`
 	AuthorEmail     string    `json:"author_email,omitempty"`
 	StartedAt       time.Time `json:"started_at"`
 	EndedAt         time.Time `json:"ended_at"`
 	Ended           bool      `json:"ended"`
 	Prompts         []Prompt  `json:"prompts"`
 	PromptsWithheld bool      `json:"prompts_withheld"`
+	Repos           []Repo    `json:"repos"`
 	Tools           []Tool    `json:"tools"`
 	Commits         []Commit  `json:"commits"`
-	AILines         int       `json:"ai_lines_generated"`
-	AILinesKept     int       `json:"ai_lines_committed"`
 	// Usage is the session's token usage per model, speed and main session vs
 	// subagents, read from the agent's transcript. Cost is left to the server.
 	Usage []usage.Totals `json:"usage"`
+}
+
+// Repo is a repository the session worked in, with the session's AI line
+// counts there.
+type Repo struct {
+	Repo        string `json:"repo"`
+	AILines     int    `json:"ai_lines_generated"`
+	AILinesKept int    `json:"ai_lines_committed"`
 }
 
 type Prompt struct {
@@ -53,6 +66,7 @@ type Prompt struct {
 type Tool struct {
 	At       time.Time `json:"at"`
 	Name     string    `json:"name"`
+	Repo     string    `json:"repo,omitempty"`
 	File     string    `json:"file,omitempty"`
 	Command  string    `json:"command,omitempty"`
 	Status   string    `json:"status,omitempty"`
@@ -60,36 +74,127 @@ type Tool struct {
 }
 
 type Commit struct {
+	Repo  string         `json:"repo"`
 	SHA   string         `json:"sha"`
 	Path  string         `json:"path"`
 	Lines []report.Range `json:"lines"`
 }
 
-// Context is what a payload needs beyond the session.
-type Context struct {
-	RepoRoot string // worktree root, for making tool file paths relative
-	// InRepo reports whether a worktree root is of the payload's repository;
-	// a session's edits and commits elsewhere are left out. nil includes all.
-	InRepo      func(root string) bool
-	Repo        string // e.g. github.com/acme/app (see RepoSlug)
-	AuthorEmail string
-	CLIVersion  string
-	Prompts     bool   // false withholds prompt text (see config)
-	Home        string // home directory, masked as ~ in free text
-	UserName    string // local user name, masked as <user> in free text
+// Target is where a part of a session is sent: a Swarmia endpoint, with the
+// token that says which organization it's for. A repository configured with
+// no token has a Target with an empty Token: its part is built, for `report
+// --json`, but never sent.
+type Target struct {
+	Endpoint string
+	Token    string
 }
 
-// Build makes the payload for s.
-func Build(s *report.Session, ctx Context) Payload {
+// ID identifies the target in local state without holding the token.
+func (t Target) ID() string {
+	sum := sha256.Sum256([]byte(t.Endpoint + "\n" + t.Token))
+	return hex.EncodeToString(sum[:8])
+}
+
+// RepoInfo is what a payload needs to know about a worktree.
+type RepoInfo struct {
+	Slug        string // see RepoSlug; "" if it can't be identified, and then never sent
+	Target      Target
+	Prompts     bool   // its configuration lets prompts be shared
+	AuthorEmail string // the developer's commit email there
+}
+
+// Context is what payloads need beyond the session.
+type Context struct {
+	CLIVersion string
+	// Repo describes the worktree at root; Build calls it once per root.
+	Repo func(root string) RepoInfo
+	// ProjectDir is where the agent was started, masked as <project> in free
+	// text where no worktree root covers it.
+	ProjectDir string
+	Home       string // home directory, masked as ~ in free text
+	UserName   string // local user name, masked as <user> in free text
+}
+
+// Part is a session's payload for one delivery target.
+type Part struct {
+	Target  Target
+	Payload Payload
+}
+
+// Build splits s by delivery target: one payload per target, holding the
+// repositories the session worked in that are configured with it, in the
+// order the session first worked in them (the one it was started in first).
+// A worktree that can't be identified is left out, and a session that worked
+// in no identifiable repository has no parts.
+func Build(s *report.Session, ctx Context) []Part {
+	info := map[string]RepoInfo{}
+	var roots []string // in the order the session worked in them
+	addRoot := func(root string) {
+		if _, ok := info[root]; ok || root == "" {
+			return
+		}
+		info[root] = ctx.Repo(root)
+		roots = append(roots, root)
+	}
+	addRoot(s.Root)
+	for _, t := range s.Tools {
+		addRoot(t.Root)
+	}
+	for _, e := range s.Edits {
+		addRoot(e.Root)
+	}
+	for _, c := range s.Commits() {
+		addRoot(c.Root)
+	}
+
+	var targets []Target
+	slugsOf := map[Target][]string{}
+	for _, root := range roots {
+		ri := info[root]
+		if ri.Slug == "" || slices.Contains(slugsOf[ri.Target], ri.Slug) {
+			continue
+		}
+		if _, ok := slugsOf[ri.Target]; !ok {
+			targets = append(targets, ri.Target)
+		}
+		slugsOf[ri.Target] = append(slugsOf[ri.Target], ri.Slug)
+	}
+	parts := make([]Part, 0, len(targets))
+	for _, t := range targets {
+		parts = append(parts, Part{Target: t, Payload: build(s, ctx, roots, info, t, slugsOf[t])})
+	}
+	return parts
+}
+
+// build makes the payload of s for target t, whose repositories are slugs.
+func build(s *report.Session, ctx Context, roots []string, info map[string]RepoInfo, t Target, slugs []string) Payload {
+	// listed gives the slug of a root in this payload, "" for one that isn't.
+	listed := func(root string) string {
+		if ri, ok := info[root]; ok && ri.Target == t && slices.Contains(slugs, ri.Slug) {
+			return ri.Slug
+		}
+		return ""
+	}
+	prompts, author := true, ""
+	for _, root := range roots {
+		if listed(root) == "" {
+			continue
+		}
+		prompts = prompts && info[root].Prompts
+		if author == "" {
+			author = info[root].AuthorEmail
+		}
+	}
+	masks := ctx.masks(roots, listed)
+
 	p := Payload{
 		SessionID: s.ID, Agent: s.Agent, Model: s.Model,
 		MatcherVersion: attribution.Version, CLIVersion: ctx.CLIVersion,
-		Repo: ctx.Repo, AuthorEmail: ctx.AuthorEmail,
-		StartedAt: s.StartedAt, EndedAt: s.EndedAt, Ended: s.Ended,
-		Prompts: []Prompt{}, PromptsWithheld: !ctx.Prompts,
-		Tools: []Tool{}, Commits: []Commit{},
-		AILines: ctx.aiLines(s),
-		Usage:   []usage.Totals{},
+		AuthorEmail: author,
+		StartedAt:   s.StartedAt, EndedAt: s.EndedAt, Ended: s.Ended,
+		Prompts: []Prompt{}, PromptsWithheld: !prompts,
+		Repos: []Repo{}, Tools: []Tool{}, Commits: []Commit{},
+		Usage: []usage.Totals{},
 	}
 	if s.Usage != nil {
 		p.Usage = s.Usage.Totals()
@@ -97,58 +202,130 @@ func Build(s *report.Session, ctx Context) Payload {
 	if p.Model == "" {
 		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start
 	}
-	if ctx.Prompts {
+	if prompts {
 		for _, pr := range s.Prompts {
-			p.Prompts = append(p.Prompts, Prompt{At: pr.At, Text: ctx.maskLocal(redact.Text(pr.Text))})
+			p.Prompts = append(p.Prompts, Prompt{At: pr.At, Text: masks.apply(redact.Text(pr.Text))})
 		}
 	}
-	for _, t := range s.Tools {
-		tool := Tool{At: t.At, Name: t.Name, File: relativePath(ctx.RepoRoot, t.File),
-			Status: t.Status, ExitCode: t.ExitCode}
-		if t.Command != "" {
-			tool.Command = ctx.maskLocal(redact.Command(t.Command))
+	for _, slug := range slugs {
+		r := Repo{Repo: slug}
+		for root := range s.AILinesByRoot {
+			if listed(root) == slug {
+				r.AILines += s.AILinesIn(root)
+			}
+		}
+		r.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed && listed(c.Root) == slug })
+		p.Repos = append(p.Repos, r)
+	}
+	for _, tl := range s.Tools {
+		tool := Tool{At: tl.At, Name: tl.Name, Status: tl.Status, ExitCode: tl.ExitCode}
+		if tool.Repo = listed(tl.Root); tool.Repo != "" {
+			tool.File = relativePath(tl.Root, tl.File)
+		}
+		if tl.Command != "" {
+			tool.Command = masks.apply(redact.Command(tl.Command))
 		}
 		p.Tools = append(p.Tools, tool)
 	}
 	for _, c := range s.Commits() {
-		if !c.Pushed || !ctx.inRepo(c.Root) {
-			continue // only commits the server can see, in this repository
+		slug := listed(c.Root)
+		if !c.Pushed || slug == "" {
+			continue // only commits the server can see, in this payload's repositories
 		}
 		for _, f := range c.Files {
-			p.Commits = append(p.Commits, Commit{SHA: c.SHA, Path: f.Path, Lines: f.Lines})
+			p.Commits = append(p.Commits, Commit{Repo: slug, SHA: c.SHA, Path: f.Path, Lines: f.Lines})
 		}
 	}
-	p.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed && ctx.inRepo(c.Root) })
 	return p
 }
 
-func (ctx Context) inRepo(root string) bool { return ctx.InRepo == nil || ctx.InRepo(root) }
+// masks is the replacements that hide where things live on this machine, in
+// order: longer (inner) paths first. A directory is only replaced where it
+// ends, so /src/app doesn't turn /src/app-v2 into <repo…>-v2.
+type masks []mask
 
-// aiLines is the session's AI line count in the payload's repository.
-func (ctx Context) aiLines(s *report.Session) int {
-	n := 0
-	for root := range s.AILinesByRoot {
-		if ctx.inRepo(root) {
-			n += s.AILinesIn(root)
-		}
-	}
-	return n
+type mask struct {
+	from, to string
+	dir      bool
 }
 
-// maskLocal hides where things live on this machine: the repository root
-// becomes <repo>, the home directory ~, and any other occurrence of the user
-// name (e.g. inside tool-generated temp paths) <user>.
-func (ctx Context) maskLocal(s string) string {
-	if ctx.RepoRoot != "" {
-		s = strings.ReplaceAll(s, ctx.RepoRoot, "<repo>")
+// masks hides each worktree root of the session — as <repo:slug> if this
+// payload lists it, else <repo> — then the project directory as <project>,
+// the home directory as ~ and the user name (e.g. inside tool-generated temp
+// paths) as <user>.
+func (ctx Context) masks(roots []string, listed func(root string) string) masks {
+	var m masks
+	for _, root := range roots {
+		if slug := listed(root); slug != "" {
+			m = append(m, mask{root, "<repo:" + slug + ">", true})
+		} else {
+			m = append(m, mask{root, "<repo>", true})
+		}
+	}
+	if ctx.ProjectDir != "" && ctx.ProjectDir != "/" {
+		m = append(m, mask{ctx.ProjectDir, "<project>", true})
 	}
 	if ctx.Home != "" && ctx.Home != "/" {
-		s = strings.ReplaceAll(s, ctx.Home, "~")
+		m = append(m, mask{ctx.Home, "~", true})
 	}
+	sort.SliceStable(m, func(a, b int) bool { return len(m[a].from) > len(m[b].from) })
 	if len(ctx.UserName) >= 3 {
-		s = strings.ReplaceAll(s, ctx.UserName, "<user>")
+		m = append(m, mask{ctx.UserName, "<user>", false})
+	}
+	return m
+}
+
+// apply masks s. Each replacement first goes in as a placeholder, so a later
+// one (the user name) never rewrites an earlier one's text (a slug).
+func (m masks) apply(s string) string {
+	placeholder := func(i int) string { return fmt.Sprintf("\x00%d\x00", i) }
+	for i, r := range m {
+		if r.dir {
+			s = replaceDir(s, r.from, placeholder(i))
+		} else {
+			s = strings.ReplaceAll(s, r.from, placeholder(i))
+		}
+	}
+	for i, r := range m {
+		s = strings.ReplaceAll(s, placeholder(i), r.to)
 	}
 	return s
+}
+
+// replaceDir replaces dir in s where it is a whole directory: not followed by
+// more of a file name. A dot continues the name only if more of it follows
+// (app.old), not at the end of a sentence (app.).
+func replaceDir(s, dir, to string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, dir)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		end := i + len(dir)
+		b.WriteString(s[:i])
+		if continuesName(s[end:]) {
+			b.WriteString(dir)
+		} else {
+			b.WriteString(to)
+		}
+		s = s[end:]
+	}
+}
+
+func continuesName(rest string) bool {
+	switch {
+	case rest == "" || !isNameByte(rest[0]):
+		return false
+	case rest[0] == '.':
+		return len(rest) > 1 && isNameByte(rest[1]) && rest[1] != '.'
+	}
+	return true
+}
+
+func isNameByte(c byte) bool {
+	return c == '-' || c == '_' || c == '.' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
 }
 
 // relativePath turns an absolute path inside root into a slash-separated

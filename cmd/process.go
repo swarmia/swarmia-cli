@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/swarmia/swarmia-cli/internal/config"
 	"github.com/swarmia/swarmia-cli/internal/deliver"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/report"
@@ -30,8 +29,9 @@ var processCmd = &cobra.Command{
 		"sessions inactive for 30 days. Attribution is only recomputed when a session's\n" +
 		"edits or candidate commits changed; rebased or amended commits drop out and\n" +
 		"their replacements are matched.\n\n" +
-		"If a token is configured (see `swarmia-cli config`), changed sessions are then\n" +
-		"delivered to Swarmia (see `swarmia-cli send`); without one nothing is sent.\n\n" +
+		"Changed sessions are then delivered to Swarmia (see `swarmia-cli send`), each\n" +
+		"repository's part with the token configured for it (see `swarmia-cli config`);\n" +
+		"without one nothing is sent.\n\n" +
 		"log-hook starts it in the background when a session ends or the log grows\n" +
 		"large, and report runs it (without delivering) before printing, so running it\n" +
 		"by hand is rarely needed.",
@@ -39,18 +39,14 @@ var processCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		opts, repo, err := processOptions(processFile, true, !processBackground)
+		opts, _, err := processOptions(processFile, true, !processBackground)
 		if err != nil {
 			return quietIf(processBackground, err)
 		}
 		var delivered deliver.Outcome
-		// Until payloads can carry several repositories, only a project in a
-		// repository delivers, and only that repository's part of a session.
-		if cfg, err := config.Load(repo.Root); err == nil && cfg.Token != "" && repo.Root != "" {
-			opts.AfterAttribute = func(sessions []*report.Session) error {
-				delivered, err = deliver.Deliver(sessions, deliveryOptions(repo, cfg, opts, false))
-				return err
-			}
+		opts.AfterAttribute = func(sessions []*report.Session) error {
+			delivered, err = deliver.Deliver(sessions, deliveryOptions(opts, false))
+			return err
 		}
 		res, err := report.Process(opts)
 		if errors.Is(err, report.ErrBusy) {
@@ -142,13 +138,11 @@ func upgradeWarning(stateDir string) string {
 	}
 }
 
-// deliveryOptions configures delivery for this repository.
-func deliveryOptions(repo gitrepo.Repo, cfg config.Config, opts report.ProcessOptions, force bool) deliver.Options {
+// deliveryOptions configures delivery for the project.
+func deliveryOptions(opts report.ProcessOptions, force bool) deliver.Options {
 	return deliver.Options{
-		Endpoint:   cfg.Endpoint,
-		Token:      cfg.Token,
 		CLIVersion: version,
-		Context:    payloadContext(repo, cfg),
+		Context:    payloadContext(),
 		StateDir:   opts.StateDir,
 		Now:        opts.Now,
 		Force:      force,

@@ -23,6 +23,7 @@ var now = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 type server struct {
 	mu       sync.Mutex
 	requests []Request
+	tokens   []string // each request's bearer token
 	reply    func(req Request, w http.ResponseWriter)
 	srv      *httptest.Server
 }
@@ -33,8 +34,9 @@ func newServer(t *testing.T) *server {
 		if r.Method != http.MethodPost || r.URL.Path != "/cli/sessions" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
-			t.Errorf("Authorization = %q", got)
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
 		}
 		if r.Header.Get("Content-Encoding") != "gzip" || r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("headers: %v", r.Header)
@@ -52,6 +54,7 @@ func newServer(t *testing.T) *server {
 		}
 		s.mu.Lock()
 		s.requests = append(s.requests, req)
+		s.tokens = append(s.tokens, token)
 		reply := s.reply
 		s.mu.Unlock()
 		if reply == nil {
@@ -83,22 +86,53 @@ func (s *server) sessionsSent() []string {
 	return ids
 }
 
-func (s *server) opts(t *testing.T, at time.Time) Options {
-	return Options{Endpoint: s.srv.URL + "/cli", Token: "tok", CLIVersion: "test", StateDir: t.TempDir(), Now: at,
-		Context: payload.Context{Prompts: true}}
+// target is the server with token "tok".
+func (s *server) target() payload.Target {
+	return payload.Target{Endpoint: s.srv.URL + "/cli", Token: "tok"}
 }
 
+// opts delivers sessions, all in the repository /repo, to the server.
+func (s *server) opts(t *testing.T, at time.Time) Options {
+	return Options{CLIVersion: "test", StateDir: t.TempDir(), Now: at, Context: contextFor(map[string]payload.Target{"/repo": s.target()})}
+}
+
+// contextFor is a payload.Context in which each repository root, named after
+// its directory, is configured with a target.
+func contextFor(targets map[string]payload.Target) payload.Context {
+	return payload.Context{Repo: func(root string) payload.RepoInfo {
+		t, ok := targets[root]
+		if !ok {
+			return payload.RepoInfo{}
+		}
+		return payload.RepoInfo{Slug: "github.com/acme" + root, Target: t, Prompts: true}
+	}}
+}
+
+// sess is a session started in /repo.
 func sess(id string, ended bool) *report.Session {
-	return &report.Session{ID: id, Agent: "claude-code", StartedAt: now, EndedAt: now, Ended: ended,
+	return &report.Session{ID: id, Agent: "claude-code", StartedAt: now, EndedAt: now, Ended: ended, Root: "/repo",
 		Prompts: []report.Prompt{{At: now, Text: "hello " + id}}}
+}
+
+// delivery is what s records about its delivery to the server.
+func (s *server) delivery(sn *report.Session) *report.Delivery {
+	return sn.Deliveries[s.target().ID()]
+}
+
+// backoffOf is the server's backoff in the delivery state in dir.
+func (s *server) backoffOf(dir string) backoff {
+	if b := loadState(dir).Targets[s.target().ID()]; b != nil {
+		return *b
+	}
+	return backoff{}
 }
 
 func TestNoTokenSendsNothing(t *testing.T) {
 	srv := newServer(t)
 	o := srv.opts(t, now)
-	o.Token = ""
+	o.Context = contextFor(map[string]payload.Target{"/repo": {Endpoint: srv.target().Endpoint}})
 	out, err := Deliver([]*report.Session{sess("a", true)}, o)
-	if err != nil || out.Skipped == "" || len(srv.sessionsSent()) != 0 {
+	if err != nil || out.Skipped != NoToken || len(srv.sessionsSent()) != 0 {
 		t.Errorf("out=%+v err=%v sent=%v", out, err, srv.sessionsSent())
 	}
 }
@@ -112,8 +146,8 @@ func TestSendsChangedSessionsOnce(t *testing.T) {
 	if err != nil || out.Accepted != 2 || len(srv.requests) != 1 {
 		t.Fatalf("first run: out=%+v err=%v requests=%d", out, err, len(srv.requests))
 	}
-	if srv.requests[0].SchemaVersion != SchemaVersion || a.Delivery == nil || a.Delivery.Rejected != "" {
-		t.Errorf("request/delivery: %+v %+v", srv.requests[0].SchemaVersion, a.Delivery)
+	if srv.requests[0].SchemaVersion != SchemaVersion || srv.delivery(a) == nil || srv.delivery(a).Rejected != "" {
+		t.Errorf("request/delivery: %+v %+v", srv.requests[0].SchemaVersion, srv.delivery(a))
 	}
 
 	// Unchanged: nothing to send.
@@ -154,8 +188,8 @@ func TestRejectedSessionsAreNotRetriedUntilChanged(t *testing.T) {
 	bad, good := sess("bad", true), sess("good", true)
 	o := srv.opts(t, now)
 	out, _ := Deliver([]*report.Session{bad, good}, o)
-	if out.Rejected != 1 || out.Accepted != 1 || bad.Delivery.Rejected != "repository not in organization" {
-		t.Errorf("out=%+v delivery=%+v", out, bad.Delivery)
+	if out.Rejected != 1 || out.Accepted != 1 || srv.delivery(bad).Rejected != "repository not in organization" {
+		t.Errorf("out=%+v delivery=%+v", out, srv.delivery(bad))
 	}
 	if out, _ := Deliver([]*report.Session{bad, good}, o); out.Sent != 0 {
 		t.Errorf("rejected session retried unchanged: %+v", out)
@@ -170,13 +204,13 @@ func TestMissingResultIsRetried(t *testing.T) {
 	a := sess("a", true)
 	o := srv.opts(t, now)
 	Deliver([]*report.Session{a}, o)
-	if a.Delivery != nil {
-		t.Fatalf("marked delivered without a result: %+v", a.Delivery)
+	if srv.delivery(a) != nil {
+		t.Fatalf("marked delivered without a result: %+v", srv.delivery(a))
 	}
 	srv.reply = nil
 	Deliver([]*report.Session{a}, o)
-	if a.Delivery == nil || len(srv.sessionsSent()) != 2 {
-		t.Errorf("not retried: delivery=%+v sent=%v", a.Delivery, srv.sessionsSent())
+	if srv.delivery(a) == nil || len(srv.sessionsSent()) != 2 {
+		t.Errorf("not retried: delivery=%+v sent=%v", srv.delivery(a), srv.sessionsSent())
 	}
 }
 
@@ -188,7 +222,7 @@ func TestServerErrorsBackOff(t *testing.T) {
 	if _, err := Deliver([]*report.Session{a}, o); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("err = %v", err)
 	}
-	if a.Delivery != nil {
+	if srv.delivery(a) != nil {
 		t.Error("failed attempt marked the session delivered")
 	}
 	// Inside the backoff window: skipped without a request.
@@ -203,8 +237,8 @@ func TestServerErrorsBackOff(t *testing.T) {
 	if out, err := Deliver([]*report.Session{a}, o); err != nil || out.Accepted != 1 {
 		t.Errorf("after backoff: %+v %v", out, err)
 	}
-	if st := loadState(o.StateDir); st.Failures != 0 {
-		t.Errorf("backoff not reset: %+v", st)
+	if b := srv.backoffOf(o.StateDir); b.Failures != 0 {
+		t.Errorf("backoff not reset: %+v", b)
 	}
 }
 
@@ -227,7 +261,7 @@ func TestAuthFailureBacksOffLongAndRetryAfterIsHonoured(t *testing.T) {
 		}
 		o := srv.opts(t, now)
 		Deliver([]*report.Session{sess("a", true)}, o)
-		if got := loadState(o.StateDir).NextAttempt.Sub(now); got != tc.want {
+		if got := srv.backoffOf(o.StateDir).NextAttempt.Sub(now); got != tc.want {
 			t.Errorf("HTTP %d: next attempt in %v, want %v", tc.status, got, tc.want)
 		}
 	}
@@ -256,8 +290,8 @@ func TestTooLargeSplitsBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Accepted != 4 || out.Rejected != 1 || huge.Delivery.Rejected != "payload too large" {
-		t.Errorf("out=%+v huge=%+v", out, huge.Delivery)
+	if out.Accepted != 4 || out.Rejected != 1 || srv.delivery(huge).Rejected != "payload too large" {
+		t.Errorf("out=%+v huge=%+v", out, srv.delivery(huge))
 	}
 }
 
@@ -267,7 +301,7 @@ func TestForceIgnoresBackoffAndThrottle(t *testing.T) {
 	o := srv.opts(t, now)
 	Deliver([]*report.Session{a}, o)
 	a.Prompts = append(a.Prompts, report.Prompt{At: now, Text: "more"})
-	saveState(o.StateDir, state{Failures: 3, NextAttempt: now.Add(time.Hour), LastError: "x"})
+	saveState(o.StateDir, state{Targets: map[string]*backoff{srv.target().ID(): {Failures: 3, NextAttempt: now.Add(time.Hour), LastError: "x"}}})
 	o.Force, o.Now = true, now.Add(time.Second)
 	if out, err := Deliver([]*report.Session{a}, o); err != nil || out.Accepted != 1 {
 		t.Errorf("forced send: %+v %v", out, err)
@@ -282,7 +316,7 @@ func TestBare2xxMarksBatchReceived(t *testing.T) {
 		srv.reply = func(req Request, w http.ResponseWriter) { w.WriteHeader(status) }
 		a, b := sess("a", true), sess("b", true)
 		out, err := Deliver([]*report.Session{a, b}, srv.opts(t, now))
-		if err != nil || out.Accepted != 2 || a.Delivery == nil || b.Delivery == nil {
+		if err != nil || out.Accepted != 2 || srv.delivery(a) == nil || srv.delivery(b) == nil {
 			t.Errorf("HTTP %d: out=%+v err=%v", status, out, err)
 		}
 	}
@@ -307,15 +341,15 @@ func TestUpgradeRequiredStopsThisVersion(t *testing.T) {
 	if !errors.Is(err, ErrUpgradeRequired) {
 		t.Fatalf("err = %v, want ErrUpgradeRequired", err)
 	}
-	if a.Delivery != nil {
+	if srv.delivery(a) != nil {
 		t.Error("refused session marked delivered")
 	}
 	u, ok := UpgradeFor(o.StateDir, "test")
 	if want := "swarmia-cli 0.1.0 sends broken payloads; [31mupgrade @swarmia/cli"; !ok || !u.Required || u.Message != want {
 		t.Errorf("upgrade = %+v, %v; want required with %q (no escape characters)", u, ok, want)
 	}
-	if st := loadState(o.StateDir); st.Failures != 0 || !st.NextAttempt.IsZero() {
-		t.Errorf("426 counted as a failure to back off from: %+v", st)
+	if b := srv.backoffOf(o.StateDir); b.Failures != 0 || !b.NextAttempt.IsZero() {
+		t.Errorf("426 counted as a failure to back off from: %+v", b)
 	}
 
 	// Later runs of this version send nothing, without asking.
@@ -380,5 +414,94 @@ func TestDisplayable(t *testing.T) {
 		if got := displayable(in, "fallback"); got != want {
 			t.Errorf("displayable(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// twoTargets has a session in /repo (token "tok") that also worked in
+// /client (token "other") and /oss (no token).
+func twoTargets(srv *server) (*report.Session, payload.Target, func(*testing.T) Options) {
+	other := payload.Target{Endpoint: srv.target().Endpoint, Token: "other"}
+	s := sess("a", true)
+	s.Tools = []report.Tool{
+		{At: now, Name: "Edit", Root: "/client", File: "/client/x.go"},
+		{At: now, Name: "Edit", Root: "/oss", File: "/oss/y.go"},
+	}
+	opts := func(t *testing.T) Options {
+		o := srv.opts(t, now)
+		o.Context = contextFor(map[string]payload.Target{
+			"/repo": srv.target(), "/client": other, "/oss": {Endpoint: srv.target().Endpoint},
+		})
+		return o
+	}
+	return s, other, opts
+}
+
+// Each target gets its part of a session, with its own token; a part with no
+// token is never sent. Each part's delivery is recorded on its own.
+func TestPartsGoToTheirTargets(t *testing.T) {
+	srv := newServer(t)
+	s, other, opts := twoTargets(srv)
+	o := opts(t)
+	out, err := Deliver([]*report.Session{s}, o)
+	if err != nil || out.Sent != 2 || len(srv.requests) != 2 {
+		t.Fatalf("out=%+v err=%v requests=%d", out, err, len(srv.requests))
+	}
+	got := map[string]string{}
+	for i, req := range srv.requests {
+		var repos []string
+		for _, r := range req.Sessions[0].Repos {
+			repos = append(repos, r.Repo)
+		}
+		got[srv.tokens[i]] = strings.Join(repos, ",")
+	}
+	if want := map[string]string{"tok": "github.com/acme/repo", "other": "github.com/acme/client"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("repos by token = %v, want %v", got, want)
+	}
+	if srv.delivery(s) == nil || s.Deliveries[other.ID()] == nil || len(s.Deliveries) != 2 {
+		t.Errorf("deliveries = %+v", s.Deliveries)
+	}
+	if out, _ := Deliver([]*report.Session{s}, o); out.Sent != 0 {
+		t.Errorf("unchanged parts resent: %+v", out)
+	}
+	if n := Pending([]*report.Session{s}, o); n != 0 {
+		t.Errorf("pending = %d, want 0", n)
+	}
+}
+
+// A target that fails backs off on its own: the others are delivered, and
+// later runs don't retry it until its backoff ends.
+func TestFailingTargetDoesNotHoldUpOthers(t *testing.T) {
+	srv := newServer(t)
+	srv.reply = func(req Request, w http.ResponseWriter) {
+		srv.mu.Lock()
+		token := srv.tokens[len(srv.tokens)-1]
+		srv.mu.Unlock()
+		if token == "tok" { // the session's first target
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		acceptAll(req, w)
+	}
+	s, other, opts := twoTargets(srv)
+	o := opts(t)
+	out, err := Deliver([]*report.Session{s}, o)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") || out.Accepted != 1 {
+		t.Fatalf("out=%+v err=%v, want one accepted and the 401", out, err)
+	}
+	if srv.delivery(s) != nil || s.Deliveries[other.ID()] == nil {
+		t.Errorf("deliveries = %+v, want only other's", s.Deliveries)
+	}
+	if b := srv.backoffOf(o.StateDir); b.NextAttempt.Sub(now) != authBackoff {
+		t.Errorf("tok's backoff = %+v", b)
+	}
+	if b := loadState(o.StateDir).Targets[other.ID()]; b != nil {
+		t.Errorf("other backs off too: %+v", b)
+	}
+
+	// Both parts change; within the backoff only other's goes.
+	s.Prompts = append(s.Prompts, report.Prompt{At: now, Text: "more"})
+	o.Now = now.Add(time.Hour)
+	if out, err := Deliver([]*report.Session{s}, o); err != nil || out.Sent != 1 || srv.tokens[len(srv.tokens)-1] != "other" {
+		t.Errorf("out=%+v err=%v last token %q", out, err, srv.tokens[len(srv.tokens)-1])
 	}
 }

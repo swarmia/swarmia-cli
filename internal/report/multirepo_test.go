@@ -132,7 +132,7 @@ func TestLocator(t *testing.T) {
 	if err := os.Symlink(outer.root, link); err != nil {
 		t.Fatal(err)
 	}
-	locate := locator()
+	locate := newLocator().locate
 	for _, tc := range []struct {
 		path, root, rel string
 		ok              bool
@@ -322,6 +322,11 @@ func TestProcessUpgradesSessionsFromFormat2(t *testing.T) {
 	stored := map[string]any{
 		"format": 2, "id": "old-session", "agent": "claude-code",
 		"started_at": t0, "ended_at": t0,
+		"tools": []map[string]any{
+			{"at": t0, "name": "Bash", "command": "make"},
+			{"at": t0, "name": "Edit", "file": filepath.Join(f.root, "old.go")},
+			{"at": t0, "name": "Read", "file": "/elsewhere/notes.md"},
+		},
 		"edits":            []map[string]any{{"at": t0, "path": "old.go", "hunks": [][]string{hunk}}},
 		"ai_lines_by_path": map[string]int{"old.go": 3},
 	}
@@ -335,8 +340,11 @@ func TestProcessUpgradesSessionsFromFormat2(t *testing.T) {
 
 	res := f.process(t, state, t0.Add(time.Hour))
 	s := res.Sessions[0]
-	if s.Edits[0].Root != f.root || s.AILinesIn(f.root) != 3 || s.AILinesByPath != nil {
-		t.Errorf("edits = %+v, AI lines = %v / %v", s.Edits, s.AILinesByRoot, s.AILinesByPath)
+	if s.Root != f.root || s.Edits[0].Root != f.root || s.AILinesIn(f.root) != 3 || s.AILinesByPath != nil {
+		t.Errorf("root = %q, edits = %+v, AI lines = %v / %v", s.Root, s.Edits, s.AILinesByRoot, s.AILinesByPath)
+	}
+	if s.Tools[0].Root != f.root || s.Tools[1].Root != f.root || s.Tools[2].Root != "" {
+		t.Errorf("tools = %+v; want the project's root but for the file elsewhere", s.Tools)
 	}
 	if got, want := commitFiles(s), []commitFile{{f.root, sha, "old.go", 3}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("commits = %+v, want %+v", got, want)
@@ -353,4 +361,36 @@ func TestProcessUpgradesSessionsFromFormat2(t *testing.T) {
 
 func splitLines(s string) []string {
 	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// A session records the worktree it was started in, and each tool call the
+// worktree it worked in: its file's, else its working directory's (from the
+// event), else the project's.
+func TestFoldRecordsWhereToolsWorked(t *testing.T) {
+	a, b := newFixture(t), newFixture(t)
+	elsewhere := t.TempDir()
+	var recs []events.Record
+	tool := func(name string, extra map[string]any) map[string]any {
+		ev := map[string]any{"hook_event_name": "PostToolUse", "tool_name": name}
+		for k, v := range extra {
+			ev[k] = v
+		}
+		return ev
+	}
+	writeEvent(t, &recs, t0, a.root, map[string]any{"hook_event_name": "SessionStart"})
+	writeEvent(t, &recs, t0, a.root, tool("Bash", map[string]any{"cwd": filepath.Join(b.root, "pkg"), "tool_input": map[string]any{"command": "go test"}}))
+	writeEvent(t, &recs, t0, a.root, tool("Read", map[string]any{"cwd": a.root, "tool_input": map[string]any{"file_path": filepath.Join(b.root, "x.go")}}))
+	writeEvent(t, &recs, t0, a.root, tool("Read", map[string]any{"cwd": a.root, "tool_input": map[string]any{"file_path": filepath.Join(elsewhere, "y.md")}}))
+	writeEvent(t, &recs, t0, a.root, tool("Bash", map[string]any{"cwd": elsewhere, "tool_input": map[string]any{"command": "ls"}}))
+	writeEvent(t, &recs, t0, a.root, tool("Grep", nil)) // no file, no cwd
+	sessions := map[string]*Session{}
+	Fold(sessions, recs, "")
+	s := sessions["sess-1"]
+	var roots []string
+	for _, tl := range s.Tools {
+		roots = append(roots, tl.Root)
+	}
+	if want := []string{b.root, b.root, "", "", a.root}; s.Root != a.root || !reflect.DeepEqual(roots, want) {
+		t.Errorf("session root %q, tool roots %q; want %q, %q", s.Root, roots, a.root, want)
+	}
 }
