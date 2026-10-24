@@ -67,7 +67,10 @@ type Commit struct {
 
 // Context is what a payload needs beyond the session.
 type Context struct {
-	RepoRoot    string // worktree root, for making tool file paths relative
+	RepoRoot string // worktree root, for making tool file paths relative
+	// InRepo reports whether a worktree root is of the payload's repository;
+	// a session's edits and commits elsewhere are left out. nil includes all.
+	InRepo      func(root string) bool
 	Repo        string // e.g. github.com/acme/app (see RepoSlug)
 	AuthorEmail string
 	CLIVersion  string
@@ -85,7 +88,7 @@ func Build(s *report.Session, ctx Context) Payload {
 		StartedAt: s.StartedAt, EndedAt: s.EndedAt, Ended: s.Ended,
 		Prompts: []Prompt{}, PromptsWithheld: !ctx.Prompts,
 		Tools: []Tool{}, Commits: []Commit{},
-		AILines: s.AILines(),
+		AILines: ctx.aiLines(s),
 		Usage:   []usage.Totals{},
 	}
 	if s.Usage != nil {
@@ -108,15 +111,28 @@ func Build(s *report.Session, ctx Context) Payload {
 		p.Tools = append(p.Tools, tool)
 	}
 	for _, c := range s.Commits() {
-		if !c.Pushed {
-			continue // only commits the server can see
+		if !c.Pushed || !ctx.inRepo(c.Root) {
+			continue // only commits the server can see, in this repository
 		}
 		for _, f := range c.Files {
 			p.Commits = append(p.Commits, Commit{SHA: c.SHA, Path: f.Path, Lines: f.Lines})
 		}
 	}
-	p.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed })
+	p.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed && ctx.inRepo(c.Root) })
 	return p
+}
+
+func (ctx Context) inRepo(root string) bool { return ctx.InRepo == nil || ctx.InRepo(root) }
+
+// aiLines is the session's AI line count in the payload's repository.
+func (ctx Context) aiLines(s *report.Session) int {
+	n := 0
+	for root := range s.AILinesByRoot {
+		if ctx.inRepo(root) {
+			n += s.AILinesIn(root)
+		}
+	}
+	return n
 }
 
 // maskLocal hides where things live on this machine: the repository root

@@ -45,7 +45,7 @@ type Agent struct {
 	injectedPrompt *regexp.Regexp
 	isEditTool     func(name string) bool
 	isShellTool    func(name string) bool
-	edits          func(payload []byte, root string) []attribution.Edit
+	edits          func(payload []byte, locate attribution.Locator) []attribution.Edit
 }
 
 var ClaudeCode = &Agent{
@@ -59,8 +59,8 @@ var ClaudeCode = &Agent{
 	injectedPrompt:  claudeInjectedPrompt,
 	isEditTool:      attribution.IsClaudeEditTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
-	edits: func(payload []byte, root string) []attribution.Edit {
-		if e, ok := attribution.ClaudeEdit(payload, root); ok {
+	edits: func(payload []byte, locate attribution.Locator) []attribution.Edit {
+		if e, ok := attribution.ClaudeEdit(payload, locate); ok {
 			return []attribution.Edit{e}
 		}
 		return nil
@@ -246,10 +246,11 @@ func (t *textOrNone) UnmarshalJSON(data []byte) error {
 }
 
 // Edits extracts the file edits in a PostToolUse payload: the files the
-// agent's edit tool changed inside root, and the hunks it wrote. Shell
-// commands aren't covered here: their changes come from worktree snapshots.
-func (a *Agent) Edits(payload []byte, root string) []attribution.Edit {
-	return a.edits(payload, root)
+// agent's edit tool changed that locate finds in a worktree, and the hunks it
+// wrote. Shell commands aren't covered here: their changes come from worktree
+// snapshots.
+func (a *Agent) Edits(payload []byte, locate attribution.Locator) []attribution.Edit {
+	return a.edits(payload, locate)
 }
 
 // Scope says which of an agent's settings files configures hooks.

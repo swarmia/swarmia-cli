@@ -69,7 +69,7 @@ func TestCodexEdits(t *testing.T) {
 		"cwd":             "/repo/pkg",
 		"tool_input":      map[string]any{"command": samplePatch},
 	})
-	edits := CodexEdits(payload, "/repo")
+	edits := CodexEdits(payload, Within("/repo"))
 	if len(edits) != 3 {
 		t.Fatalf("edits = %#v", edits)
 	}
@@ -99,11 +99,11 @@ func TestCodexEdits(t *testing.T) {
 	shell, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash",
 		"cwd": "/repo", "tool_input": map[string]any{"command": "ls"}})
 	for name, p := range map[string][]byte{"outside": outside, "shell": shell} {
-		if e := CodexEdits(p, "/repo"); len(e) != 0 {
+		if e := CodexEdits(p, Within("/repo")); len(e) != 0 {
 			t.Errorf("%s: %#v", name, e)
 		}
 	}
-	if e, ok := ClaudeEdit(payload, "/repo"); ok {
+	if e, ok := ClaudeEdit(payload, Within("/repo")); ok {
 		t.Errorf("a Codex payload read as Claude Code's: %#v", e)
 	}
 }
@@ -118,5 +118,28 @@ func TestCodexPatchInputShapes(t *testing.T) {
 		if got := CodexPatch(json.RawMessage(in)); got != "*** Begin Patch\nx" {
 			t.Errorf("%s: %q", in, got)
 		}
+	}
+}
+
+// A patch run from a directory above several repositories places each file in
+// the repository the locator finds for it, and drops files in none.
+func TestCodexEditsLocateEachFile(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: app/a.go\n+a\n*** Add File: lib/b.go\n+b\n*** Add File: notes/c.md\n+c\n*** End Patch"
+	payload, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "apply_patch",
+		"cwd": "/work", "tool_input": map[string]any{"command": patch}})
+	locate := func(path string) (string, string, bool) {
+		for _, root := range []string{"/work/app", "/work/lib"} {
+			if root, rel, ok := Within(root)(path); ok {
+				return root, rel, ok
+			}
+		}
+		return "", "", false
+	}
+	var got []string
+	for _, e := range CodexEdits(payload, locate) {
+		got = append(got, e.Root+" "+e.Path)
+	}
+	if want := []string{"/work/app a.go", "/work/lib b.go"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("edits = %q, want %q", got, want)
 	}
 }

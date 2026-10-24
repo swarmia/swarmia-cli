@@ -44,7 +44,9 @@ var processCmd = &cobra.Command{
 			return quietIf(processBackground, err)
 		}
 		var delivered deliver.Outcome
-		if cfg, err := config.Load(repo.Root); err == nil && cfg.Token != "" {
+		// Until payloads can carry several repositories, only a project in a
+		// repository delivers, and only that repository's part of a session.
+		if cfg, err := config.Load(repo.Root); err == nil && cfg.Token != "" && repo.Root != "" {
 			opts.AfterAttribute = func(sessions []*report.Session) error {
 				delivered, err = deliver.Deliver(sessions, deliveryOptions(repo, cfg, opts, false))
 				return err
@@ -82,26 +84,25 @@ func quietIf(background bool, err error) error {
 	return err
 }
 
-// processOptions resolves the repository, log and state directory for the
-// current project. byAuthor limits candidate commits to the user's git email.
+// processOptions resolves the log and state directory for the current
+// project, and its repository: the zero Repo if the project isn't in one (it
+// may hold several), whose sessions are still processed. byAuthor limits each
+// repository's candidate commits to the user's git email there.
 func processOptions(logFlag string, byAuthor, wait bool) (report.ProcessOptions, gitrepo.Repo, error) {
-	repo, err := gitrepo.Find(projectDir())
-	if err != nil {
-		return report.ProcessOptions{}, gitrepo.Repo{}, err
-	}
+	repo, _ := gitrepo.Find(projectDir())
 	logPath, err := eventsPath(logFlag)
 	if err != nil {
 		return report.ProcessOptions{}, repo, err
 	}
 	opts := report.ProcessOptions{
-		Options:  report.Options{RepoDir: repo.Root, FallbackRoot: repo.Root},
+		Options:  report.Options{FallbackRoot: repo.Root},
 		LogPath:  logPath,
 		StateDir: filepath.Dir(logPath),
 		Wait:     wait,
 		Now:      time.Now(),
 	}
 	if byAuthor {
-		opts.AuthorEmail = authorEmail(repo.Root)
+		opts.AuthorEmail = authorEmail
 	}
 	return opts, repo, nil
 }

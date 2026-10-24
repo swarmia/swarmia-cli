@@ -25,7 +25,7 @@ func session() *report.Session {
 			{At: at, Name: "Edit", File: "/src/app/internal/x.go"},
 			{At: at, Name: "Read", File: "/home/me/.claude/plans/plan.md"},
 		},
-		AILinesByPath: map[string]int{"internal/x.go": 5},
+		AILinesByRoot: map[string]map[string]int{"/src/app": {"internal/x.go": 5}},
 		Attribution: &report.Attribution{Commits: []report.Commit{
 			{SHA: "pushed1", Pushed: true, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 0, End: 2}}},
 			{SHA: "local1", Pushed: false, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 4, End: 5, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 3, End: 4}}},
@@ -207,5 +207,30 @@ func TestRepoSlugSSHAlias(t *testing.T) {
 		if got := RepoSlug(in, resolve); got != want {
 			t.Errorf("RepoSlug(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Until payloads carry several repositories, one holds only its repository's
+// part of a session: commits, survived lines and AI lines elsewhere are left
+// out.
+func TestBuildKeepsToItsRepository(t *testing.T) {
+	s := session()
+	s.AILinesByRoot["/src/lib"] = map[string]int{"lib.go": 7}
+	s.Attribution.Commits = append(s.Attribution.Commits, report.Commit{
+		Root: "/src/lib", SHA: "libsha", Pushed: true,
+		Files: []report.File{{Path: "lib.go", Lines: []report.Range{{Start: 1, End: 7, Class: attribution.Exact}}}},
+		Kept:  []report.Span{{Start: 10, End: 16}},
+	})
+	for i := range s.Attribution.Commits[:2] {
+		s.Attribution.Commits[i].Root = "/src/app"
+	}
+
+	p := Build(s, Context{RepoRoot: "/src/app", InRepo: func(root string) bool { return root == "/src/app" }})
+	if len(p.Commits) != 1 || p.Commits[0].SHA != "pushed1" || p.AILines != 5 || p.AILinesKept != 3 {
+		t.Errorf("commits = %+v, generated = %d, committed = %d; want app's alone", p.Commits, p.AILines, p.AILinesKept)
+	}
+	// Without InRepo everything counts.
+	if p := Build(s, Context{RepoRoot: "/src/app"}); len(p.Commits) != 2 || p.AILines != 12 || p.AILinesKept != 10 {
+		t.Errorf("commits = %+v, generated = %d, committed = %d; want both repositories", p.Commits, p.AILines, p.AILinesKept)
 	}
 }

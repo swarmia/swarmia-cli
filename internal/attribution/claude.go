@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-// Edit is a change an agent made to one file: the file's path relative to the
-// repository root (slash-separated) and the hunks it wrote.
+// Edit is a change an agent made to one file: the worktree the file is in,
+// the file's path relative to it (slash-separated) and the hunks it wrote.
 type Edit struct {
+	Root  string
 	Path  string
 	Hunks []Hunk
 	// After is the whole file once the edit was applied, when the payload
@@ -51,15 +52,27 @@ func IsClaudeEditTool(name string) bool {
 	return false
 }
 
+// Locator finds the worktree an absolute file path is in, and the path within
+// it. ok is false for a file in no worktree it knows.
+type Locator func(path string) (root, rel string, ok bool)
+
+// Within locates files inside the one worktree root.
+func Within(root string) Locator {
+	return func(path string) (string, string, bool) {
+		rel, ok := relPath(root, path)
+		return root, rel, ok
+	}
+}
+
 // ClaudeEdit extracts the edit from a Claude Code hook payload. ok is false for
-// anything that isn't an Edit, MultiEdit or Write of a file inside root.
+// anything that isn't an Edit, MultiEdit or Write of a file locate finds.
 //
 // It rebuilds the file before and after the tool call from the response's
 // originalFile and the tool input, and diffs the two. (The response also has a
 // structuredPatch, but it renders tabs as spaces, so it isn't verbatim.)
 // Without originalFile it falls back to the input alone: a Write's whole
 // content, or each old_string → new_string diffed on its own.
-func ClaudeEdit(payload []byte, root string) (Edit, bool) {
+func ClaudeEdit(payload []byte, locate Locator) (Edit, bool) {
 	var ev claudeToolEvent
 	if err := json.Unmarshal(payload, &ev); err != nil || ev.HookEventName != "PostToolUse" {
 		return Edit{}, false
@@ -75,14 +88,17 @@ func ClaudeEdit(payload []byte, root string) (Edit, bool) {
 	default:
 		return Edit{}, false
 	}
-	path, ok := relPath(root, in.FilePath)
+	if !filepath.IsAbs(in.FilePath) {
+		return Edit{}, false
+	}
+	root, path, ok := locate(filepath.Clean(in.FilePath))
 	if !ok {
 		return Edit{}, false
 	}
 
 	var resp claudeToolResponse
 	_ = json.Unmarshal(ev.ToolResponse, &resp) // a failed tool's response is a plain string
-	edit := Edit{Path: path}
+	edit := Edit{Root: root, Path: path}
 	switch {
 	case in.Content != nil:
 		before := ""

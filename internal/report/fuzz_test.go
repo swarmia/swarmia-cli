@@ -466,7 +466,7 @@ type pstats struct {
 }
 
 func (p *pfuzzer) evaluate(st *pstats, trial int) {
-	sessions, err := Build(p.f.recs, Options{RepoDir: p.f.root, FallbackRoot: p.f.root, AuthorEmail: me})
+	sessions, err := Build(p.f.recs, Options{FallbackRoot: p.f.root, AuthorEmail: emailIs(me)})
 	if err != nil {
 		p.t.Fatal(err)
 	}

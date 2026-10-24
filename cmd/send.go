@@ -31,6 +31,9 @@ var sendCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if repo.Root == "" {
+			return fmt.Errorf("not in a git repository; sessions started outside one can't be sent yet")
+		}
 		cfg, err := config.Load(repo.Root)
 		if err != nil {
 			return err

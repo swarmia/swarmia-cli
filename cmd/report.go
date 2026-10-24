@@ -236,7 +236,11 @@ func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Rep
 // payloadContext gathers what payloads need beyond the session itself.
 func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
 	ctx := payload.Context{
-		RepoRoot:    repo.Root,
+		RepoRoot: repo.Root,
+		InRepo: func(root string) bool {
+			r, err := gitrepo.Find(root)
+			return err == nil && r.CommonDir == repo.CommonDir
+		},
 		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin"), sshHostName),
 		AuthorEmail: authorEmail(repo.Root),
 		CLIVersion:  version,

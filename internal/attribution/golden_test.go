@@ -32,7 +32,7 @@ func TestGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			edit, ok := ClaudeEdit(payload, "/repo")
+			edit, ok := ClaudeEdit(payload, Within("/repo"))
 			if !ok {
 				t.Fatal("ClaudeEdit: no edit extracted")
 			}

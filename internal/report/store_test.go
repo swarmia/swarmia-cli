@@ -32,7 +32,7 @@ func writeLog(t *testing.T, path string, recs []events.Record) {
 func (f *fixture) process(t *testing.T, stateDir string, now time.Time) ProcessResult {
 	t.Helper()
 	res, err := Process(ProcessOptions{
-		Options:  Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"},
+		Options:  Options{FallbackRoot: f.root, AuthorEmail: emailIs("me@example.com")},
 		LogPath:  filepath.Join(stateDir, "events.jsonl"),
 		StateDir: stateDir,
 		Wait:     true,
