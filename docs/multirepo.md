@@ -180,7 +180,10 @@ section in `docs/optimization-roadmap.md` for the same issues.
    work outside a repo.~~ Done.
 2. ~~Build payloads in the new shape, grouped by delivery target, with
    per-target delivery state.~~ Done.
-3. Snapshot tiers 1 and 2, recording which repos each command covered.
+3. ~~Snapshot tiers 1 and 2, recording which repos each command covered.~~
+   Done (`snapshot.Scope`, at most 8 worktrees per command; records list
+   them in `snapshotted`). Measured from `~/swarmia-src/monorepo`: three
+   extra worktrees cost ~7 ms per side, eight ~30 ms.
 4. E2E scenarios: launch in a parent dir, edit two child repos, commit in
    both; a single-repo session editing a sibling.
 5. Sampled background sweep while dogfooding; feed the misses back into

@@ -211,7 +211,7 @@ func TestProcessLeavesNewerFormatsAlone(t *testing.T) {
 	f.agentWrite(t0, "gen.go", "package gen\n", nil) // sess-1, this version's
 	writeLog(t, logPath, f.recs)
 
-	newerRecord := `{"format":2,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-2"},"from_the_future":[1,2]}` + "\n"
+	newerRecord := fmt.Sprintf(`{"format":%d,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-2"},"from_the_future":[1,2]}`, events.Format+1) + "\n"
 	newerSession := fmt.Sprintf(`{"format":%d,"id":"sess-3","agent":"claude-code","from_the_future":true}`, SessionFormat+1)
 	ofNewerSession := `{"format":1,"logged_at":"2026-10-07T10:00:00Z","event":{"session_id":"sess-3","hook_event_name":"Stop"}}` + "\n"
 	sessions := filepath.Join(state, "sessions")

@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/swarmia/swarmia-cli/internal/deliver"
+	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/payload"
 )
 
@@ -290,5 +292,129 @@ func TestSendWithTokenInParentDirectory(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), filepath.Join(parent, ".swarmia.json")) {
 		t.Errorf("config output doesn't name the directory's file:\n%s", out.String())
+	}
+}
+
+// hook sends log-hook a Claude Code tool event of session s.
+func hook(t *testing.T, event map[string]any) {
+	t.Helper()
+	event["session_id"] = "s"
+	data, _ := json.Marshal(event)
+	if err := runLogHook(bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// shellCommand runs a Bash tool call through log-hook: PreToolUse, then
+// effect (what the command does), then PostToolUse. It returns the
+// PostToolUse record.
+func shellCommand(t *testing.T, cwd, command string, effect func()) events.Record {
+	t.Helper()
+	event := func(name string) map[string]any {
+		return map[string]any{"hook_event_name": name, "tool_name": "Bash", "tool_use_id": "toolu_" + command,
+			"cwd": cwd, "tool_input": map[string]any{"command": command}}
+	}
+	hook(t, event("PreToolUse"))
+	time.Sleep(10 * time.Millisecond) // distinct mtimes on coarse filesystems
+	effect()
+	hook(t, event("PostToolUse"))
+	path, err := eventsPath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := events.ReadFile(path)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("records: %v, %v", recs, err)
+	}
+	return recs[len(recs)-1]
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func changed(rec events.Record) []string {
+	var out []string
+	for _, c := range rec.Changes {
+		out = append(out, c.Root+" "+c.Path)
+	}
+	return out
+}
+
+// A shell command that names a sibling repository is snapshotted there too:
+// what it writes there is recorded in that repository (as format 2, which
+// older binaries leave alone), and attributed to its commits.
+func TestShellCommandNamingSibling(t *testing.T) {
+	parent := tempDir(t)
+	app, lib := newRepoAt(t, filepath.Join(parent, "app")), newRepoAt(t, filepath.Join(parent, "lib"))
+	projectIn(t, app)
+
+	code := "package lib\n\nfunc Generated() string { return \"from the generator\" }\n"
+	rec := shellCommand(t, app, "cd ../lib && ./gen.sh", func() { writeFile(t, filepath.Join(lib, "gen.go"), code) })
+	if want := []string{lib + " gen.go"}; !reflect.DeepEqual(changed(rec), want) || rec.Format != 2 {
+		t.Errorf("changes = %q (format %d), want %q in format 2", changed(rec), rec.Format, want)
+	}
+	if want := []string{app, lib}; !reflect.DeepEqual(rec.Snapshotted, want) {
+		t.Errorf("snapshotted = %q, want %q", rec.Snapshotted, want)
+	}
+
+	git(t, lib, "add", ".")
+	git(t, lib, "commit", "-q", "-m", "generate")
+	sha := git(t, lib, "rev-parse", "HEAD")
+	if out := runReportFor(t, false); !strings.Contains(out, sha[:7]) || !strings.Contains(out, "gen.go") || !strings.Contains(out, "(1 via shell)") {
+		t.Errorf("report lacks the generated file's commit:\n%s", out)
+	}
+}
+
+// A repository the session worked in before is snapshotted for later
+// commands, even ones that don't name it; one it never worked in isn't, and
+// what a command writes there goes unrecorded (the gap docs/multirepo.md
+// accepts and measures).
+func TestShellCommandInWorkingSet(t *testing.T) {
+	parent := tempDir(t)
+	app, lib, other := newRepoAt(t, filepath.Join(parent, "app")), newRepoAt(t, filepath.Join(parent, "lib")), newRepoAt(t, filepath.Join(parent, "other"))
+	projectIn(t, app)
+
+	hook(t, map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Read", "cwd": app,
+		"tool_input": map[string]any{"file_path": filepath.Join(lib, "README.md")}})
+	rec := shellCommand(t, app, "./sync-all.sh", func() {
+		writeFile(t, filepath.Join(lib, "synced.go"), "package lib\n\nvar Synced = true\n")
+		writeFile(t, filepath.Join(other, "synced.go"), "package other\n\nvar Synced = true\n")
+	})
+	if want := []string{lib + " synced.go"}; !reflect.DeepEqual(changed(rec), want) {
+		t.Errorf("changes = %q, want %q", changed(rec), want)
+	}
+	if want := []string{app, lib}; !reflect.DeepEqual(rec.Snapshotted, want) {
+		t.Errorf("snapshotted = %q, want %q (not other)", rec.Snapshotted, want)
+	}
+}
+
+// Started in a directory holding repositories, which isn't one: a command
+// run there is snapshotted in the repository it names, and its changes carry
+// their root, there being no record's own. A command run there before the
+// session worked anywhere has nothing to snapshot.
+func TestShellCommandOutsideRepository(t *testing.T) {
+	parent := tempDir(t)
+	a := newRepoAt(t, filepath.Join(parent, "a"))
+	projectIn(t, parent)
+
+	if rec := shellCommand(t, parent, "make", func() {}); len(rec.Snapshotted) != 0 || rec.Snapshot != "" {
+		t.Errorf("record = %+v, want nothing snapshotted", rec)
+	}
+	rec := shellCommand(t, parent, "cd a && make", func() { writeFile(t, filepath.Join(a, "built.go"), "package a\n\nvar Built = 1\n") })
+	if want := []string{a + " built.go"}; rec.Git != nil || !reflect.DeepEqual(changed(rec), want) || rec.Format != 2 {
+		t.Errorf("git = %+v, changes = %q, format %d; want no git, %q, format 2", rec.Git, changed(rec), rec.Format, want)
+	}
+	// The command it changed is now in the working set: a later command that
+	// doesn't name it is snapshotted there too.
+	rec = shellCommand(t, parent, "make", func() { writeFile(t, filepath.Join(a, "again.go"), "package a\n\nvar Again = 1\n") })
+	if want := []string{a + " again.go"}; !reflect.DeepEqual(rec.Snapshotted, []string{a}) || !reflect.DeepEqual(changed(rec), want) {
+		t.Errorf("snapshotted = %q, changes = %q; want a and %q", rec.Snapshotted, changed(rec), want)
 	}
 }

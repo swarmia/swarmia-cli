@@ -313,8 +313,8 @@ func sortedSessions(m map[string]*Session) []*Session {
 // that's an event logged twice by overlapping hooks.
 //
 // An edit tool's file is placed in the worktree it is in, whichever repository
-// that is; a shell command's changes, in the worktree it was snapshotted in
-// (the record's, else fallbackRoot).
+// that is; a shell command's changes, in the worktree they were snapshotted
+// in (their own, else the record's, else fallbackRoot).
 func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot string) {
 	seen := map[string]bool{}
 	loc := newLocator()
@@ -399,7 +399,11 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 				s.addEdit(Edit{At: at, Root: e.Root, Path: e.Path, Hunks: encode(e.Hunks)}, e.After, e.AfterKnown)
 			}
 			for _, fc := range rec.Changes { // what a shell command authored
-				s.addEdit(Edit{At: at, Root: root, Path: fc.Path, Hunks: fc.Hunks, ViaShell: true}, "", false)
+				r := root
+				if fc.Root != "" {
+					r = fc.Root
+				}
+				s.addEdit(Edit{At: at, Root: r, Path: fc.Path, Hunks: fc.Hunks, ViaShell: true}, "", false)
 			}
 		}
 	}
