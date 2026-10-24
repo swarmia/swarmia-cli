@@ -40,6 +40,7 @@ func runScenario(t *testing.T, ag agent) {
 	e.buildSwarmia()
 	ag.install(e, envOr(ag.versionVar(), "latest"))
 	e.setupFixture()
+	e.installHooks()
 	if e.auth.kind == authNone {
 		if os.Getenv("E2E_REQUIRE_AUTH") != "" {
 			t.Fatal("no credentials for the agent, and E2E_REQUIRE_AUTH is set (see docs/e2e.md)")
@@ -176,6 +177,9 @@ func runScenario(t *testing.T, ag agent) {
 			if !c.p.Ended || c.p.Model == "" || c.p.Agent != ag.name() {
 				t.Errorf("%s: ended=%v model=%q agent=%q", c.name, c.p.Ended, c.p.Model, c.p.Agent)
 			}
+			if len(c.p.Repos) != 1 || c.p.Repos[0].Repo != "e2e.example/acme/ufo" {
+				t.Errorf("%s: repos = %+v, want e2e.example/acme/ufo alone", c.name, c.p.Repos)
+			}
 		}
 		if !hasTool(p2, "Bash") {
 			t.Errorf("S2 has no Bash call; the rename should have been a shell command")
@@ -227,7 +231,7 @@ func runScenario(t *testing.T, ag agent) {
 					t.Errorf("attribution on the teammate's commit")
 				}
 				if introduced[c.SHA] == nil {
-					introduced[c.SHA] = introducedLines(e, c.SHA)
+					introduced[c.SHA] = introducedLines(e, e.repo, c.SHA)
 				}
 			}
 		}
@@ -262,7 +266,7 @@ func runScenario(t *testing.T, ag agent) {
 					continue
 				}
 				if introduced[sha] == nil {
-					introduced[sha] = introducedLines(e, sha)
+					introduced[sha] = introducedLines(e, e.repo, sha)
 				}
 				for path, lines := range introduced[sha] {
 					for n, text := range lines {
@@ -388,7 +392,7 @@ func (w *agentWork) owns(text, tweaked string) string {
 // run) its transcript's tool inputs.
 func (e *env) agentStep(w *agentWork, step, sessionID, prompt string) agentRun {
 	e.t.Helper()
-	before := snapshotTree(e.t, e.repo)
+	before := snapshotTree(e.t, e.workspace)
 	if w.preexisting == nil {
 		w.preexisting = map[string]bool{}
 		for _, content := range before {
@@ -404,7 +408,7 @@ func (e *env) agentStep(w *agentWork, step, sessionID, prompt string) agentRun {
 	if !r.ReachedModel {
 		e.t.Fatalf("%s: the agent got no model response: %s", step, r.Message)
 	}
-	for _, l := range changedLines(before, snapshotTree(e.t, e.repo)) {
+	for _, l := range changedLines(before, snapshotTree(e.t, e.workspace)) {
 		w.add(l)
 	}
 	if r.Transcript != "" {
@@ -438,7 +442,8 @@ func (e *env) tweakAgentLine(t *testing.T, file string, w *agentWork) string {
 	return lines[best]
 }
 
-// snapshotTree reads the fixture's own files (not dependencies or git data).
+// snapshotTree reads the files of the repositories under root (not
+// dependencies, agent settings or git data).
 func snapshotTree(t *testing.T, root string) map[string]string {
 	t.Helper()
 	files := map[string]string{}
@@ -519,12 +524,14 @@ type payload struct {
 	Prompts   []struct {
 		Text string `json:"text"`
 	} `json:"prompts"`
-	Tools []struct {
-		Name    string `json:"name"`
-		File    string `json:"file"`
-		Command string `json:"command"`
-	} `json:"tools"`
+	Repos []struct {
+		Repo        string `json:"repo"`
+		AILines     int    `json:"ai_lines_generated"`
+		AILinesKept int    `json:"ai_lines_committed"`
+	} `json:"repos"`
+	Tools   []toolPayload `json:"tools"`
 	Commits []struct {
+		Repo  string `json:"repo"`
 		SHA   string `json:"sha"`
 		Path  string `json:"path"`
 		Lines []struct {
@@ -537,6 +544,13 @@ type payload struct {
 		Model        string `json:"model"`
 		OutputTokens int64  `json:"output_tokens"`
 	} `json:"usage"`
+}
+
+type toolPayload struct {
+	Name    string `json:"name"`
+	Repo    string `json:"repo"`
+	File    string `json:"file"`
+	Command string `json:"command"`
 }
 
 func findPayload(t *testing.T, payloads []payload, sessionID string) payload {
@@ -578,9 +592,10 @@ func normalizeLine(s string) string {
 
 var hunkHeader = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
 
-// introducedLines lists the non-blank lines a commit added, per path and line.
-func introducedLines(e *env, commit string) map[string]map[int]string {
-	out := e.run(e.repo, nil, "git", "show", "--format=", "-U0", "--no-color", commit)
+// introducedLines lists the non-blank lines a commit in the repository in dir
+// added, per path and line.
+func introducedLines(e *env, dir, commit string) map[string]map[int]string {
+	out := e.run(dir, nil, "git", "show", "--format=", "-U0", "--no-color", commit)
 	result := map[string]map[int]string{}
 	var path string
 	n := 0

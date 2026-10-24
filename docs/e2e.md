@@ -61,8 +61,11 @@ finding one fails the run.
    `@anthropic-ai/claude-code@<version>` (`latest`, `stable`, or exact) or
    `@openai/codex@<version>` (`latest`, `alpha`, or exact).
 3. Fixture: `unjs/ufo` (MIT, TypeScript, prettier, vitest), fetched at a pinned
-   commit. A local bare repository acts as `origin`; a teammate clone pushes
-   to it.
+   commit and published as `ssh://git@e2e.example/acme/ufo.git`; a teammate
+   clone pushes to it. Remotes look hosted, so payloads name their
+   repositories as they would for real (`e2e.example/acme/ufo`), but live on
+   disk: a stand-in for ssh (`GIT_SSH_COMMAND`) serves them from local bare
+   repositories.
 4. `pnpm install`, then `swarmia-cli install --scope project` (for Codex with
    `--trust`, into the sandbox's `CODEX_HOME`). `.claude/` or `.codex/` is in
    `.git/info/exclude`, so the hooks are never committed.
@@ -88,6 +91,25 @@ project`, with an explicit `--session-id` (and `--resume`) so sessions map
 one-to-one to swarmia-cli's. Codex runs as `codex exec --json
 --dangerously-bypass-approvals-and-sandbox`, which picks the session id itself
 (the stream's `thread.started`), and `codex exec resume <id>`.
+
+## Multi-repository scenario
+
+Developers with many repositories start their agent in the directory holding
+them (see `docs/multirepo.md`). This scenario does that: a workspace that isn't
+a repository holds the fixture as `ufo`, a small `client` repository and an
+`unrelated` one, all published like the fixture; the hooks are installed in
+the workspace.
+
+| Step | Who | Exercises |
+|---|---|---|
+| "Add `isLocalhostURL` to `ufo/src/utils.ts`; create `client/src/hosts.ts` with one shell heredoc" | agent | edit capture in one repository, shell snapshots in another named by the command |
+| commit and push both repositories | script | attribution per repository |
+
+Checks: one payload for the session (no tokens: one delivery target); `repos`
+lists `ufo` and `client`, each with AI lines committed, and any other only if
+a tool call worked in it; tool calls carry their repository and a path
+relative to it; per repository, the same oracle as above (precision, recall,
+class agreement); no local paths. It costs one agent turn.
 
 ## Checks
 
