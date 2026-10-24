@@ -68,7 +68,7 @@ func repoKey(dir string) string {
 		return repo.CommonDir
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		if resolved, err := gitrepo.Canonical(abs); err == nil {
 			return resolved
 		}
 		return abs

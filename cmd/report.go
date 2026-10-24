@@ -16,6 +16,7 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/config"
+	"github.com/swarmia/swarmia-cli/internal/gitrepo"
 	"github.com/swarmia/swarmia-cli/internal/payload"
 	"github.com/swarmia/swarmia-cli/internal/report"
 	"github.com/swarmia/swarmia-cli/internal/snapshot"
@@ -253,7 +254,7 @@ func writeReportJSON(out io.Writer, sessions []*report.Session) error {
 // goes, and the developer's email there.
 func payloadContext() payload.Context {
 	ctx := payload.Context{CLIVersion: version, ProjectDir: projectDir()}
-	if dir, err := filepath.EvalSymlinks(ctx.ProjectDir); err == nil {
+	if dir, err := gitrepo.Canonical(ctx.ProjectDir); err == nil {
 		ctx.ProjectDir = dir // as worktree roots are
 	}
 	if home, err := os.UserHomeDir(); err == nil {

@@ -217,3 +217,18 @@ func TestPruneKeepsEveryWorktreesBlobs(t *testing.T) {
 		t.Errorf("last snapshots = %v, want one per worktree", entries)
 	}
 }
+
+// On a case-insensitive filesystem a word naming a worktree in another case
+// (here from a heredoc's prose) is that worktree, snapshotted once.
+func TestScopeSpellsWorktreesOnce(t *testing.T) {
+	f := newFixture(t)
+	parent, _ := filepath.EvalSymlinks(t.TempDir())
+	aimo := f.repoAt(filepath.Join(parent, "aimo"))
+	if _, err := os.Stat(filepath.Join(parent, "AIMO")); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+	command := "python3 - <<'EOF'\nprint('Why did Aimo get kicked out of the Slack channel?')\nopen('aimo/README.md', 'a')\nEOF"
+	if got := roots(Scope(command, parent, []string{aimo})); !reflect.DeepEqual(got, []string{aimo}) {
+		t.Errorf("scope = %q, want aimo once", got)
+	}
+}

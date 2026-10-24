@@ -394,3 +394,30 @@ func TestFoldRecordsWhereToolsWorked(t *testing.T) {
 		t.Errorf("session root %q, tool roots %q; want %q, %q", s.Root, roots, a.root, want)
 	}
 }
+
+// On a case-insensitive filesystem, edits through a path in another case are
+// in the worktree as the filesystem spells it: one file, one commit.
+func TestFoldSpellsWorktreesOnce(t *testing.T) {
+	parent, _ := filepath.EvalSymlinks(t.TempDir())
+	aimo := newFixtureAt(t, filepath.Join(parent, "aimo"))
+	if _, err := os.Stat(filepath.Join(parent, "AIMO")); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+	joke := "Why did Aimo get kicked out of the Slack channel?\n"
+	var recs []events.Record
+	writeEvent(t, &recs, t0, "", writeTool(filepath.Join(parent, "aimo", "README.md"), joke))
+	writeEvent(t, &recs, t0.Add(time.Second), "", writeTool(filepath.Join(parent, "Aimo", "README.md"), joke+joke))
+	sha := aimo.commit(t0.Add(time.Minute), "me@example.com", "joke", map[string]string{"README.md": joke + joke})
+
+	sessions, err := Build(recs, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sessions[0]
+	if len(s.AILinesByRoot) != 1 || s.Edits[1].Root != aimo.root {
+		t.Errorf("AI lines = %v, edit roots %q, %q; want aimo alone", s.AILinesByRoot, s.Edits[0].Root, s.Edits[1].Root)
+	}
+	if got := commitFiles(s); len(got) != 1 || got[0].SHA != sha || got[0].Root != aimo.root {
+		t.Errorf("commits = %+v, want %s once", got, sha[:7])
+	}
+}

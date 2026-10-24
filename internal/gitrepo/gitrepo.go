@@ -14,7 +14,7 @@ import (
 var ErrNotRepo = errors.New("not inside a git repository")
 
 // Repo locates one worktree of a repository. All paths are absolute and
-// symlink-resolved, so the same repo always yields the same values.
+// canonical (see Canonical), so the same repo always yields the same values.
 type Repo struct {
 	Root      string // the worktree's top-level directory
 	GitDir    string // per-worktree git directory (where HEAD lives)
@@ -69,10 +69,10 @@ func readGitFile(path string) (string, error) {
 func resolve(root, gitDir string) (Repo, error) {
 	var r Repo
 	var err error
-	if r.Root, err = filepath.EvalSymlinks(root); err != nil {
+	if r.Root, err = Canonical(root); err != nil {
 		return Repo{}, err
 	}
-	if r.GitDir, err = filepath.EvalSymlinks(gitDir); err != nil {
+	if r.GitDir, err = Canonical(gitDir); err != nil {
 		return Repo{}, err
 	}
 	r.CommonDir = r.GitDir
@@ -81,11 +81,29 @@ func resolve(root, gitDir string) (Repo, error) {
 		if !filepath.IsAbs(common) {
 			common = filepath.Join(r.GitDir, common)
 		}
-		if r.CommonDir, err = filepath.EvalSymlinks(common); err != nil {
+		if r.CommonDir, err = Canonical(common); err != nil {
 			return Repo{}, err
 		}
 	}
 	return r, nil
+}
+
+// Canonical is the one spelling of an existing path: absolute, symlinks
+// resolved, and on a case-insensitive filesystem (macOS's default) each name
+// spelled as the filesystem stores it, so that ~/src/Aimo and ~/src/aimo,
+// the same directory, aren't taken for two.
+func Canonical(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(resolved); err == nil {
+		resolved = abs
+	}
+	if c := canonical(resolved); c != "" {
+		return c, nil
+	}
+	return resolved, nil
 }
 
 // State is a worktree's position: where HEAD points.

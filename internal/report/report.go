@@ -430,9 +430,9 @@ func encode(hunks []attribution.Hunk) [][]string {
 
 // locator places files and directories in the worktree of the repository
 // they are in, so edits and tool calls count in any repository, not only the
-// project's. Paths are resolved through symlinks first, as worktree roots
-// are; the part of a path that no longer exists (a file or directory deleted
-// since) is kept as it is.
+// project's. Paths are made canonical first, as worktree roots are (symlinks
+// resolved, spelled as the filesystem has them); the part of a path that no
+// longer exists (a file or directory deleted since) is kept as it is.
 type locator struct {
 	roots map[string]string // resolved directory -> its worktree root, "" for none
 }
@@ -467,11 +467,12 @@ func insideDir(dir, path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// resolveExisting resolves symlinks in the longest part of path that exists.
+// resolveExisting makes the longest part of path that exists canonical (see
+// gitrepo.Canonical).
 func resolveExisting(path string) string {
 	rest := ""
 	for dir := path; ; dir = filepath.Dir(dir) {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		if resolved, err := gitrepo.Canonical(dir); err == nil {
 			return filepath.Join(resolved, rest)
 		}
 		if parent := filepath.Dir(dir); parent == dir {
