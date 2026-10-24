@@ -130,6 +130,12 @@ func runMultiRepoScenario(t *testing.T, ag agent) {
 		if !hasTool(p, "Bash") {
 			t.Error("no Bash call; client/src/hosts.ts should have been written by a shell command")
 		}
+		for _, u := range p.Usage {
+			m.OutputTokens += u.OutputTokens
+		}
+		if m.OutputTokens == 0 {
+			t.Error("no usage in the payload")
+		}
 	})
 
 	t.Run("repositories", func(t *testing.T) {
