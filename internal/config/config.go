@@ -1,14 +1,21 @@
-// Package config resolves swarmia-cli settings from three layers:
+// Package config resolves swarmia-cli settings from four layers:
 //
+//   - a .swarmia.json in a directory above the repository, the nearest one,
+//     for a developer who keeps many repositories in one directory: up to the
+//     repository enclosing it, if any, whose own file doesn't apply;
 //   - the repository's .swarmia.json, which a team may commit (its token is
 //     write-only: it can submit data for its organization and nothing else);
 //   - the user's ~/.config/swarmia/config.json ($XDG_CONFIG_HOME honoured);
 //   - environment variables: SWARMIA_TOKEN, SWARMIA_ENDPOINT, SWARMIA_PROMPTS.
 //
 // The token and endpoint come from the most specific layer that sets them
-// (environment, then user, then repository). Prompts are shared unless any
-// layer turns them off: an individual can always withhold their own prompts,
-// and so can a repository's configuration.
+// (environment, then user, then repository, then directory): what an
+// organization distributes to machines (MDM) overrides files on disk, and a
+// directory's file only fills in for repositories that don't say, so that a
+// repository of another organization in the same directory keeps its own
+// token. Prompts
+// are shared unless any layer turns them off: an individual can always
+// withhold their own prompts, and so can a repository's configuration.
 //
 // swarmia-cli only reads these files; it never writes them.
 package config
@@ -59,8 +66,10 @@ func UserPath() (string, error) {
 	return filepath.Join(dir, "swarmia", "config.json"), nil
 }
 
-// Load resolves the configuration for the repository at repoRoot.
-func Load(repoRoot string) (Config, error) {
+// Load resolves the configuration for dir: a repository's worktree root, or a
+// directory in no repository (where an agent was started, say), which has no
+// repository layer and whose own .swarmia.json is a directory one.
+func Load(dir string) (Config, error) {
 	cfg := Config{Endpoint: DefaultEndpoint, EndpointSource: "default", Prompts: true, PromptsSource: "default"}
 
 	type layer struct {
@@ -68,8 +77,20 @@ func Load(repoRoot string) (Config, error) {
 		file File
 	}
 	var layers []layer // least to most specific
-	if repoRoot != "" {
-		path := filepath.Join(repoRoot, RepoFile)
+	var paths []string
+	if dir != "" {
+		above, repoFile := dir, ""
+		if isWorktreeRoot(dir) {
+			above, repoFile = filepath.Dir(dir), filepath.Join(dir, RepoFile)
+		}
+		if path := directoryFile(above); path != "" {
+			paths = append(paths, path)
+		}
+		if repoFile != "" {
+			paths = append(paths, repoFile)
+		}
+	}
+	for _, path := range paths {
 		f, err := readFile(path)
 		if err != nil {
 			return cfg, err
@@ -105,6 +126,31 @@ func Load(repoRoot string) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// directoryFile is the nearest .swarmia.json in dir or a directory above it,
+// stopping at a repository's worktree root: that file is the repository's,
+// not one for the repositories below it.
+func directoryFile(dir string) string {
+	for {
+		if isWorktreeRoot(dir) {
+			return ""
+		}
+		path := filepath.Join(dir, RepoFile)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func isWorktreeRoot(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 func readFile(path string) (File, error) {

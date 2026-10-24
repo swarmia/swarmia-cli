@@ -32,7 +32,7 @@ var sendCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if cfg, err := config.Load(repo.Root); err == nil {
+		if cfg, err := config.Load(configDir(repo.Root)); err == nil {
 			if w := cfg.TokenWarning(); w != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s.\n", w)
 			}

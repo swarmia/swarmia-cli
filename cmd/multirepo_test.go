@@ -251,3 +251,44 @@ func TestSendSplitsSessionByToken(t *testing.T) {
 		t.Errorf("report --json printed %d payloads, want 3", n)
 	}
 }
+
+// A .swarmia.json in the directory holding the repositories configures those
+// without their own; one committing another organization's token keeps it.
+func TestSendWithTokenInParentDirectory(t *testing.T) {
+	in := newIngest(t)
+	parent := tempDir(t)
+	dirToken, clientToken := "swm_cli_"+strings.Repeat("d", 64), "swm_cli_"+strings.Repeat("c", 64)
+	data, _ := json.Marshal(map[string]string{"token": dirToken, "endpoint": in.srv.URL})
+	if err := os.WriteFile(filepath.Join(parent, ".swarmia.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, b, client := newRepoAt(t, filepath.Join(parent, "a")), newRepoAt(t, filepath.Join(parent, "b")), newRepoAt(t, filepath.Join(parent, "client"))
+	configure(t, client, in.srv.URL, clientToken)
+	projectIn(t, parent)
+
+	agentWritesAndCommits(t, a, filepath.Join(a, "a.go"), "var a = \"from the agent\"\n")
+	agentWritesAndCommits(t, b, filepath.Join(b, "b.go"), "var b = \"from the agent\"\n")
+	agentWritesAndCommits(t, client, filepath.Join(client, "c.go"), "var c = \"from the agent\"\n")
+
+	if err := sendCmd.RunE(sendCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		dirToken:    {"github.com/acme/a,github.com/acme/b"},
+		clientToken: {"github.com/acme/client"},
+	}
+	if !reflect.DeepEqual(in.got, want) {
+		t.Errorf("sent %v, want %v", in.got, want)
+	}
+
+	// config, run in the directory, shows its file.
+	var out bytes.Buffer
+	configCmd.SetOut(&out)
+	t.Cleanup(func() { configCmd.SetOut(nil) })
+	if err := configCmd.RunE(configCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), filepath.Join(parent, ".swarmia.json")) {
+		t.Errorf("config output doesn't name the directory's file:\n%s", out.String())
+	}
+}

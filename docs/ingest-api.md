@@ -393,8 +393,8 @@ that harmless.
   can read that repository can submit data with it, but it allows nothing else:
   no reads, and only sessions for repositories connected to its organization
   are kept.
-- Tokens are also distributed by MDM, user config files or the `SWARMIA_TOKEN`
-  environment variable.
+- Tokens are also distributed by MDM, user config files, a `.swarmia.json` in a
+  directory holding repositories, or the `SWARMIA_TOKEN` environment variable.
 
 ## Limits
 

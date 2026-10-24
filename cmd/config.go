@@ -14,12 +14,19 @@ import (
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Show the effective configuration and where each value comes from",
-	Long: "config prints the settings swarmia-cli would use in this repository, and the\n" +
-		"source of each. Settings come from, most specific first:\n\n" +
+	Long: "config prints the settings swarmia-cli would use in this repository (or this\n" +
+		"directory, outside one), and the source of each. Settings come from, most\n" +
+		"specific first:\n\n" +
 		"  environment   SWARMIA_TOKEN, SWARMIA_ENDPOINT, SWARMIA_PROMPTS\n" +
 		"  user          ~/.config/swarmia/config.json ($XDG_CONFIG_HOME honoured)\n" +
 		"  repository    .swarmia.json at the worktree root (may be committed; its\n" +
-		"                token can only submit data, so it isn't a secret)\n\n" +
+		"                token can only submit data, so it isn't a secret)\n" +
+		"  directory     the nearest .swarmia.json above the repository, e.g. in the\n" +
+		"                directory you keep your repositories in (not above an\n" +
+		"                enclosing repository), for what the repository doesn't set\n\n" +
+		"Each repository a session worked in is sent with its own settings, so\n" +
+		"repositories of different organizations can sit side by side. A token in\n" +
+		"your user file applies to all of them.\n\n" +
 		"File format: {\"token\": \"…\", \"endpoint\": \"…\", \"prompts\": false}\n\n" +
 		"It also warns about swarmia-cli hooks Codex won't run because they aren't\n" +
 		"trusted yet, and shows it if Swarmia asked this version to be upgraded.\n\n" +
@@ -32,7 +39,7 @@ var configCmd = &cobra.Command{
 		if repo, err := gitrepo.Find(projectDir()); err == nil {
 			root = repo.Root
 		}
-		cfg, err := config.Load(root)
+		cfg, err := config.Load(configDir(root))
 		if err != nil {
 			return err
 		}
@@ -74,4 +81,13 @@ var configCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(configCmd)
+}
+
+// configDir is where settings are resolved for the project: its repository's
+// worktree root, else the project directory itself.
+func configDir(root string) string {
+	if root != "" {
+		return root
+	}
+	return projectDir()
 }
