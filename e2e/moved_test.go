@@ -13,19 +13,45 @@ import (
 
 // TestClaudeCodeMovedSession runs the moved-session scenario in docs/e2e.md
 // against Claude Code, with project hooks in app.
-func TestClaudeCodeMovedSession(t *testing.T) { runMovedSessionScenario(t, claudeCode{}, false) }
+func TestClaudeCodeMovedSession(t *testing.T) {
+	runMovedSessionScenario(t, claudeCode{}, movedSession{})
+}
 
 // TestClaudeCodeMovedSessionUserHooks runs it with user-scope hooks instead.
 func TestClaudeCodeMovedSessionUserHooks(t *testing.T) {
-	runMovedSessionScenario(t, claudeCode{}, true)
+	runMovedSessionScenario(t, claudeCode{}, movedSession{userHooks: true})
+}
+
+// TestClaudeCodeMovedSessionBack runs it the other way round, with
+// user-scope hooks: started in app, resumed from the workspace.
+func TestClaudeCodeMovedSessionBack(t *testing.T) {
+	runMovedSessionScenario(t, claudeCode{}, movedSession{userHooks: true, back: true})
 }
 
 // TestCodexMovedSession runs the moved-session scenario in docs/e2e.md
 // against Codex, with project hooks in app.
-func TestCodexMovedSession(t *testing.T) { runMovedSessionScenario(t, codex{}, false) }
+func TestCodexMovedSession(t *testing.T) { runMovedSessionScenario(t, codex{}, movedSession{}) }
 
 // TestCodexMovedSessionUserHooks runs it with user-scope hooks instead.
-func TestCodexMovedSessionUserHooks(t *testing.T) { runMovedSessionScenario(t, codex{}, true) }
+func TestCodexMovedSessionUserHooks(t *testing.T) {
+	runMovedSessionScenario(t, codex{}, movedSession{userHooks: true})
+}
+
+// TestCodexMovedSessionBack runs it the other way round, with user-scope
+// hooks: started in app, resumed from the workspace.
+func TestCodexMovedSessionBack(t *testing.T) {
+	runMovedSessionScenario(t, codex{}, movedSession{userHooks: true, back: true})
+}
+
+// movedSession is a variant of the moved-session scenario.
+type movedSession struct {
+	// userHooks puts swarmia-cli's hooks in the user's settings instead of
+	// app's project settings (the workspace has project hooks either way).
+	userHooks bool
+	// back starts the session in app and resumes it from the workspace,
+	// instead of the other way round.
+	back bool
+}
 
 // inDir runs f with the agent working in dir instead of the workspace.
 func (e *env) inDir(dir string, f func()) {
@@ -39,13 +65,14 @@ func (e *env) inDir(dir string, f func()) {
 // runMovedSessionScenario: a session doesn't stay where it was started. It
 // is started in a directory holding several repositories, moves into one of
 // them with cd, and is later resumed from a subdirectory of another, where
-// the developer has hooks too: the repository's project hooks, or (userHooks)
-// user-scope ones, which stand down where the launch directory has its own.
+// the developer has hooks too: the repository's project hooks, or user-scope
+// ones, which stand down where the launch directory has its own. Or (back)
+// it is started in a repository and resumed from the directory holding it.
 // swarmia-cli keeps its state per directory the agent is started in, so a
 // resumed session must not end up split across two of them: the server keeps
 // only the latest payload of a session, and the two halves would replace each
 // other.
-func runMovedSessionScenario(t *testing.T, ag agent, userHooks bool) {
+func runMovedSessionScenario(t *testing.T, ag agent, v movedSession) {
 	if envOr("E2E_AGENT", "claude-code") != ag.name() {
 		t.Skipf("E2E_AGENT selects %s", envOr("E2E_AGENT", "claude-code"))
 	}
@@ -60,7 +87,7 @@ func runMovedSessionScenario(t *testing.T, ag agent, userHooks bool) {
 	lib := e.newRepo("lib", map[string]string{"README.md": "# lib\n"})
 	appSrc := filepath.Join(app, "src")
 	e.installHooks()
-	if userHooks {
+	if v.userHooks {
 		e.settingSources = "user,project"
 		args := append([]string{"install", "--scope", "user", "--binary", e.swarmia}, ag.installFlags()...)
 		t.Logf("swarmia-cli install --scope user:\n%s", e.run(e.workspace, nil, e.swarmia, args...))
@@ -75,43 +102,58 @@ func runMovedSessionScenario(t *testing.T, ag agent, userHooks bool) {
 		t.Skip("setup OK; no credentials for the agent (see docs/e2e.md), skipping the agent steps")
 	}
 
-	// 1. Started in the workspace: an edit in app, then a move into lib with
-	//    cd, and a shell write from there.
-	w := &agentWork{raw: map[string]bool{}, norm: map[string]bool{}}
-	run1 := e.agentStep(w, "1-workspace", "",
-		"You are in a directory holding several git repositories. "+
-			"First, with your file editing tools, create app/src/greet.ts exporting "+
-			"`greet(name: string): string` that returns `Hello, ${name}!`. "+
-			"Then run `cd lib` as a shell command on its own. "+
-			"Then, as a separate shell command run from there, append the line `Used by app.` to README.md with echo. "+
-			"Do not run git commands.")
-	if !fileExists(filepath.Join(appSrc, "greet.ts")) || !fileContains(t, filepath.Join(lib, "README.md"), "Used by app.") {
-		t.Skipf("inconclusive: the agent didn't do step 1 (result %q, tools %v)", run1.Result, run1.ToolUses)
+	// Where the session is started and resumed, and what it's asked to do
+	// there. Whichever step runs in the workspace also moves into lib with
+	// cd, and writes there from a shell command.
+	const moveToLib = "Then run `cd lib` as a shell command on its own. " +
+		"Then, as a separate shell command run from there, append the line `Used by app.` to README.md with echo. "
+	startDir, resumeDir := e.workspace, appSrc
+	prompt1 := "You are in a directory holding several git repositories. " +
+		"First, with your file editing tools, create app/src/greet.ts exporting " +
+		"`greet(name: string): string` that returns `Hello, ${name}!`. " + moveToLib + "Do not run git commands."
+	prompt2 := "Now create farewell.ts in the current directory with your file editing tools, exporting " +
+		"`farewell(name: string): string` that returns `Goodbye, ${name}!`. Do not run git commands."
+	if v.back {
+		startDir, resumeDir = app, e.workspace
+		prompt1 = "With your file editing tools, create src/greet.ts exporting " +
+			"`greet(name: string): string` that returns `Hello, ${name}!`. Do not run git commands."
+		prompt2 = "You are now in the directory holding app and other git repositories. " +
+			"First, with your file editing tools, create app/src/farewell.ts exporting " +
+			"`farewell(name: string): string` that returns `Goodbye, ${name}!`. " + moveToLib + "Do not run git commands."
 	}
-	t.Logf("step 1: session %s, tools %v", run1.SessionID, run1.ToolUses)
 
-	// 2. The developer resumes the session from inside app/src.
+	// 1. The developer starts the session.
+	w := &agentWork{raw: map[string]bool{}, norm: map[string]bool{}}
+	var run1 agentRun
+	e.inDir(startDir, func() { run1 = e.agentStep(w, "1-start", "", prompt1) })
+	if !fileExists(filepath.Join(appSrc, "greet.ts")) {
+		t.Skipf("inconclusive: the agent didn't create greet.ts (result %q, tools %v)", run1.Result, run1.ToolUses)
+	}
+	t.Logf("step 1: session %s in %s, tools %v", run1.SessionID, startDir, run1.ToolUses)
+
+	// 2. The developer resumes it from another directory.
 	var run2 agentRun
-	e.inDir(appSrc, func() {
-		run2 = e.agentStep(w, "2-resume-in-app", run1.SessionID,
-			"Now create farewell.ts in the current directory with your file editing tools, exporting "+
-				"`farewell(name: string): string` that returns `Goodbye, ${name}!`. Do not run git commands.")
-	})
+	e.inDir(resumeDir, func() { run2 = e.agentStep(w, "2-resume", run1.SessionID, prompt2) })
 	resumedID := run2.SessionID
 	if run2.StreamSessionID != "" {
 		resumedID = run2.StreamSessionID
 	}
 	t.Logf("step 2: resumed %s from %s as session %s (result %q, tools %v)",
-		run1.SessionID, appSrc, resumedID, run2.Result, run2.ToolUses)
+		run1.SessionID, resumeDir, resumedID, run2.Result, run2.ToolUses)
 	if ag.name() == "claude-code" { // Codex's stream doesn't show hooks
 		t.Logf("hooks started: step 1 %d, step 2 %d", run1.HooksStarted, run2.HooksStarted)
-		if run2.HooksStarted == 0 {
-			t.Errorf("%s ran no hooks when the session was resumed from %s: it loads project hooks from the "+
-				"directory it's launched in, not the repository root, so this half of the session went unrecorded", ag.name(), appSrc)
+		for _, r := range []struct {
+			run agentRun
+			dir string
+		}{{run1, startDir}, {run2, resumeDir}} {
+			if r.run.HooksStarted == 0 {
+				t.Errorf("%s ran no hooks in %s: it loads project hooks from the directory it's launched in, "+
+					"not the repository root, so that part of the session went unrecorded", ag.name(), r.dir)
+			}
 		}
 	}
-	if !fileExists(filepath.Join(appSrc, "farewell.ts")) {
-		t.Skipf("inconclusive: the resumed session didn't create farewell.ts (result %q: %s)", run2.Result, truncate(run2.Message, 500))
+	if !fileExists(filepath.Join(appSrc, "farewell.ts")) || !fileContains(t, filepath.Join(lib, "README.md"), "Used by app.") {
+		t.Skipf("inconclusive: the agent didn't create farewell.ts and write to lib (result %q: %s)", run2.Result, truncate(run2.Message, 500))
 	}
 	if resumedID != run1.SessionID {
 		t.Logf("%s continued the resumed session under a new id: the halves are two sessions, not a split one", ag.name())
