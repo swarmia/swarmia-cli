@@ -13,9 +13,13 @@
 // organization distributes to machines (MDM) overrides files on disk, and a
 // directory's file only fills in for repositories that don't say, so that a
 // repository of another organization in the same directory keeps its own
-// token. Prompts
-// are shared unless any layer turns them off: an individual can always
-// withhold their own prompts, and so can a repository's configuration.
+// token. A repository's or directory's file may come from someone else (a
+// repository the agent cloned, a shared directory), so its endpoint is used
+// only with its own token: a token from another layer is never sent to an
+// endpoint such a file chose. A directory's file is also ignored unless the
+// user or root owns it. Prompts are shared unless any layer turns them off: an
+// individual can always withhold their own prompts, and so can a repository's
+// configuration.
 //
 // swarmia-cli only reads these files; it never writes them.
 package config
@@ -73,8 +77,9 @@ func Load(dir string) (Config, error) {
 	cfg := Config{Endpoint: DefaultEndpoint, EndpointSource: "default", Prompts: true, PromptsSource: "default"}
 
 	type layer struct {
-		name string
-		file File
+		name   string
+		file   File
+		shared bool // a repository's or directory's file, not the user's own
 	}
 	var layers []layer // least to most specific
 	var paths []string
@@ -95,14 +100,14 @@ func Load(dir string) (Config, error) {
 		if err != nil {
 			return cfg, err
 		}
-		layers = append(layers, layer{path, f})
+		layers = append(layers, layer{path, f, true})
 	}
 	if path, err := UserPath(); err == nil {
 		f, err := readFile(path)
 		if err != nil {
 			return cfg, err
 		}
-		layers = append(layers, layer{path, f})
+		layers = append(layers, layer{path, f, false})
 	}
 	env := File{Token: os.Getenv("SWARMIA_TOKEN"), Endpoint: os.Getenv("SWARMIA_ENDPOINT")}
 	if v, ok := os.LookupEnv("SWARMIA_PROMPTS"); ok {
@@ -112,13 +117,15 @@ func Load(dir string) (Config, error) {
 		}
 		env.Prompts = &b
 	}
-	layers = append(layers, layer{"environment", env})
+	layers = append(layers, layer{"environment", env, false})
 
 	for _, l := range layers {
 		if l.file.Token != "" {
 			cfg.Token, cfg.TokenSource = l.file.Token, l.name
 		}
-		if l.file.Endpoint != "" {
+	}
+	for _, l := range layers {
+		if l.file.Endpoint != "" && (!l.shared || l.name == cfg.TokenSource) {
 			cfg.Endpoint, cfg.EndpointSource = l.file.Endpoint, l.name
 		}
 		if l.file.Prompts != nil && !*l.file.Prompts && cfg.Prompts {
@@ -128,16 +135,16 @@ func Load(dir string) (Config, error) {
 	return cfg, nil
 }
 
-// directoryFile is the nearest .swarmia.json in dir or a directory above it,
-// stopping at a repository's worktree root: that file is the repository's,
-// not one for the repositories below it.
+// directoryFile is the nearest .swarmia.json in dir or a directory above it
+// that the user or root owns, stopping at a repository's worktree root: that
+// file is the repository's, not one for the repositories below it.
 func directoryFile(dir string) string {
 	for {
 		if isWorktreeRoot(dir) {
 			return ""
 		}
 		path := filepath.Join(dir, RepoFile)
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Stat(path); err == nil && trusted(info) {
 			return path
 		}
 		parent := filepath.Dir(dir)
