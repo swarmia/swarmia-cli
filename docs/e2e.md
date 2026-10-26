@@ -129,6 +129,10 @@ launch directory has its own hooks; Claude Code then runs with
 | resume the session from `app/src`: "create `farewell.ts` here" | agent | a session resumed from another directory, with its own hooks |
 | commit and push both repositories | script | attribution |
 
+A third variant (`…MovedSessionBack`, user-scope hooks) goes the other way
+round: started in `app` ("create `src/greet.ts`"), resumed from the workspace
+("create `app/src/farewell.ts`; `cd lib`; then append to `README.md`").
+
 Checks: Claude Code ran hooks when resumed (it loads project hooks only from
 the directory it's launched in, so with project scope, a session resumed from
 `app/src` goes unrecorded); `report --json` from the workspace and from `app/src`; each session id
