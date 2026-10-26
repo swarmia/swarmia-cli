@@ -24,9 +24,10 @@ var configCmd = &cobra.Command{
 		"  directory     the nearest .swarmia.json above the repository, e.g. in the\n" +
 		"                directory you keep your repositories in (not above an\n" +
 		"                enclosing repository), for what the repository doesn't set\n\n" +
-		"Each repository a session worked in is sent with its own settings, so\n" +
-		"repositories of different organizations can sit side by side. A token in\n" +
-		"your user file applies to all of them.\n\n" +
+		"A session is sent whole with the settings where the agent was started, even\n" +
+		"if it worked in other repositories too. A repository's or directory's\n" +
+		"endpoint is only used with a token from the same file, and a directory's\n" +
+		"file only if you (or root) own it.\n\n" +
 		"File format: {\"token\": \"…\", \"endpoint\": \"…\", \"prompts\": false}\n\n" +
 		"It also warns about swarmia-cli hooks Codex won't run because they aren't\n" +
 		"trusted yet, and shows it if Swarmia asked this version to be upgraded.\n\n" +

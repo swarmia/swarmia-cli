@@ -71,17 +71,12 @@ the client can't prevent: a developer may paste code into a prompt.
   says which one it belongs to. The session's identity doesn't depend on its
   repositories: `repos` only grows as the session continues, and every send
   lists all of them.
-- **One payload per organization.** Repositories can be configured with
-  different tokens (for example a client's repository next to the developer's
-  employer's). The client sends each token only the repositories configured
-  with it, so the same `session_id` can reach different organizations, each
-  with its own part of the session; a repository configured with no token is
-  never sent. Prompts and usage belong to the whole session and go to each.
-  Two tokens of the *same* organization therefore deliver the same session in
-  two parts, so per-repository data (a `repos` entry and its `commits`) is
-  replaced only for the repositories a payload lists; everything else is
-  replaced wholesale as usual. A repository never leaves a session's `repos`,
-  so this never keeps data that should have been removed.
+- **One organization per session.** A developer reports to one organization:
+  the whole session is sent with the token configured where the agent was
+  started, whatever the repositories it worked in are configured with. A
+  session is never split between tokens, so its prompts and usage are sent
+  once. Prompts are withheld if that configuration or any repository the
+  session worked in opts out.
 - **Partly connected sessions.** The server keeps a session if at least one of
   its `repos` is connected to the token's organization, and discards whatever
   belongs to the others (their entries in `repos`, `commits` and the `repo`

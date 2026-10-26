@@ -87,25 +87,28 @@ The contract is in `docs/ingest-api.md`.
 
 ### Client rules
 
-- **Group by delivery target.** Resolve the token and endpoint for each repo
-  the session touched and build one payload per target, holding only that
-  target's repos. A repo configured with another token never appears in a
-  payload, not even its name; a repo with no token is never sent.
-- **Prompts withheld if any repo in the payload opts out.** Prompts belong to
-  the whole session, so the strictest setting wins.
-- **`author_email`** comes from the first repo in the payload.
+- **One delivery target per session.** The token and endpoint come from the
+  configuration where the agent was started (its repo, else the nearest
+  directory file), plus the user's file and the environment as always. The
+  whole session goes there; repos' own tokens don't route parts of it
+  elsewhere. A developer belongs to one organization, and several tokens for
+  one would only be a source of confusion. (An earlier version split the
+  session by each repo's token; it couldn't keep commands and prompts from
+  naming the other organization's repos anyway, and counted usage once per
+  part.)
+- **Prompts withheld if the configuration or any repo the session touched
+  opts out.** Prompts belong to the whole session, so the strictest setting
+  wins.
+- **`author_email`** comes from the first listed repo that has one.
 - **Masking**: each listed repo's local root becomes `<repo:host/path>`, an
   unlisted repo's `<repo>`, and a launch dir outside any repo `<project>`.
 - **Delivery state** (what was sent, rejections, backoff) is kept per
-  (session, target), so one org rejecting a payload doesn't stop the others.
+  session, as before.
 
 ### Server expectations (in the contract)
 
 - Keep a session if at least one of its repos is connected; drop the
   unconnected repos' data.
-- Two tokens of the same org deliver two parts of one session, so
-  per-repo data is replaced only for the repos a payload lists. Repos never
-  leave a session's list, so this is safe.
 
 This also fixes single-repo sessions that edit a sibling, so it's useful
 regardless of how the agent was launched.
@@ -178,13 +181,15 @@ section in `docs/optimization-roadmap.md` for the same issues.
 
 1. ~~Resolve each edit's repo in fold; attribute per repo; make `process`
    work outside a repo.~~ Done.
-2. ~~Build payloads in the new shape, grouped by delivery target, with
-   per-target delivery state.~~ Done.
+2. ~~Build payloads in the new shape.~~ Done (one per session; see Client
+   rules).
 3. ~~Snapshot tiers 1 and 2, recording which repos each command covered.~~
    Done (`snapshot.Scope`, at most 8 worktrees per command; records list
    them in `snapshotted`). Measured from `~/swarmia-src/monorepo`: three
    extra worktrees cost ~7 ms per side, eight ~30 ms.
-4. E2E scenarios: launch in a parent dir, edit two child repos, commit in
-   both; a single-repo session editing a sibling.
+4. ~~E2E scenarios: launch in a parent dir, edit two child repos, commit in
+   both; a single-repo session editing a sibling.~~ Done (`e2e/multirepo_test.go`;
+   the sibling case in `cmd/multirepo_test.go` and
+   `internal/report/multirepo_test.go`).
 5. Sampled background sweep while dogfooding; feed the misses back into
    tests and tier rules.

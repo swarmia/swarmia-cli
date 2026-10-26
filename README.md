@@ -228,9 +228,10 @@ Settings can also come from the environment: `SWARMIA_TOKEN`,
 `SWARMIA_ENDPOINT` (default `https://hook.swarmia.com/cli`), and
 `SWARMIA_PROMPTS=0` to withhold your prompts. The environment wins over your
 user file, which wins over the repository's, which wins over a directory's.
-Each repository a session works in is sent with its own settings, so
-repositories of different organizations can sit side by side (as long as your
-user file holds no token). Check what applies:
+A session is sent whole with the settings where the agent was started, even if
+it worked in other repositories too. An `endpoint` in a repository's or
+directory's file is only used with a token from that same file, so a
+repository you cloned can't send your token elsewhere. Check what applies:
 
 ```sh
 swarmia-cli config

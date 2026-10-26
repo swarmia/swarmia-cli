@@ -243,6 +243,40 @@ func TestBuildMatchesWorktreesOfOneRepositoryOnce(t *testing.T) {
 	}
 }
 
+// A session that edited only in one worktree of a clone gets its commits
+// labeled with that worktree, not with another session's of the same clone.
+func TestCommitsKeepTheSessionsOwnWorktree(t *testing.T) {
+	main := newFixture(t)
+	main.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	wt := filepath.Join(t.TempDir(), "wt")
+	main.git(t0.Add(-time.Hour), "me@example.com", "worktree", "add", "-q", "-b", "feature", wt)
+	wt, _ = filepath.EvalSymlinks(wt)
+	code := lines(2, "var inWorktree%d = \"second session\"")
+
+	var recs []events.Record
+	raw, _ := json.Marshal(map[string]any{"session_id": "sess-2", "hook_event_name": "PostToolUse", "tool_name": "Write",
+		"tool_input": map[string]any{"file_path": filepath.Join(wt, "two.go"), "content": code}})
+	recs = append(recs, events.Record{LoggedAt: t0.Format(time.RFC3339), Event: raw, Git: &events.Git{Root: wt}})
+	// The other session is newer, so it comes first.
+	writeEvent(t, &recs, t0.Add(time.Second), main.root, writeTool(filepath.Join(main.root, "one.go"), lines(2, "var inMain%d = 1")))
+	sha := (&fixture{t: t, root: wt}).commit(t0.Add(time.Minute), "me@example.com", "two", map[string]string{"two.go": code})
+
+	sessions, err := Build(recs, Options{FallbackRoot: main.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sessions {
+		if s.ID != "sess-2" {
+			continue
+		}
+		if got, want := commitFiles(s), []commitFile{{wt, sha, "two.go", 2}}; !reflect.DeepEqual(got, want) {
+			t.Errorf("commits = %+v, want %+v", got, want)
+		}
+		return
+	}
+	t.Fatal("no sess-2")
+}
+
 // A session's attribution is only recomputed when its own repositories'
 // commits change, not when another session starts editing elsewhere.
 func TestProcessRecomputesOnlyForOwnRepositories(t *testing.T) {

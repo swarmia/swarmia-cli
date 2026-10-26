@@ -62,7 +62,11 @@ func init() {
 }
 
 func runReport(out io.Writer) error {
-	opts, _, err := processOptions(reportFile, !reportAllAuth, true)
+	opts, repo, err := processOptions(reportFile, !reportAllAuth, true)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(configDir(repo.Root))
 	if err != nil {
 		return err
 	}
@@ -73,13 +77,13 @@ func runReport(out io.Writer) error {
 	sessions := selectSessions(res.Sessions)
 
 	if reportJSON {
-		return writeReportJSON(out, sessions)
+		return writeReportJSON(out, sessions, cfg)
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", opts.StateDir)
 		return nil
 	}
-	showDelivery = anyToken(sessions)
+	showDelivery = cfg.Token != ""
 	if w := upgradeWarning(opts.StateDir); showDelivery && w != "" {
 		fmt.Fprintf(out, "Warning: %s\n\n", w)
 	}
@@ -188,36 +192,15 @@ func humanCount(n int64) string {
 	}
 }
 
-// deliveryState sums up how a session's parts were delivered: a rejection
-// if any was rejected, else when the last one was sent.
 func deliveryState(s *report.Session) string {
-	var last time.Time
-	for _, d := range s.Deliveries {
-		if d.Rejected != "" {
-			return "rejected by Swarmia: " + d.Rejected
-		}
-		if d.SentAt.After(last) {
-			last = d.SentAt
-		}
-	}
-	if last.IsZero() {
+	switch d := s.Delivery; {
+	case d == nil:
 		return "not sent yet"
+	case d.Rejected != "":
+		return "rejected by Swarmia: " + d.Rejected
+	default:
+		return "sent " + d.SentAt.Local().Format("2006-01-02 15:04")
 	}
-	return "sent " + last.Local().Format("2006-01-02 15:04")
-}
-
-// anyToken reports whether a token is configured for any repository the
-// sessions worked in, so that delivery is worth showing.
-func anyToken(sessions []*report.Session) bool {
-	ctx := payloadContext()
-	for _, s := range sessions {
-		for _, part := range payload.Build(s, ctx) {
-			if part.Target.Token != "" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func classBreakdown(f report.File) string {
@@ -235,13 +218,13 @@ func classBreakdown(f report.File) string {
 
 // writeReportJSON prints the payloads delivery would send for the sessions —
 // the same builder, with redaction, prompt opt-out and the pushed-only rule —
-// one per session and delivery target, including those with no token.
-func writeReportJSON(out io.Writer, sessions []*report.Session) error {
-	ctx := payloadContext()
+// leaving out those in no repository Swarmia could know, as delivery does.
+func writeReportJSON(out io.Writer, sessions []*report.Session, cfg config.Config) error {
+	ctx := payloadContext(cfg)
 	payloads := []payload.Payload{}
 	for _, s := range sessions {
-		for _, part := range payload.Build(s, ctx) {
-			payloads = append(payloads, part.Payload)
+		if p, ok := payload.Build(s, ctx); ok {
+			payloads = append(payloads, p)
 		}
 	}
 	enc := json.NewEncoder(out)
@@ -249,11 +232,12 @@ func writeReportJSON(out io.Writer, sessions []*report.Session) error {
 	return enc.Encode(payloads)
 }
 
-// payloadContext gathers what payloads need beyond the session itself: for
-// each worktree, its repository, the configuration that decides where its part
-// goes, and the developer's email there.
-func payloadContext() payload.Context {
-	ctx := payload.Context{CLIVersion: version, ProjectDir: projectDir()}
+// payloadContext gathers what payloads need beyond the session itself, sent
+// with the project's configuration cfg: for each worktree, its repository,
+// whether its configuration lets prompts be shared, and the developer's email
+// there.
+func payloadContext(cfg config.Config) payload.Context {
+	ctx := payload.Context{CLIVersion: version, Prompts: cfg.Prompts, ProjectDir: projectDir()}
 	if dir, err := gitrepo.Canonical(ctx.ProjectDir); err == nil {
 		ctx.ProjectDir = dir // as worktree roots are
 	}
@@ -268,14 +252,12 @@ func payloadContext() payload.Context {
 		if ri, ok := known[root]; ok {
 			return ri
 		}
-		var ri payload.RepoInfo // a broken config sends nothing
+		ri := payload.RepoInfo{
+			Slug:        payload.RepoSlug(gitOutput(root, "remote", "get-url", "origin"), sshHostName),
+			AuthorEmail: authorEmail(root),
+		}
 		if cfg, err := config.Load(root); err == nil {
-			ri = payload.RepoInfo{
-				Slug:        payload.RepoSlug(gitOutput(root, "remote", "get-url", "origin"), sshHostName),
-				Target:      payload.Target{Endpoint: cfg.Endpoint, Token: cfg.Token},
-				Prompts:     cfg.Prompts,
-				AuthorEmail: authorEmail(root),
-			}
+			ri.Prompts = cfg.Prompts // a broken config withholds them
 		}
 		known[root] = ri
 		return ri

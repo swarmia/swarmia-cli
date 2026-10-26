@@ -6,14 +6,10 @@
 //   - secrets redacted from prompts and commands;
 //   - prompts withheld entirely when configuration opts out;
 //   - only pushed commits, file paths relative to their repository, and local
-//     paths and the user name masked in free text;
-//   - a session is split by delivery target: each gets only the repositories
-//     configured with it, and nothing about the others.
+//     paths and the user name masked in free text.
 package payload
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -28,8 +24,7 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/usage"
 )
 
-// Payload is one session, or the part of it in one delivery target's
-// repositories, as sent to Swarmia.
+// Payload is one session as sent to Swarmia.
 type Payload struct {
 	SessionID       string    `json:"session_id"`
 	Agent           string    `json:"agent"`
@@ -80,25 +75,9 @@ type Commit struct {
 	Lines []report.Range `json:"lines"`
 }
 
-// Target is where a part of a session is sent: a Swarmia endpoint, with the
-// token that says which organization it's for. A repository configured with
-// no token has a Target with an empty Token: its part is built, for `report
-// --json`, but never sent.
-type Target struct {
-	Endpoint string
-	Token    string
-}
-
-// ID identifies the target in local state without holding the token.
-func (t Target) ID() string {
-	sum := sha256.Sum256([]byte(t.Endpoint + "\n" + t.Token))
-	return hex.EncodeToString(sum[:8])
-}
-
 // RepoInfo is what a payload needs to know about a worktree.
 type RepoInfo struct {
 	Slug        string // see RepoSlug; "" if it can't be identified, and then never sent
-	Target      Target
 	Prompts     bool   // its configuration lets prompts be shared
 	AuthorEmail string // the developer's commit email there
 }
@@ -106,6 +85,9 @@ type RepoInfo struct {
 // Context is what payloads need beyond the session.
 type Context struct {
 	CLIVersion string
+	// Prompts is whether the configuration the session is sent with lets
+	// prompts be shared.
+	Prompts bool
 	// Repo describes the worktree at root; Build calls it once per root.
 	Repo func(root string) RepoInfo
 	// ProjectDir is where the agent was started, masked as <project> in free
@@ -115,18 +97,16 @@ type Context struct {
 	UserName   string // local user name, masked as <user> in free text
 }
 
-// Part is a session's payload for one delivery target.
-type Part struct {
-	Target  Target
-	Payload Payload
-}
-
-// Build splits s by delivery target: one payload per target, holding the
-// repositories the session worked in that are configured with it, in the
-// order the session first worked in them (the one it was started in first).
-// A worktree that can't be identified is left out, and a session that worked
-// in no identifiable repository has no parts.
-func Build(s *report.Session, ctx Context) []Part {
+// Build makes the payload of s, listing the repositories the session worked
+// in, in the order it first worked in them (the one it was started in first).
+// A worktree that can't be identified is left out; a session that worked in
+// no identifiable repository isn't sent, and Build reports false.
+//
+// The whole session goes where the project's configuration says, whatever
+// the repositories it worked in are configured with: a developer reports to
+// one organization. Prompts are withheld if the project's configuration, or
+// that of any repository the session worked in, opts out.
+func Build(s *report.Session, ctx Context) (Payload, bool) {
 	info := map[string]RepoInfo{}
 	var roots []string // in the order the session worked in them
 	addRoot := func(root string) {
@@ -147,45 +127,24 @@ func Build(s *report.Session, ctx Context) []Part {
 		addRoot(c.Root)
 	}
 
-	var targets []Target
-	slugsOf := map[Target][]string{}
+	var slugs []string
+	prompts, author := ctx.Prompts, ""
 	for _, root := range roots {
 		ri := info[root]
-		if ri.Slug == "" || slices.Contains(slugsOf[ri.Target], ri.Slug) {
+		prompts = prompts && ri.Prompts
+		if ri.Slug == "" || slices.Contains(slugs, ri.Slug) {
 			continue
 		}
-		if _, ok := slugsOf[ri.Target]; !ok {
-			targets = append(targets, ri.Target)
-		}
-		slugsOf[ri.Target] = append(slugsOf[ri.Target], ri.Slug)
-	}
-	parts := make([]Part, 0, len(targets))
-	for _, t := range targets {
-		parts = append(parts, Part{Target: t, Payload: build(s, ctx, roots, info, t, slugsOf[t])})
-	}
-	return parts
-}
-
-// build makes the payload of s for target t, whose repositories are slugs.
-func build(s *report.Session, ctx Context, roots []string, info map[string]RepoInfo, t Target, slugs []string) Payload {
-	// listed gives the slug of a root in this payload, "" for one that isn't.
-	listed := func(root string) string {
-		if ri, ok := info[root]; ok && ri.Target == t && slices.Contains(slugs, ri.Slug) {
-			return ri.Slug
-		}
-		return ""
-	}
-	prompts, author := true, ""
-	for _, root := range roots {
-		if listed(root) == "" {
-			continue
-		}
-		prompts = prompts && info[root].Prompts
+		slugs = append(slugs, ri.Slug)
 		if author == "" {
-			author = info[root].AuthorEmail
+			author = ri.AuthorEmail
 		}
 	}
-	masks := ctx.masks(roots, listed)
+	if len(slugs) == 0 {
+		return Payload{}, false
+	}
+	slugOf := func(root string) string { return info[root].Slug }
+	masks := ctx.masks(roots, slugOf)
 
 	p := Payload{
 		SessionID: s.ID, Agent: s.Agent, Model: s.Model,
@@ -210,16 +169,16 @@ func build(s *report.Session, ctx Context, roots []string, info map[string]RepoI
 	for _, slug := range slugs {
 		r := Repo{Repo: slug}
 		for root := range s.AILinesByRoot {
-			if listed(root) == slug {
+			if slugOf(root) == slug {
 				r.AILines += s.AILinesIn(root)
 			}
 		}
-		r.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed && listed(c.Root) == slug })
+		r.AILinesKept = s.Survived(func(c report.Commit) bool { return c.Pushed && slugOf(c.Root) == slug })
 		p.Repos = append(p.Repos, r)
 	}
 	for _, tl := range s.Tools {
 		tool := Tool{At: tl.At, Name: tl.Name, Status: tl.Status, ExitCode: tl.ExitCode}
-		if tool.Repo = listed(tl.Root); tool.Repo != "" {
+		if tool.Repo = slugOf(tl.Root); tool.Repo != "" {
 			tool.File = relativePath(tl.Root, tl.File)
 		}
 		if tl.Command != "" {
@@ -228,15 +187,15 @@ func build(s *report.Session, ctx Context, roots []string, info map[string]RepoI
 		p.Tools = append(p.Tools, tool)
 	}
 	for _, c := range s.Commits() {
-		slug := listed(c.Root)
+		slug := slugOf(c.Root)
 		if !c.Pushed || slug == "" {
-			continue // only commits the server can see, in this payload's repositories
+			continue // only commits the server can see
 		}
 		for _, f := range c.Files {
 			p.Commits = append(p.Commits, Commit{Repo: slug, SHA: c.SHA, Path: f.Path, Lines: f.Lines})
 		}
 	}
-	return p
+	return p, true
 }
 
 // masks is the replacements that hide where things live on this machine, in
@@ -249,14 +208,14 @@ type mask struct {
 	dir      bool
 }
 
-// masks hides each worktree root of the session — as <repo:slug> if this
-// payload lists it, else <repo> — then the project directory as <project>,
-// the home directory as ~ and the user name (e.g. inside tool-generated temp
+// masks hides each worktree root of the session — as <repo:slug> if it can
+// be identified, else <repo> — then the project directory as <project>, the
+// home directory as ~ and the user name (e.g. inside tool-generated temp
 // paths) as <user>.
-func (ctx Context) masks(roots []string, listed func(root string) string) masks {
+func (ctx Context) masks(roots []string, slugOf func(root string) string) masks {
 	var m masks
 	for _, root := range roots {
-		if slug := listed(root); slug != "" {
+		if slug := slugOf(root); slug != "" {
 			m = append(m, mask{root, "<repo:" + slug + ">", true})
 		} else {
 			m = append(m, mask{root, "<repo>", true})

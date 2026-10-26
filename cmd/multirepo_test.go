@@ -217,9 +217,10 @@ func configure(t *testing.T, repo, endpoint, token string) {
 	git(t, repo, "commit", "-q", "-m", "configure swarmia-cli")
 }
 
-// Repositories configured with different tokens get their own parts of a
-// session, each with its token; one configured with none sends nothing.
-func TestSendSplitsSessionByToken(t *testing.T) {
+// A session is sent whole, with the configuration where the agent was
+// started: the repositories' own tokens don't route parts of it elsewhere.
+// Started in a directory with none, it isn't sent.
+func TestSendUsesTheProjectsConfiguration(t *testing.T) {
 	in := newIngest(t)
 	parent := tempDir(t)
 	app, client, oss := newRepoAt(t, filepath.Join(parent, "app")), newRepoAt(t, filepath.Join(parent, "client")), newRepoAt(t, filepath.Join(parent, "oss"))
@@ -231,31 +232,23 @@ func TestSendSplitsSessionByToken(t *testing.T) {
 	agentWritesAndCommits(t, client, filepath.Join(client, "c.go"), "var c = \"from the agent\"\n")
 	agentWritesAndCommits(t, oss, filepath.Join(oss, "o.go"), "var o = \"from the agent\"\n")
 
-	var out bytes.Buffer
-	sendCmd.SetOut(&out)
-	t.Cleanup(func() { sendCmd.SetOut(nil) })
-	if err := sendCmd.RunE(sendCmd, nil); err != nil {
-		t.Fatal(err)
+	if err := sendCmd.RunE(sendCmd, nil); err == nil || !strings.Contains(err.Error(), "no token configured") {
+		t.Errorf("send = %v, want no token configured", err)
 	}
-	want := map[string][]string{
-		"swm_cli_" + strings.Repeat("a", 64): {"github.com/acme/app"},
-		"swm_cli_" + strings.Repeat("c", 64): {"github.com/acme/client"},
-	}
-	if !reflect.DeepEqual(in.got, want) {
-		t.Errorf("sent %v, want %v", in.got, want)
-	}
-	if !strings.Contains(out.String(), "sent 2 session(s)") {
-		t.Errorf("output = %q", out.String())
+	if len(in.got) != 0 {
+		t.Errorf("sent %v, want nothing", in.got)
 	}
 
-	// report --json shows all three parts, including the one with no token.
-	if n := len(reportPayloads(t)); n != 3 {
-		t.Errorf("report --json printed %d payloads, want 3", n)
+	// report --json shows the one payload, with all three repositories.
+	payloads := reportPayloads(t)
+	if len(payloads) != 1 || len(payloads[0].Repos) != 3 {
+		t.Errorf("report --json printed %+v, want one payload with three repositories", payloads)
 	}
 }
 
-// A .swarmia.json in the directory holding the repositories configures those
-// without their own; one committing another organization's token keeps it.
+// A .swarmia.json in the directory holding the repositories configures a
+// session started there: all of it goes with that token, including a
+// repository that commits a token of its own.
 func TestSendWithTokenInParentDirectory(t *testing.T) {
 	in := newIngest(t)
 	parent := tempDir(t)
@@ -275,10 +268,7 @@ func TestSendWithTokenInParentDirectory(t *testing.T) {
 	if err := sendCmd.RunE(sendCmd, nil); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string][]string{
-		dirToken:    {"github.com/acme/a,github.com/acme/b"},
-		clientToken: {"github.com/acme/client"},
-	}
+	want := map[string][]string{dirToken: {"github.com/acme/a,github.com/acme/b,github.com/acme/client"}}
 	if !reflect.DeepEqual(in.got, want) {
 		t.Errorf("sent %v, want %v", in.got, want)
 	}

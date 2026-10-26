@@ -105,7 +105,7 @@ the workspace.
 | "Add `isLocalhostURL` to `ufo/src/utils.ts`; create `client/src/hosts.ts` with one shell heredoc" | agent | edit capture in one repository, shell snapshots in another named by the command |
 | commit and push both repositories | script | attribution per repository |
 
-Checks: one payload for the session (no tokens: one delivery target); `repos`
+Checks: one payload for the session; `repos`
 lists `ufo` and `client`, each with AI lines committed, and any other only if
 a tool call worked in it; tool calls carry their repository and a path
 relative to it; per repository, the same oracle as above (precision, recall,

@@ -71,10 +71,8 @@ type Session struct {
 	// payloads); Usage holds the token counts read from it.
 	TranscriptPath string         `json:"transcript_path,omitempty"`
 	Usage          *usage.Tracker `json:"usage,omitempty"`
-	// Deliveries records the last payload sent to Swarmia for this session,
-	// per delivery target (see payload.Target): each gets the part of the
-	// session in its repositories.
-	Deliveries map[string]*Delivery `json:"deliveries,omitempty"`
+	// Delivery records the last payload sent to Swarmia for this session.
+	Delivery *Delivery `json:"delivery,omitempty"`
 }
 
 // Delivery is the outcome of the last delivery attempt that reached the
@@ -569,9 +567,13 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 			continue
 		}
 		edited := map[string]bool{}
+		worktree := map[string]string{} // repository -> the first worktree of it this session edited in
 		for _, e := range s.Edits {
 			if e.Root != "" {
 				edited[keyOf[e.Root]] = true
+				if _, ok := worktree[keyOf[e.Root]]; !ok {
+					worktree[keyOf[e.Root]] = e.Root
+				}
 			}
 		}
 		candidates := map[string][]commit{}
@@ -591,7 +593,7 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 			for k, cs := range candidates {
 				rc := repos[k]
 				for _, c := range attribute(rc.r, s.Edits, cs, func(e Edit) bool { return keyOf[e.Root] == k }) {
-					c.Root = rc.root
+					c.Root = worktree[k] // not rc.root, which may be another session's
 					commits = append(commits, c)
 				}
 			}

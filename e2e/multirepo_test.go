@@ -102,7 +102,7 @@ func runMultiRepoScenario(t *testing.T, ag agent) {
 		}
 	}
 	if len(parts) != 1 {
-		t.Fatalf("got %d payloads for the session, want one (no tokens: one delivery target)", len(parts))
+		t.Fatalf("got %d payloads for the session, want one", len(parts))
 	}
 	p := parts[0]
 

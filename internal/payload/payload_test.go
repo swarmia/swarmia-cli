@@ -16,26 +16,27 @@ import (
 
 var at = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-var (
-	acme   = Target{Endpoint: "https://swarmia.example/cli", Token: "acme-token"}
-	client = Target{Endpoint: "https://swarmia.example/cli", Token: "client-token"}
-	app    = RepoInfo{Slug: "github.com/acme/app", Target: acme, Prompts: true, AuthorEmail: "me@acme.com"}
-)
+var app = RepoInfo{Slug: "github.com/acme/app", Prompts: true, AuthorEmail: "me@acme.com"}
 
-// contextFor is a Context whose worktrees are known by root; any other is in
-// no identifiable repository.
+// contextFor is a Context, sharing prompts, whose worktrees are known by
+// root; any other is in no identifiable repository, and shares prompts too.
 func contextFor(repos map[string]RepoInfo) Context {
-	return Context{CLIVersion: "0.9.0", Repo: func(root string) RepoInfo { return repos[root] }}
+	return Context{CLIVersion: "0.9.0", Prompts: true, Repo: func(root string) RepoInfo {
+		if ri, ok := repos[root]; ok {
+			return ri
+		}
+		return RepoInfo{Prompts: true}
+	}}
 }
 
-// only builds s, which must have exactly one part.
+// only builds s, which must be sent.
 func only(t *testing.T, s *report.Session, ctx Context) Payload {
 	t.Helper()
-	parts := Build(s, ctx)
-	if len(parts) != 1 {
-		t.Fatalf("got %d parts, want 1: %+v", len(parts), parts)
+	p, ok := Build(s, ctx)
+	if !ok {
+		t.Fatal("session not sent")
 	}
-	return parts[0].Payload
+	return p
 }
 
 func session() *report.Session {
@@ -56,11 +57,7 @@ func session() *report.Session {
 }
 
 func TestBuildAppliesPrivacyRules(t *testing.T) {
-	parts := Build(session(), contextFor(map[string]RepoInfo{"/src/app": app}))
-	if len(parts) != 1 || parts[0].Target != acme {
-		t.Fatalf("parts = %+v, want one for acme", parts)
-	}
-	p := parts[0].Payload
+	p := only(t, session(), contextFor(map[string]RepoInfo{"/src/app": app}))
 
 	if len(p.Prompts) != 1 || !strings.Contains(p.Prompts[0].Text, "[REDACTED:github-token]") || strings.Contains(p.Prompts[0].Text, "ghp_") {
 		t.Errorf("prompt not redacted: %+v", p.Prompts)
@@ -97,7 +94,7 @@ func TestBuildMasksLocalPaths(t *testing.T) {
 		{At: at, Name: "Bash", Root: s.Root, Command: "diff /home/jdoe/src/app/a /home/jdoe/src/app-v2/a"},
 	}
 	s.Prompts = []report.Prompt{{At: at, Text: "see /home/jdoe/src/app/README. Paths are relative to /home/jdoe/src/app. Not /home/jdoe/src/app.old"}}
-	ctx := contextFor(map[string]RepoInfo{s.Root: {Slug: "github.com/jdoe/app", Target: acme, Prompts: true}})
+	ctx := contextFor(map[string]RepoInfo{s.Root: {Slug: "github.com/jdoe/app", Prompts: true}})
 	ctx.Home, ctx.UserName = "/home/jdoe", "jdoe"
 	p := only(t, s, ctx)
 	// The user name is masked, but not inside the slug, which isn't local.
@@ -162,12 +159,18 @@ func TestBuildWithholdsPrompts(t *testing.T) {
 	if len(p.Tools) != 3 || len(p.Commits) != 1 {
 		t.Error("withholding prompts must not drop tools or attribution")
 	}
+
+	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
+	ctx.Prompts = false // the project's configuration opts out
+	if p := only(t, session(), ctx); len(p.Prompts) != 0 || !p.PromptsWithheld {
+		t.Errorf("project opt-out: prompts = %+v, withheld = %v", p.Prompts, p.PromptsWithheld)
+	}
 }
 
-// A session that worked in repositories configured with different tokens is
-// split: each target gets its own repositories, and of the others nothing
-// but a masked <repo> in free text. Prompts and usage go to each.
-func TestBuildSplitsByTarget(t *testing.T) {
+// A session that worked in several repositories lists them all in one
+// payload, whatever they're configured with: a developer reports to one
+// organization. Any of them opting out of prompts withholds them.
+func TestBuildAcrossRepositories(t *testing.T) {
 	s := &report.Session{
 		ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at, Root: "/src/app",
 		Prompts: []report.Prompt{{At: at, Text: "port the fix from /src/client-api to /src/lib"}},
@@ -176,84 +179,52 @@ func TestBuildSplitsByTarget(t *testing.T) {
 			{At: at, Name: "Bash", Root: "/src/app", Command: "cp /src/client-api/fix.go /src/lib/fix.go"},
 			{At: at, Name: "Edit", Root: "/src/lib", File: "/src/lib/fix.go"},
 			{At: at, Name: "Edit", Root: "/src/scratch", File: "/src/scratch/notes.go"},
-			{At: at, Name: "Edit", Root: "/src/oss", File: "/src/oss/x.go"},
 		},
-		AILinesByRoot: map[string]map[string]int{
-			"/src/client-api": {"fix.go": 2}, "/src/lib": {"fix.go": 4}, "/src/oss": {"x.go": 1},
-		},
+		AILinesByRoot: map[string]map[string]int{"/src/client-api": {"fix.go": 2}, "/src/lib": {"fix.go": 4}},
 		Attribution: &report.Attribution{Commits: []report.Commit{
 			{Root: "/src/client-api", SHA: "c1", Pushed: true, Files: []report.File{{Path: "fix.go", Lines: []report.Range{{Start: 1, End: 2, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 0, End: 1}}},
 			{Root: "/src/lib", SHA: "l1", Pushed: true, Files: []report.File{{Path: "fix.go", Lines: []report.Range{{Start: 1, End: 4, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 2, End: 5}}},
 		}},
-		Usage: &usage.Tracker{},
 	}
-	noToken := Target{Endpoint: acme.Endpoint}
-	ctx := contextFor(map[string]RepoInfo{
-		"/src/app":        app,
-		"/src/lib":        {Slug: "github.com/acme/lib", Target: acme, Prompts: true, AuthorEmail: "me@acme.com"},
-		"/src/client-api": {Slug: "github.com/client/api", Target: client, Prompts: false, AuthorEmail: "me@client.com"},
-		"/src/oss":        {Slug: "github.com/oss/x", Target: noToken, Prompts: true},
+	repos := map[string]RepoInfo{
+		"/src/app":        {Slug: "github.com/acme/app", Prompts: true},
+		"/src/lib":        {Slug: "github.com/acme/lib", Prompts: true, AuthorEmail: "me@acme.com"},
+		"/src/client-api": {Slug: "github.com/client/api", Prompts: true, AuthorEmail: "me@client.com"},
 		// /src/scratch has no origin: not identifiable, never listed.
-		"/src/scratch": {Target: acme, Prompts: true},
-	})
-	parts := Build(s, ctx)
-	var targets []Target
-	for _, p := range parts {
-		targets = append(targets, p.Target)
+		"/src/scratch": {Prompts: true},
 	}
-	if want := []Target{acme, client, noToken}; !reflect.DeepEqual(targets, want) {
-		t.Fatalf("targets = %+v, want %+v", targets, want)
+	p := only(t, s, contextFor(repos))
+	if want := []Repo{
+		{Repo: "github.com/acme/app"},
+		{Repo: "github.com/client/api", AILines: 2, AILinesKept: 2},
+		{Repo: "github.com/acme/lib", AILines: 4, AILinesKept: 4},
+	}; !reflect.DeepEqual(p.Repos, want) {
+		t.Errorf("repos = %+v, want %+v", p.Repos, want)
+	}
+	if len(p.Commits) != 2 || p.AuthorEmail != "me@client.com" {
+		t.Errorf("commits %+v, author %q", p.Commits, p.AuthorEmail)
+	}
+	if want := "port the fix from <repo:github.com/client/api> to <repo:github.com/acme/lib>"; len(p.Prompts) != 1 || p.Prompts[0].Text != want {
+		t.Errorf("prompts = %+v, want %q", p.Prompts, want)
+	}
+	if p.Tools[3].Repo != "" || p.Tools[3].File != "" {
+		t.Errorf("unidentified repository's tool = %+v", p.Tools[3])
 	}
 
-	a, c := parts[0].Payload, parts[1].Payload
-	if want := []Repo{{Repo: "github.com/acme/app"}, {Repo: "github.com/acme/lib", AILines: 4, AILinesKept: 4}}; !reflect.DeepEqual(a.Repos, want) {
-		t.Errorf("acme repos = %+v, want %+v", a.Repos, want)
-	}
-	if want := []Repo{{Repo: "github.com/client/api", AILines: 2, AILinesKept: 2}}; !reflect.DeepEqual(c.Repos, want) {
-		t.Errorf("client repos = %+v, want %+v", c.Repos, want)
-	}
-	if len(a.Commits) != 1 || a.Commits[0].SHA != "l1" || len(c.Commits) != 1 || c.Commits[0].SHA != "c1" {
-		t.Errorf("commits: acme %+v, client %+v", a.Commits, c.Commits)
-	}
-	if a.AuthorEmail != "me@acme.com" || c.AuthorEmail != "me@client.com" {
-		t.Errorf("author emails %q, %q", a.AuthorEmail, c.AuthorEmail)
-	}
-	// The client's configuration withholds prompts: only from its part.
-	if a.PromptsWithheld || len(a.Prompts) != 1 || !c.PromptsWithheld || len(c.Prompts) != 0 {
-		t.Errorf("prompts: acme %+v (withheld %v), client %+v (withheld %v)", a.Prompts, a.PromptsWithheld, c.Prompts, c.PromptsWithheld)
-	}
-	if want := "port the fix from <repo> to <repo:github.com/acme/lib>"; a.Prompts[0].Text != want {
-		t.Errorf("acme prompt = %q, want %q", a.Prompts[0].Text, want)
-	}
-	tools := func(p Payload) []string {
-		var out []string
-		for _, tl := range p.Tools {
-			out = append(out, tl.Repo+" "+tl.File+" "+tl.Command)
+	// Any repository the session worked in can withhold prompts, even one
+	// that isn't identifiable.
+	for _, root := range []string{"/src/client-api", "/src/scratch"} {
+		optOut := repos[root]
+		optOut.Prompts = false
+		ctx := contextFor(repos)
+		ctx.Repo = func(r string) RepoInfo {
+			if r == root {
+				return optOut
+			}
+			return repos[r]
 		}
-		return out
-	}
-	if want := []string{
-		"  ",
-		"github.com/acme/app  cp <repo>/fix.go <repo:github.com/acme/lib>/fix.go",
-		"github.com/acme/lib fix.go ",
-		"  ",
-		"  ",
-	}; !reflect.DeepEqual(tools(a), want) {
-		t.Errorf("acme tools = %q, want %q", tools(a), want)
-	}
-	if want := []string{
-		"github.com/client/api fix.go ",
-		"  cp <repo:github.com/client/api>/fix.go <repo>/fix.go",
-		"  ",
-		"  ",
-		"  ",
-	}; !reflect.DeepEqual(tools(c), want) {
-		t.Errorf("client tools = %q, want %q", tools(c), want)
-	}
-	data, _ := json.Marshal(c)
-	for _, leak := range []string{"acme", "scratch", "oss"} {
-		if strings.Contains(string(data), leak) {
-			t.Errorf("client's payload mentions %q: %s", leak, data)
+		if p := only(t, s, ctx); !p.PromptsWithheld || len(p.Prompts) != 0 {
+			t.Errorf("%s opts out: prompts = %+v", root, p.Prompts)
 		}
 	}
 }
@@ -293,32 +264,9 @@ func TestBuildMasksNestedRepository(t *testing.T) {
 	}
 }
 
-// Worktrees of one repository can be configured with different tokens (each
-// checkout has its own .swarmia.json): each target gets the repository with
-// only the work done in its own worktrees.
-func TestBuildSplitsWorktreesConfiguredApart(t *testing.T) {
-	s := &report.Session{ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at, Root: "/src/app",
-		Tools: []report.Tool{
-			{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/a.go"},
-			{At: at, Name: "Edit", Root: "/src/app-wt", File: "/src/app-wt/b.go"},
-		},
-		AILinesByRoot: map[string]map[string]int{"/src/app": {"a.go": 1}, "/src/app-wt": {"b.go": 2}},
-	}
-	wt := app
-	wt.Target = client
-	parts := Build(s, contextFor(map[string]RepoInfo{"/src/app": app, "/src/app-wt": wt}))
-	if len(parts) != 2 {
-		t.Fatalf("parts = %+v, want one per target", parts)
-	}
-	a, c := parts[0].Payload, parts[1].Payload
-	if a.Repos[0].AILines != 1 || c.Repos[0].AILines != 2 || a.Tools[1].File != "" || c.Tools[0].File != "" {
-		t.Errorf("acme %+v %+v; client %+v %+v", a.Repos, a.Tools, c.Repos, c.Tools)
-	}
-}
-
 // A session started in a directory holding repositories lists them in the
 // order it worked in them, and masks that directory as <project>; one that
-// worked in no identifiable repository has no parts at all.
+// worked in no identifiable repository isn't sent.
 func TestBuildOutsideRepository(t *testing.T) {
 	s := &report.Session{ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at,
 		Tools: []report.Tool{
@@ -328,8 +276,8 @@ func TestBuildOutsideRepository(t *testing.T) {
 		},
 	}
 	ctx := contextFor(map[string]RepoInfo{
-		"/work/a": {Slug: "github.com/acme/a", Target: acme, Prompts: true},
-		"/work/b": {Slug: "github.com/acme/b", Target: acme, Prompts: true},
+		"/work/a": {Slug: "github.com/acme/a", Prompts: true},
+		"/work/b": {Slug: "github.com/acme/b", Prompts: true},
 	})
 	ctx.ProjectDir = "/work"
 	p := only(t, s, ctx)
@@ -341,8 +289,8 @@ func TestBuildOutsideRepository(t *testing.T) {
 	}
 
 	s.Tools = s.Tools[:1]
-	if parts := Build(s, ctx); len(parts) != 0 {
-		t.Errorf("parts = %+v, want none", parts)
+	if p, ok := Build(s, ctx); ok {
+		t.Errorf("payload = %+v, want none", p)
 	}
 }
 
