@@ -51,6 +51,9 @@ type agentRun struct {
 	NumTurns     int
 	HookErrors   []string
 	Transcript   string // path to the session transcript
+	// HooksStarted counts the hooks the stream shows starting (Claude Code
+	// only): none means the agent loaded no hooks for the run.
+	HooksStarted int
 }
 
 // --- credentials -------------------------------------------------------------------
@@ -161,7 +164,7 @@ func (claudeCode) run(e *env, step, sessionID, prompt string) agentRun {
 	args := []string{"-p", prompt,
 		"--output-format", "stream-json", "--verbose", "--include-hook-events",
 		"--permission-mode", "bypassPermissions",
-		"--setting-sources", "project",
+		"--setting-sources", e.settingSources,
 		"--max-turns", envOr("E2E_MAX_TURNS", "40"),
 		"--model", envOr("E2E_MODEL", "sonnet"),
 	}
@@ -172,7 +175,7 @@ func (claudeCode) run(e *env, step, sessionID, prompt string) agentRun {
 		args = append(args, "--session-id", sessionID)
 	}
 	cmd := exec.Command(e.agentBin, args...)
-	cmd.Dir = e.repo
+	cmd.Dir = e.cwd
 	cmd.Env = append(append([]string{}, e.base...), e.agentEnv()...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -227,6 +230,9 @@ func parseStream(data []byte) agentRun {
 			sub, _ := m["subtype"].(string)
 			if m["type"] == "system" && !strings.HasPrefix(sub, "hook") {
 				continue
+			}
+			if sub == "hook_started" || sub == "started" {
+				r.HooksStarted++
 			}
 			code, hasCode := m["exit_code"].(float64)
 			outcome, _ := m["outcome"].(string)

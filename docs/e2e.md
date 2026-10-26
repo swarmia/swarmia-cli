@@ -89,6 +89,28 @@ one-to-one to swarmia-cli's. Codex runs as `codex exec --json
 --dangerously-bypass-approvals-and-sandbox`, which picks the session id itself
 (the stream's `thread.started`), and `codex exec resume <id>`.
 
+## Subdirectory scenario
+
+In a monorepo, developers launch their agent in one app's directory as often
+as at the root. This scenario does that with Claude Code, in a small monorepo
+(`apps/web`, `apps/admin`) instead of the fixture, and the hooks installed in
+one of two places:
+
+| Test | Hooks | Expected |
+|---|---|---|
+| `TestClaudeCodeSubdirectoryUserHooks` | user settings (`--setting-sources user,project`) | passes |
+| `TestClaudeCodeSubdirectoryProjectHooks` | the repository's `.claude/settings.json`, at its root | fails: Claude Code loads project settings only from the directory it's launched in, so the part launched in `apps/web` goes unrecorded |
+
+| Step | Who | Exercises |
+|---|---|---|
+| launched in `apps/web`: "create `src/greet.ts`" | agent | hooks in a session launched below the repository root |
+| resumed from the root: "create `apps/web/src/farewell.ts`" | agent | a session resumed from another directory of the same repository |
+| commit and push | script | attribution |
+
+Checks: Claude Code ran hooks when launched in `apps/web`; the session has one
+payload, with tool calls and committed lines for both files. It costs two
+agent turns.
+
 ## Checks
 
 The agent writes different code every run, so checks are properties, not
