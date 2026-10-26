@@ -111,6 +111,32 @@ a tool call worked in it; tool calls carry their repository and a path
 relative to it; per repository, the same oracle as above (precision, recall,
 class agreement); no local paths. It costs one agent turn.
 
+## Moved-session scenario
+
+A session doesn't stay where it was started: it `cd`s into a repository, and
+the developer may resume it from another directory. swarmia-cli keeps its
+state per directory an agent is started in, so a session resumed elsewhere
+could end up in two stores, whose payloads would replace each other on the
+server. This scenario checks that it doesn't. A workspace holds `app` and
+`lib`, with hooks installed in the workspace and, in two variants, either in
+`app` (project scope) or for the user (user scope, which stands down where the
+launch directory has its own hooks; Claude Code then runs with
+`--setting-sources user,project`).
+
+| Step | Who | Exercises |
+|---|---|---|
+| In the workspace: "create `app/src/greet.ts`; `cd lib`; then append to `README.md` with echo" | agent | edits in a repository below the launch directory; a shell write after `cd` |
+| resume the session from `app/src`: "create `farewell.ts` here" | agent | a session resumed from another directory, with its own hooks |
+| commit and push both repositories | script | attribution |
+
+Checks: Claude Code ran hooks when resumed (it loads project hooks only from
+the directory it's launched in, so with project scope, a session resumed from
+`app/src` goes unrecorded); `report --json` from the workspace and from `app/src`; each session id
+has a payload in exactly one of them; with one id, that payload has tool calls
+for both files and committed AI lines in `app` and `lib`. If the agent
+continues a resumed session under a new id, that's logged, and the two are
+checked as separate sessions. It costs two agent turns.
+
 ## Checks
 
 The agent writes different code every run, so checks are properties, not
