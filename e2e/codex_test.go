@@ -41,14 +41,14 @@ func (codex) install(e *env, version string) {
 	e.t.Logf("Codex %s (requested %q)", e.version, version)
 }
 
-// prepare trusts the fixture as a project: Codex reads a project's .codex/
+// prepare trusts the workspace as a project: Codex reads a project's .codex/
 // (our hooks) only once its folder is trusted, which users confirm on first
 // use.
 func (codex) prepare(e *env) {
 	e.t.Helper()
 	f, err := os.OpenFile(filepath.Join(e.root, "codex-home", "config.toml"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	must(e.t, err)
-	fmt.Fprintf(f, "\n[projects.%q]\ntrust_level = \"trusted\"\n", e.repo)
+	fmt.Fprintf(f, "\n[projects.%q]\ntrust_level = \"trusted\"\n", e.workspace)
 	f.Close()
 
 	// Codex skips untrusted hooks silently, so check up front, without a
@@ -79,7 +79,7 @@ type codexHook struct {
 func codexListHooks(e *env) []codexHook {
 	e.t.Helper()
 	cmd := exec.Command(e.agentBin, "app-server")
-	cmd.Dir = e.repo
+	cmd.Dir = e.workspace
 	cmd.Env = e.base
 	stdin, err := cmd.StdinPipe()
 	must(e.t, err)
@@ -109,7 +109,7 @@ func codexListHooks(e *env) []codexHook {
 	fmt.Fprintln(stdin, `{"method":"initialize","id":1,"params":{"clientInfo":{"name":"swarmia_cli_e2e","title":"swarmia-cli e2e","version":"1.0.0"}}}`)
 	await(1)
 	fmt.Fprintln(stdin, `{"method":"initialized"}`)
-	req, _ := json.Marshal(map[string]any{"method": "hooks/list", "id": 2, "params": map[string]any{"cwds": []string{e.repo}}})
+	req, _ := json.Marshal(map[string]any{"method": "hooks/list", "id": 2, "params": map[string]any{"cwds": []string{e.workspace}}})
 	fmt.Fprintln(stdin, string(req))
 	var res struct {
 		Data []struct {
@@ -153,7 +153,7 @@ func (codex) run(e *env, step, sessionID, prompt string) agentRun {
 	}
 	args = append(args, prompt)
 	cmd := exec.Command(e.agentBin, args...)
-	cmd.Dir = e.repo
+	cmd.Dir = e.workspace
 	cmd.Env = append(append([]string{}, e.base...), e.agentEnv()...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

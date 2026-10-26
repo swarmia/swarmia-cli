@@ -31,7 +31,7 @@ var sendCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		cfg, err := config.Load(repo.Root)
+		cfg, err := config.Load(configDir(repo.Root))
 		if err != nil {
 			return err
 		}
@@ -45,10 +45,10 @@ var sendCmd = &cobra.Command{
 		var pending int
 		opts.AfterAttribute = func(sessions []*report.Session) error {
 			if sendDryRun {
-				pending = deliver.Pending(sessions, deliveryOptions(repo, cfg, opts, true))
+				pending = deliver.Pending(sessions, deliveryOptions(cfg, opts, true))
 				return nil
 			}
-			outcome, err = deliver.Deliver(sessions, deliveryOptions(repo, cfg, opts, true))
+			outcome, err = deliver.Deliver(sessions, deliveryOptions(cfg, opts, true))
 			return err
 		}
 		if _, err := report.Process(opts); err != nil {

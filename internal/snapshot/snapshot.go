@@ -5,8 +5,9 @@
 //
 // It runs inside agent hooks, so it is built to be cheap: one `git status`
 // per snapshot, and file contents are only re-read when size or mtime changed
-// since the previous snapshot. Each side of a command gets at most Budget, so
-// a huge repository delays the agent by that much at worst.
+// since the previous snapshot of that worktree. A command may be snapshotted
+// in several worktrees (see Scope), in parallel; each side of a command gets
+// at most Budget, so it delays the agent by that much at worst.
 package snapshot
 
 import (
@@ -75,11 +76,19 @@ type Store struct {
 	Dir string
 }
 
+// pendingPath is where a command's Pending waits. The ".repos" suffix keeps
+// older binaries, which kept one Snapshot there, from reading it.
 func (s Store) pendingPath(id string) string {
-	return filepath.Join(s.Dir, "pending", safeName(id)+".json")
+	return filepath.Join(s.Dir, "pending", safeName(id)+".repos.json")
 }
 func (s Store) blobPath(sum string) string { return filepath.Join(s.Dir, "blobs", sum) }
-func (s Store) lastPath() string           { return filepath.Join(s.Dir, "last.json") }
+
+// lastPath keeps a worktree's latest snapshot, whose blobs the next one
+// reuses.
+func (s Store) lastPath(root string) string {
+	sum := sha256.Sum256([]byte(root))
+	return filepath.Join(s.Dir, "last", hex.EncodeToString(sum[:8])+".json")
+}
 
 // Take snapshots the worktree's dirty files.
 func (s Store) Take(ctx context.Context, repo gitrepo.Repo) (Snapshot, error) {
@@ -91,7 +100,7 @@ func (s Store) Take(ctx context.Context, repo gitrepo.Repo) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	last := s.readLast()
+	last := s.readLast(repo.Root)
 	_, busy := repo.InProgress()
 	snap := Snapshot{Head: st.Head, Files: map[string]Entry{}, Busy: busy, Stash: repo.Stash()}
 	for _, path := range dirty {
@@ -100,7 +109,7 @@ func (s Store) Take(ctx context.Context, repo gitrepo.Repo) (Snapshot, error) {
 		}
 		snap.Files[path] = s.entry(repo.Root, path, last[path])
 	}
-	s.writeLast(snap.Files)
+	s.writeLast(repo.Root, snap.Files)
 	return snap, nil
 }
 
@@ -137,28 +146,33 @@ func (s Store) entry(root, path string, prev Entry) Entry {
 	return e
 }
 
-// Save stores a snapshot until the command identified by id finishes.
-func (s Store) Save(id string, snap Snapshot) error {
-	data, err := json.Marshal(snap)
+// Pending is what was snapshotted before a command: a Snapshot per worktree,
+// by root.
+type Pending map[string]Snapshot
+
+// Save stores what was snapshotted until the command identified by id
+// finishes.
+func (s Store) Save(id string, p Pending) error {
+	data, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
 	return writeAtomic(s.pendingPath(id), data)
 }
 
-// Load retrieves and removes the snapshot saved for id.
-func (s Store) Load(id string) (Snapshot, bool) {
+// Load retrieves and removes what was saved for id.
+func (s Store) Load(id string) (Pending, bool) {
 	path := s.pendingPath(id)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Snapshot{}, false
+		return nil, false
 	}
 	os.Remove(path)
-	var snap Snapshot
-	if json.Unmarshal(data, &snap) != nil {
-		return Snapshot{}, false
+	var p Pending
+	if json.Unmarshal(data, &p) != nil {
+		return nil, false
 	}
-	return snap, true
+	return p, true
 }
 
 // Changes diffs the worktree against the snapshot taken before a command and
@@ -290,20 +304,31 @@ func gitShow(ctx context.Context, root, rev, path string) (string, error) {
 }
 
 // Prune removes snapshots of commands that never reported back (the agent was
-// interrupted) and blobs nothing has referenced for a while. It is cheap to
-// call often: it does nothing if it ran within the last hour.
+// interrupted), and the latest snapshots of worktrees, the working sets of
+// sessions and the blobs nothing has used for a while. It is cheap to call
+// often: it does nothing if it ran within the last hour.
 func (s Store) Prune(now time.Time) {
 	marker := filepath.Join(s.Dir, "pruned")
 	if fi, err := os.Stat(marker); err == nil && now.Sub(fi.ModTime()) < time.Hour {
 		return
 	}
 	_ = writeAtomic(marker, nil)
+	week := now.Add(-7 * 24 * time.Hour)
 	removeOlderThan(filepath.Join(s.Dir, "pending"), now.Add(-24*time.Hour), nil)
+	removeOlderThan(filepath.Join(s.Dir, "last"), week, nil)
+	removeOlderThan(filepath.Join(s.Dir, "sessions"), week, nil)
+	os.Remove(filepath.Join(s.Dir, "last.json")) // where older binaries kept the one worktree's
 	keep := map[string]bool{}
-	for _, e := range s.readLast() {
-		keep[e.Blob] = true
+	entries, _ := os.ReadDir(filepath.Join(s.Dir, "last"))
+	for _, de := range entries {
+		var last map[string]Entry
+		if data, err := os.ReadFile(filepath.Join(s.Dir, "last", de.Name())); err == nil && json.Unmarshal(data, &last) == nil {
+			for _, e := range last {
+				keep[e.Blob] = true
+			}
+		}
 	}
-	removeOlderThan(filepath.Join(s.Dir, "blobs"), now.Add(-7*24*time.Hour), keep)
+	removeOlderThan(filepath.Join(s.Dir, "blobs"), week, keep)
 }
 
 func removeOlderThan(dir string, cutoff time.Time, keep map[string]bool) {
@@ -343,17 +368,17 @@ func dirtyPaths(ctx context.Context, root string) ([]string, error) {
 	return paths, nil
 }
 
-func (s Store) readLast() map[string]Entry {
+func (s Store) readLast(root string) map[string]Entry {
 	last := map[string]Entry{}
-	if data, err := os.ReadFile(s.lastPath()); err == nil {
+	if data, err := os.ReadFile(s.lastPath(root)); err == nil {
 		_ = json.Unmarshal(data, &last)
 	}
 	return last
 }
 
-func (s Store) writeLast(files map[string]Entry) {
+func (s Store) writeLast(root string, files map[string]Entry) {
 	if data, err := json.Marshal(files); err == nil {
-		_ = writeAtomic(s.lastPath(), data)
+		_ = writeAtomic(s.lastPath(root), data)
 	}
 }
 

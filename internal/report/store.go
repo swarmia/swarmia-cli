@@ -23,7 +23,7 @@ const Retention = 30 * 24 * time.Hour
 // worktree does, and each may have its own swarmia-cli), so bump it when an
 // older binary would lose or misread something in a new session file: older
 // binaries then leave such sessions, and their events, alone.
-const SessionFormat = 2 // 2: tools carry status and exit_code
+const SessionFormat = 3 // 2: tools carry status and exit_code; 3: edits, commits and AI lines carry their worktree
 
 // Store keeps one JSON file per session under Dir. Files are owner-only: they
 // hold prompts and the agent's code.
@@ -156,6 +156,7 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 	}
 	byID := map[string]*Session{}
 	for _, s := range sessions {
+		s.upgrade(opts.FallbackRoot)
 		byID[s.ID] = s
 	}
 	if res.Folded, err = foldLog(opts.LogPath, st, byID, newer, opts.FallbackRoot); err != nil {

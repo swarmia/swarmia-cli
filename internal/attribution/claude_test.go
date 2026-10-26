@@ -43,7 +43,7 @@ func TestClaudeEditRebuildsFromOriginalFile(t *testing.T) {
 	p := payload(t, "Edit", map[string]any{
 		"file_path": "/repo/src/x.txt", "old_string": "d\n", "new_string": "D1\nD2\n",
 	}, orig)
-	edit, ok := ClaudeEdit(p, "/repo")
+	edit, ok := ClaudeEdit(p, Within("/repo"))
 	if !ok || edit.Path != "src/x.txt" {
 		t.Fatalf("got %+v, %v", edit, ok)
 	}
@@ -61,7 +61,7 @@ func TestClaudeEditMultiEditReplaysInOrder(t *testing.T) {
 			{"old_string": "uno two", "new_string": "uno dos"}, // depends on the first edit
 		},
 	}, "one two\n")
-	edit, ok := ClaudeEdit(p, "/repo")
+	edit, ok := ClaudeEdit(p, Within("/repo"))
 	if want := [][]string{{"+uno dos"}}; !ok || !reflect.DeepEqual(render(edit.Hunks), want) {
 		t.Errorf("got %q, %v; want %q", render(edit.Hunks), ok, want)
 	}
@@ -72,7 +72,7 @@ func TestClaudeEditReplaceAll(t *testing.T) {
 	p := payload(t, "Edit", map[string]any{
 		"file_path": "/repo/x.go", "old_string": "foo", "new_string": "bar", "replace_all": true,
 	}, "foo()\nkeep\nfoo()\n")
-	edit, _ := ClaudeEdit(p, "/repo")
+	edit, _ := ClaudeEdit(p, Within("/repo"))
 	if want := [][]string{{"+bar()", " keep", "+bar()"}}; !reflect.DeepEqual(render(edit.Hunks), want) {
 		t.Errorf("got %q, want %q", render(edit.Hunks), want)
 	}
@@ -80,7 +80,7 @@ func TestClaudeEditReplaceAll(t *testing.T) {
 
 func TestClaudeEditWriteCreateIsAllAdded(t *testing.T) {
 	p := payload(t, "Write", map[string]any{"file_path": "/repo/new.go", "content": "package x\n\nfunc F() {}\n"}, nil)
-	edit, _ := ClaudeEdit(p, "/repo")
+	edit, _ := ClaudeEdit(p, Within("/repo"))
 	if want := [][]string{{"+package x", "+", "+func F() {}"}}; !reflect.DeepEqual(render(edit.Hunks), want) {
 		t.Errorf("got %q, want %q", render(edit.Hunks), want)
 	}
@@ -92,7 +92,7 @@ func TestClaudeEditFallsBackToInputDiff(t *testing.T) {
 	in := map[string]any{"file_path": "/repo/x.go", "old_string": "a\nb\nc", "new_string": "a\nB\nc"}
 	want := [][]string{{" a", "+B", " c"}}
 	for name, orig := range map[string]any{"no originalFile": nil, "stale originalFile": "zzz\n"} {
-		edit, ok := ClaudeEdit(payload(t, "Edit", in, orig), "/repo")
+		edit, ok := ClaudeEdit(payload(t, "Edit", in, orig), Within("/repo"))
 		if !ok || !reflect.DeepEqual(render(edit.Hunks), want) {
 			t.Errorf("%s: got %q, %v; want %q", name, render(edit.Hunks), ok, want)
 		}
@@ -107,7 +107,7 @@ func TestClaudeEditIgnoresIrrelevantPayloads(t *testing.T) {
 		"pre tool use": []byte(`{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/repo/x","content":"x"}}`),
 		"not json":     []byte(`nope`),
 	} {
-		if edit, ok := ClaudeEdit(p, "/repo"); ok {
+		if edit, ok := ClaudeEdit(p, Within("/repo")); ok {
 			t.Errorf("%s: extracted %+v", name, edit)
 		}
 	}
@@ -127,5 +127,26 @@ func TestDiffHunksGrouping(t *testing.T) {
 	}
 	if got := diffHunks(before, before); got != nil {
 		t.Errorf("identical texts gave %q", render(got))
+	}
+}
+
+// An edit is placed where the locator says, and the locator only ever sees
+// absolute, cleaned paths: a relative file_path isn't an edit.
+func TestClaudeEditUsesLocator(t *testing.T) {
+	var asked []string
+	locate := func(path string) (string, string, bool) {
+		asked = append(asked, path)
+		return "/work/lib", "pkg/x.go", true
+	}
+	p := payload(t, "Write", map[string]any{"file_path": "/work/app/../lib/pkg/x.go", "content": "x\n"}, nil)
+	edit, ok := ClaudeEdit(p, locate)
+	if !ok || edit.Root != "/work/lib" || edit.Path != "pkg/x.go" {
+		t.Errorf("edit = %+v, %v", edit, ok)
+	}
+	if want := []string{"/work/lib/pkg/x.go"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("locator asked %q, want %q", asked, want)
+	}
+	if _, ok := ClaudeEdit(payload(t, "Write", map[string]any{"file_path": "pkg/x.go", "content": "x\n"}, nil), locate); ok {
+		t.Error("relative file_path made an edit")
 	}
 }

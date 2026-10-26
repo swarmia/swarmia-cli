@@ -24,16 +24,16 @@ import (
 
 // Options configures attribution.
 type Options struct {
-	// RepoDir is any directory in the repository the log belongs to.
-	RepoDir string
-	// FallbackRoot resolves file paths in records logged before records carried
-	// their worktree root.
+	// FallbackRoot is the worktree of edits and shell changes from before they
+	// recorded their own: records without a git root, and sessions stored in
+	// format 2 or earlier. "" when the project isn't in a repository.
 	FallbackRoot string
-	// AuthorEmail limits candidate commits to the user's own: those authored
-	// with this email, plus those the reflog shows were created on this machine
-	// (covering other emails). "" considers all. In a busy repository this keeps
-	// other people's commits out of the scan.
-	AuthorEmail string
+	// AuthorEmail, if set, gives the user's email in a worktree. It limits each
+	// repository's candidate commits to the user's own: those authored with
+	// that email, plus those the reflog shows were created on this machine
+	// (covering other emails). "" considers all. In a busy repository this
+	// keeps other people's commits out of the scan.
+	AuthorEmail func(root string) string
 }
 
 // Session is one agent session: what happened in it, and which committed lines
@@ -41,18 +41,24 @@ type Options struct {
 type Session struct {
 	// Format is the session file's format (see SessionFormat); 0 in files
 	// from before the field, which are format 1.
-	Format    int       `json:"format,omitempty"`
-	ID        string    `json:"id"`
-	Agent     string    `json:"agent"`
+	Format int    `json:"format,omitempty"`
+	ID     string `json:"id"`
+	Agent  string `json:"agent"`
+	// Root is the worktree the session was started in, if it was started in
+	// one.
+	Root      string    `json:"root,omitempty"`
 	Model     string    `json:"model,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at"`
 	Prompts   []Prompt  `json:"prompts,omitempty"`
 	Tools     []Tool    `json:"tools,omitempty"`
 	Edits     []Edit    `json:"edits,omitempty"`
-	// AILinesByPath counts, per file, the non-blank lines the agent wrote that
-	// were still there after its last edit to the file — lines it wrote and then
-	// replaced itself don't count.
+	// AILinesByRoot counts, per worktree root and file, the non-blank lines the
+	// agent wrote that were still there after its last edit to the file — lines
+	// it wrote and then replaced itself don't count.
+	AILinesByRoot map[string]map[string]int `json:"ai_lines_by_root,omitempty"`
+	// AILinesByPath is AILinesByRoot in format 2 and earlier, for the
+	// project's worktree alone (see upgrade).
 	AILinesByPath map[string]int `json:"ai_lines_by_path,omitempty"`
 	// ShellUnrecorded counts shell commands whose changes weren't recorded:
 	// snapshotting the worktree around them ran out of time or failed, or the
@@ -70,8 +76,8 @@ type Session struct {
 }
 
 // Delivery is the outcome of the last delivery attempt that reached the
-// server for a session. Hash identifies the payload, so an unchanged session
-// isn't sent again; Rejected holds the server's reason if it refused it.
+// server for a session's part. Hash identifies the payload, so an unchanged
+// part isn't sent again; Rejected holds the server's reason if it refused it.
 type Delivery struct {
 	Hash     string    `json:"hash"`
 	SentAt   time.Time `json:"sent_at"`
@@ -84,9 +90,12 @@ type Prompt struct {
 }
 
 // Tool is one tool call. File and Command are set when the tool has them.
+// Root is the worktree it worked in: its file's, else its working
+// directory's; "" if neither is in a repository.
 type Tool struct {
 	At      time.Time `json:"at"`
 	Name    string    `json:"name"`
+	Root    string    `json:"root,omitempty"`
 	File    string    `json:"file,omitempty"`
 	Command string    `json:"command,omitempty"`
 	// Status and ExitCode are as in agent.Tool.
@@ -94,11 +103,13 @@ type Tool struct {
 	ExitCode *int   `json:"exit_code,omitempty"`
 }
 
-// Edit is one change the agent made to a file: hunks in diff-style lines (see
-// attribution.Hunk.Encode). ViaShell marks changes a shell command made, found
-// by snapshotting the worktree around it.
+// Edit is one change the agent made to a file: the worktree it is in, its
+// path there, and hunks in diff-style lines (see attribution.Hunk.Encode).
+// ViaShell marks changes a shell command made, found by snapshotting the
+// worktree around it.
 type Edit struct {
 	At       time.Time  `json:"at"`
+	Root     string     `json:"root,omitempty"`
 	Path     string     `json:"path"`
 	Hunks    [][]string `json:"hunks"`
 	ViaShell bool       `json:"via_shell,omitempty"`
@@ -113,11 +124,14 @@ type Attribution struct {
 	Commits    []Commit  `json:"commits"`
 }
 
-// Commit is a commit containing lines the session wrote. Kept lists the
+// Commit is a commit containing lines the session wrote, in the repository of
+// the worktree Root (any of its worktrees, if the session edited several).
+// Kept lists the
 // session's added lines (numbered by lineIDs) that the commit holds exact or
 // only reformatted, so a line carried by several commits — e.g. a commit and
 // its rebased copy — can be counted once (see Session.Survived).
 type Commit struct {
+	Root    string    `json:"root,omitempty"`
 	SHA     string    `json:"sha"`
 	At      time.Time `json:"at"`
 	Subject string    `json:"subject"`
@@ -194,13 +208,56 @@ func (s *Session) Survived(include func(Commit) bool) int {
 	return len(seen)
 }
 
-// AILines is the session's total of AILinesByPath.
+// AILines is the session's total of AILinesByRoot.
 func (s *Session) AILines() int {
 	n := 0
-	for _, c := range s.AILinesByPath {
+	for root := range s.AILinesByRoot {
+		n += s.AILinesIn(root)
+	}
+	return n
+}
+
+// AILinesIn is the session's total of AILinesByRoot in one worktree.
+func (s *Session) AILinesIn(root string) int {
+	n := 0
+	for _, c := range s.AILinesByRoot[root] {
 		n += c
 	}
 	return n
+}
+
+// upgrade brings a session stored in format 2 or earlier up to date: it was
+// started in the project's worktree, root, and its edits, commits and AI
+// lines were all there, as were its tool calls without a file elsewhere.
+func (s *Session) upgrade(root string) {
+	if s.Format >= 3 || root == "" {
+		return
+	}
+	s.Root = root
+	for i, t := range s.Tools {
+		if t.File == "" || insideDir(root, t.File) {
+			s.Tools[i].Root = root
+		}
+	}
+	for i := range s.Edits {
+		if s.Edits[i].Root == "" {
+			s.Edits[i].Root = root
+		}
+	}
+	if s.Attribution != nil {
+		for i := range s.Attribution.Commits {
+			if s.Attribution.Commits[i].Root == "" {
+				s.Attribution.Commits[i].Root = root
+			}
+		}
+	}
+	if len(s.AILinesByPath) > 0 {
+		if s.AILinesByRoot == nil {
+			s.AILinesByRoot = map[string]map[string]int{}
+		}
+		s.AILinesByRoot[root] = s.AILinesByPath
+		s.AILinesByPath = nil
+	}
 }
 
 // ShellEdits counts edits made by shell commands.
@@ -252,8 +309,13 @@ func sortedSessions(m map[string]*Session) []*Session {
 // Fold merges records into sessions (keyed by id), creating sessions as
 // needed. Records identical to one already seen in the same call are skipped:
 // that's an event logged twice by overlapping hooks.
+//
+// An edit tool's file is placed in the worktree it is in, whichever repository
+// that is; a shell command's changes, in the worktree they were snapshotted
+// in (their own, else the record's, else fallbackRoot).
 func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot string) {
 	seen := map[string]bool{}
+	loc := newLocator()
 	for _, rec := range recs {
 		ag := agent.OfRecord(rec.Agent)
 		if ag == nil {
@@ -274,11 +336,11 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		}
 		s, ok := sessions[ev.SessionID]
 		if !ok {
-			s = &Session{ID: ev.SessionID, Agent: ag.Name, StartedAt: at, AILinesByPath: map[string]int{}}
+			s = &Session{ID: ev.SessionID, Agent: ag.Name, StartedAt: at, AILinesByRoot: map[string]map[string]int{}}
 			sessions[ev.SessionID] = s
 		}
-		if s.AILinesByPath == nil {
-			s.AILinesByPath = map[string]int{}
+		if s.AILinesByRoot == nil {
+			s.AILinesByRoot = map[string]map[string]int{}
 		}
 		if at.Before(s.StartedAt) {
 			s.StartedAt = at
@@ -288,6 +350,13 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		}
 		if ev.TranscriptPath != "" {
 			s.TranscriptPath = ev.TranscriptPath
+		}
+		root := fallbackRoot
+		if rec.Git != nil && rec.Git.Root != "" {
+			root = rec.Git.Root
+		}
+		if s.Root == "" {
+			s.Root = root
 		}
 		switch rec.Snapshot {
 		case events.SnapshotOverBudget, events.SnapshotFailed, events.SnapshotGitOperation:
@@ -309,22 +378,30 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		case "SessionEnd":
 			s.Ended = true
 		case "PostToolUse", "PostToolUseFailure":
-			root := fallbackRoot
-			if rec.Git != nil && rec.Git.Root != "" {
-				root = rec.Git.Root
-			}
-			edits := ag.Edits(rec.Event, root)
+			edits := ag.Edits(rec.Event, loc.locate)
 			tool := Tool{At: at, Name: ev.Tool.Name, File: ev.Tool.File, Command: ev.Tool.Command,
 				Status: ev.Tool.Status, ExitCode: ev.Tool.ExitCode}
 			if tool.File == "" && len(edits) > 0 { // e.g. a patch, which names its files inside
-				tool.File = filepath.Join(root, filepath.FromSlash(edits[0].Path))
+				tool.File = filepath.Join(edits[0].Root, filepath.FromSlash(edits[0].Path))
+			}
+			switch {
+			case filepath.IsAbs(tool.File):
+				tool.Root, _, _ = loc.locate(filepath.Clean(tool.File))
+			case ev.Cwd != "":
+				tool.Root = loc.dirRoot(ev.Cwd)
+			default:
+				tool.Root = root
 			}
 			s.Tools = append(s.Tools, tool)
 			for _, e := range edits {
-				s.addEdit(Edit{At: at, Path: e.Path, Hunks: encode(e.Hunks)}, e.After, e.AfterKnown)
+				s.addEdit(Edit{At: at, Root: e.Root, Path: e.Path, Hunks: encode(e.Hunks)}, e.After, e.AfterKnown)
 			}
 			for _, fc := range rec.Changes { // what a shell command authored
-				s.addEdit(Edit{At: at, Path: fc.Path, Hunks: fc.Hunks, ViaShell: true}, "", false)
+				r := root
+				if fc.Root != "" {
+					r = fc.Root
+				}
+				s.addEdit(Edit{At: at, Root: r, Path: fc.Path, Hunks: fc.Hunks, ViaShell: true}, "", false)
 			}
 		}
 	}
@@ -349,14 +426,73 @@ func encode(hunks []attribution.Hunk) [][]string {
 	return out
 }
 
+// locator places files and directories in the worktree of the repository
+// they are in, so edits and tool calls count in any repository, not only the
+// project's. Paths are made canonical first, as worktree roots are (symlinks
+// resolved, spelled as the filesystem has them); the part of a path that no
+// longer exists (a file or directory deleted since) is kept as it is.
+type locator struct {
+	roots map[string]string // resolved directory -> its worktree root, "" for none
+}
+
+func newLocator() *locator { return &locator{roots: map[string]string{}} }
+
+// locate is an attribution.Locator.
+func (l *locator) locate(path string) (string, string, bool) {
+	path = resolveExisting(path)
+	return attribution.Within(l.rootOf(filepath.Dir(path)))(path)
+}
+
+// dirRoot is the worktree a directory is in, "" if none.
+func (l *locator) dirRoot(dir string) string {
+	return l.rootOf(resolveExisting(filepath.Clean(dir)))
+}
+
+func (l *locator) rootOf(dir string) string {
+	root, ok := l.roots[dir]
+	if !ok {
+		if repo, err := gitrepo.Find(dir); err == nil {
+			root = repo.Root
+		}
+		l.roots[dir] = root
+	}
+	return root
+}
+
+// insideDir reports whether path is dir or below it.
+func insideDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting makes the longest part of path that exists canonical (see
+// gitrepo.Canonical).
+func resolveExisting(path string) string {
+	rest := ""
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if resolved, err := gitrepo.Canonical(dir); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
+}
+
 // addEdit records an edit and updates the file's AI line count. With the
 // file's content after the edit, the count is recomputed: the agent's added
 // lines (across all its edits to the file) still present, each occurrence
 // used once. Without it (shell changes), the edit's added lines are added on.
 func (s *Session) addEdit(e Edit, after string, afterKnown bool) {
 	s.Edits = append(s.Edits, e)
+	byPath := s.AILinesByRoot[e.Root]
+	if byPath == nil {
+		byPath = map[string]int{}
+		s.AILinesByRoot[e.Root] = byPath
+	}
 	if !afterKnown {
-		s.AILinesByPath[e.Path] += len(addedLines(e))
+		byPath[e.Path] += len(addedLines(e))
 		return
 	}
 	present := map[string]int{}
@@ -365,7 +501,7 @@ func (s *Session) addEdit(e Edit, after string, afterKnown bool) {
 	}
 	n := 0
 	for _, prev := range s.Edits {
-		if prev.Path != e.Path {
+		if prev.Root != e.Root || prev.Path != e.Path {
 			continue
 		}
 		for _, l := range addedLines(prev) {
@@ -375,7 +511,7 @@ func (s *Session) addEdit(e Edit, after string, afterKnown bool) {
 			}
 		}
 	}
-	s.AILinesByPath[e.Path] = n
+	byPath[e.Path] = n
 }
 
 func addedLines(e Edit) []string {
@@ -390,46 +526,126 @@ func addedLines(e Edit) []string {
 	return out
 }
 
-// Attribute (re)computes the attribution of each session that has edits. It
-// lists candidate commits once — non-merge commits on any ref since the
-// earliest edit, by opts.AuthorEmail if set — and recomputes a session only
-// when the commits touching its files, its edits, or the matcher changed.
-// Commits rebased or amended away are no longer reachable, so they drop out
-// and their replacements are matched. Pushed status is refreshed every time.
+// Attribute (re)computes the attribution of each session that has edits, in
+// every repository it edited. For each repository it lists candidate commits
+// once — non-merge commits on any ref since the earliest edit there, the
+// user's own if opts.AuthorEmail is set — and recomputes a session only when
+// the commits touching its files, its edits, or the matcher changed. Commits
+// rebased or amended away are no longer reachable, so they drop out and their
+// replacements are matched. Pushed status is refreshed every time.
+//
+// A repository that can't be read (its worktrees were removed) keeps the
+// commits it had.
 func Attribute(sessions []*Session, opts Options, now time.Time) error {
-	var earliest time.Time
+	repos := map[string]*repoCommits{} // by repository (see repoKeyOf)
+	keyOf := map[string]string{}       // worktree root -> repository
 	for _, s := range sessions {
 		for _, e := range s.Edits {
-			if earliest.IsZero() || e.At.Before(earliest) {
-				earliest = e.At
+			if e.Root == "" {
+				continue // from a session stored outside any repository
+			}
+			key, ok := keyOf[e.Root]
+			if !ok {
+				key = repoKeyOf(e.Root)
+				keyOf[e.Root] = key
+			}
+			rc := repos[key]
+			if rc == nil {
+				rc = &repoCommits{root: e.Root}
+				repos[key] = rc
+			}
+			if rc.earliest.IsZero() || e.At.Before(rc.earliest) {
+				rc.earliest = e.At
 			}
 		}
 	}
-	if earliest.IsZero() {
-		return nil
-	}
-	r := newRepo(opts.RepoDir)
-	commits, err := r.commitsSince(earliest.Add(-clockSlack))
-	if err != nil {
-		return err
-	}
-	if opts.AuthorEmail != "" {
-		commits = ownCommits(commits, opts, earliest.Add(-clockSlack))
+	for _, rc := range repos {
+		rc.load(opts)
 	}
 	for _, s := range sessions {
 		if len(s.Edits) == 0 {
 			continue
 		}
-		candidates := candidatesFor(s, commits)
-		key := attributionKey(s, candidates)
-		if s.Attribution == nil || s.Attribution.Key != key {
-			s.Attribution = &Attribution{Key: key, ComputedAt: now, Commits: attribute(r, s.Edits, candidates)}
+		edited := map[string]bool{}
+		worktree := map[string]string{} // repository -> the first worktree of it this session edited in
+		for _, e := range s.Edits {
+			if e.Root != "" {
+				edited[keyOf[e.Root]] = true
+				if _, ok := worktree[keyOf[e.Root]]; !ok {
+					worktree[keyOf[e.Root]] = e.Root
+				}
+			}
 		}
-		for i := range s.Attribution.Commits {
-			s.Attribution.Commits[i].Pushed = r.isPushed(s.Attribution.Commits[i].SHA)
+		candidates := map[string][]commit{}
+		for k := range edited {
+			if repos[k].ok {
+				candidates[k] = candidatesFor(s.Edits, repos[k].commits, func(e Edit) bool { return keyOf[e.Root] == k })
+			}
+		}
+		key := attributionKey(s, edited, repos, candidates)
+		if s.Attribution == nil || s.Attribution.Key != key {
+			var commits []Commit
+			for _, c := range s.Commits() { // what repositories that can't be read had
+				if rc := repos[keyOf[c.Root]]; rc == nil || !rc.ok {
+					commits = append(commits, c)
+				}
+			}
+			for k, cs := range candidates {
+				rc := repos[k]
+				for _, c := range attribute(rc.r, s.Edits, cs, func(e Edit) bool { return keyOf[e.Root] == k }) {
+					c.Root = worktree[k] // not rc.root, which may be another session's
+					commits = append(commits, c)
+				}
+			}
+			sort.SliceStable(commits, func(a, b int) bool {
+				if !commits[a].At.Equal(commits[b].At) {
+					return commits[a].At.Before(commits[b].At)
+				}
+				return commits[a].Root < commits[b].Root
+			})
+			s.Attribution = &Attribution{Key: key, ComputedAt: now, Commits: commits}
+		}
+		for i, c := range s.Attribution.Commits {
+			if rc := repos[keyOf[c.Root]]; rc != nil && rc.ok {
+				s.Attribution.Commits[i].Pushed = rc.r.isPushed(c.SHA)
+			}
 		}
 	}
 	return nil
+}
+
+// repoCommits is one repository's candidate commits for Attribute.
+type repoCommits struct {
+	root     string    // a worktree of it, where git runs
+	earliest time.Time // the earliest edit in it, across sessions
+	r        *repo
+	commits  []commit
+	ok       bool // false if its commits couldn't be listed
+}
+
+func (rc *repoCommits) load(opts Options) {
+	rc.r = newRepo(rc.root)
+	since := rc.earliest.Add(-clockSlack)
+	commits, err := rc.r.commitsSince(since)
+	if err != nil {
+		return
+	}
+	if opts.AuthorEmail != nil {
+		if email := opts.AuthorEmail(rc.root); email != "" {
+			commits = ownCommits(commits, rc.root, email, since)
+		}
+	}
+	rc.commits, rc.ok = commits, true
+}
+
+// repoKeyOf identifies the repository of a worktree, so the worktrees of one
+// clone share their commits: its git common dir, or the root itself if it
+// isn't a repository (any longer).
+func repoKeyOf(root string) string {
+	if repo, err := gitrepo.Find(root); err == nil && repo.Root == root {
+		return repo.CommonDir
+	}
+	return root
 }
 
 // UpdateUsage reads new token usage from each session's transcript. It is
@@ -454,25 +670,28 @@ func UpdateUsage(sessions []*Session) {
 // covers commits made under another email, rebased picks and cherry-picks.
 // Reachability (commitsSince lists only commits reachable from refs) already
 // drops commits that were amended or rebased away.
-func ownCommits(commits []commit, opts Options, since time.Time) []commit {
+func ownCommits(commits []commit, root, email string, since time.Time) []commit {
 	created := map[string]bool{}
-	if repo, err := gitrepo.Find(opts.RepoDir); err == nil {
+	if repo, err := gitrepo.Find(root); err == nil {
 		created, _ = repo.LocallyCreatedCommits(since)
 	}
 	var out []commit
 	for _, c := range commits {
-		if strings.EqualFold(c.AuthorEmail, opts.AuthorEmail) || created[c.SHA] {
+		if strings.EqualFold(c.AuthorEmail, email) || created[c.SHA] {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// candidatesFor narrows commits to those that touch one of the session's files
-// at or after its first edit to that file.
-func candidatesFor(s *Session, commits []commit) []commit {
+// candidatesFor narrows commits to those that touch the file of an edit in
+// the repository (those include accepts) at or after its first edit there.
+func candidatesFor(edits []Edit, commits []commit, include func(Edit) bool) []commit {
 	firstEdit := map[string]time.Time{}
-	for _, e := range s.Edits {
+	for _, e := range edits {
+		if !include(e) {
+			continue
+		}
 		if t, ok := firstEdit[e.Path]; !ok || e.At.Before(t) {
 			firstEdit[e.Path] = e.At
 		}
@@ -489,11 +708,22 @@ func candidatesFor(s *Session, commits []commit) []commit {
 	return out
 }
 
-func attributionKey(s *Session, candidates []commit) string {
+// attributionKey identifies a session's attribution inputs: the matcher, its
+// edits, and each repository's candidate commits (or that it couldn't be
+// read).
+func attributionKey(s *Session, edited map[string]bool, repos map[string]*repoCommits, candidates map[string][]commit) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n%d\n", attribution.Version, len(s.Edits))
-	for _, c := range candidates {
-		fmt.Fprintln(h, c.SHA)
+	keys := make([]string, 0, len(edited))
+	for k := range edited {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "repo %s %t\n", k, repos[k].ok)
+		for _, c := range candidates[k] {
+			fmt.Fprintln(h, c.SHA)
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -501,13 +731,15 @@ func attributionKey(s *Session, candidates []commit) string {
 // rank orders classes from strongest to weakest evidence of the agent's work.
 var rank = map[attribution.Class]int{attribution.Exact: 3, attribution.Normalized: 2, attribution.Modified: 1}
 
-// attribute matches the edits' hunks against each candidate commit that
-// touched the edited file after the edit, keeping only lines the commit itself
-// added. A line claimed by several hunks gets the strongest class, and is
-// credited to that hunk's added lines alone.
-func attribute(r *repo, edits []Edit, commits []commit) []Commit {
+// attribute matches the hunks of the edits in r (those include accepts)
+// against each candidate commit that touched the edited file after the edit,
+// keeping only lines the commit itself added. A line claimed by several hunks
+// gets the strongest class, and is credited to that hunk's added lines alone.
+// Line ids number the lines of all the session's edits (see lineIDs), so they
+// are unique across repositories.
+func attribute(r *repo, edits []Edit, commits []commit, include func(Edit) bool) []Commit {
 	var out []Commit
-	paths := editedPaths(edits)
+	paths := editedPaths(edits, include)
 	ids := lineIDs(edits)
 	for _, c := range commits {
 		var files []File
@@ -524,7 +756,7 @@ func attribute(r *repo, edits []Edit, commits []commit) []Commit {
 			best := map[int]attribution.Class{}
 			from := map[int][]int{} // committed line -> ids of the added lines it came from
 			for ei, e := range edits {
-				if e.Path != path || e.At.After(c.At.Add(clockSlack)) {
+				if !include(e) || e.Path != path || e.At.After(c.At.Add(clockSlack)) {
 					continue // a different file, or edited after this commit
 				}
 				for hi, enc := range e.Hunks {
@@ -589,11 +821,11 @@ func spans(ids []int) []Span {
 	return out
 }
 
-func editedPaths(edits []Edit) []string {
+func editedPaths(edits []Edit, include func(Edit) bool) []string {
 	seen := map[string]bool{}
 	var paths []string
 	for _, e := range edits {
-		if !seen[e.Path] {
+		if include(e) && !seen[e.Path] {
 			seen[e.Path] = true
 			paths = append(paths, e.Path)
 		}

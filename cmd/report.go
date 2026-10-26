@@ -66,6 +66,10 @@ func runReport(out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load(configDir(repo.Root))
+	if err != nil {
+		return err
+	}
 	res, err := report.Process(opts)
 	if err != nil {
 		return err
@@ -73,15 +77,11 @@ func runReport(out io.Writer) error {
 	sessions := selectSessions(res.Sessions)
 
 	if reportJSON {
-		return writeReportJSON(out, sessions, repo)
+		return writeReportJSON(out, sessions, cfg)
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintf(out, "No agent sessions logged yet (%s).\n", opts.StateDir)
 		return nil
-	}
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return err
 	}
 	showDelivery = cfg.Token != ""
 	if w := upgradeWarning(opts.StateDir); showDelivery && w != "" {
@@ -217,36 +217,50 @@ func classBreakdown(f report.File) string {
 }
 
 // writeReportJSON prints the payloads delivery would send for the sessions —
-// the same builder, with redaction, prompt opt-out and the pushed-only rule.
-func writeReportJSON(out io.Writer, sessions []*report.Session, repo gitrepo.Repo) error {
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return err
-	}
-	ctx := payloadContext(repo, cfg)
-	payloads := make([]payload.Payload, 0, len(sessions))
+// the same builder, with redaction, prompt opt-out and the pushed-only rule —
+// leaving out those in no repository Swarmia could know, as delivery does.
+func writeReportJSON(out io.Writer, sessions []*report.Session, cfg config.Config) error {
+	ctx := payloadContext(cfg)
+	payloads := []payload.Payload{}
 	for _, s := range sessions {
-		payloads = append(payloads, payload.Build(s, ctx))
+		if p, ok := payload.Build(s, ctx); ok {
+			payloads = append(payloads, p)
+		}
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payloads)
 }
 
-// payloadContext gathers what payloads need beyond the session itself.
-func payloadContext(repo gitrepo.Repo, cfg config.Config) payload.Context {
-	ctx := payload.Context{
-		RepoRoot:    repo.Root,
-		Repo:        payload.RepoSlug(gitOutput(repo.Root, "remote", "get-url", "origin"), sshHostName),
-		AuthorEmail: authorEmail(repo.Root),
-		CLIVersion:  version,
-		Prompts:     cfg.Prompts,
+// payloadContext gathers what payloads need beyond the session itself, sent
+// with the project's configuration cfg: for each worktree, its repository,
+// whether its configuration lets prompts be shared, and the developer's email
+// there.
+func payloadContext(cfg config.Config) payload.Context {
+	ctx := payload.Context{CLIVersion: version, Prompts: cfg.Prompts, ProjectDir: projectDir()}
+	if dir, err := gitrepo.Canonical(ctx.ProjectDir); err == nil {
+		ctx.ProjectDir = dir // as worktree roots are
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		ctx.Home, ctx.UserName = home, filepath.Base(home)
 	}
 	if u, err := user.Current(); err == nil {
 		ctx.UserName = u.Username
+	}
+	known := map[string]payload.RepoInfo{} // it spawns git: once per worktree
+	ctx.Repo = func(root string) payload.RepoInfo {
+		if ri, ok := known[root]; ok {
+			return ri
+		}
+		ri := payload.RepoInfo{
+			Slug:        payload.RepoSlug(gitOutput(root, "remote", "get-url", "origin"), sshHostName),
+			AuthorEmail: authorEmail(root),
+		}
+		if cfg, err := config.Load(root); err == nil {
+			ri.Prompts = cfg.Prompts // a broken config withholds them
+		}
+		known[root] = ri
+		return ri
 	}
 	return ctx
 }

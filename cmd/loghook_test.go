@@ -120,7 +120,7 @@ func TestRunLogHookWrapsPayload(t *testing.T) {
 	if bytes.Contains(data, []byte(`"git"`)) {
 		t.Errorf("git field written outside a repo: %s", data)
 	}
-	if rec.Format != events.Format || rec.LoggedAt == "" || rec.Event["session_id"] != "s1" {
+	if rec.Format != 1 || rec.LoggedAt == "" || rec.Event["session_id"] != "s1" { // the oldest format that holds it
 		t.Errorf("unexpected record: %s", data)
 	}
 }

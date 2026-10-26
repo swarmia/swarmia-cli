@@ -85,11 +85,13 @@ func (s *server) sessionsSent() []string {
 
 func (s *server) opts(t *testing.T, at time.Time) Options {
 	return Options{Endpoint: s.srv.URL + "/cli", Token: "tok", CLIVersion: "test", StateDir: t.TempDir(), Now: at,
-		Context: payload.Context{Prompts: true}}
+		Context: payload.Context{Prompts: true, Repo: func(string) payload.RepoInfo {
+			return payload.RepoInfo{Slug: "github.com/acme/app", Prompts: true}
+		}}}
 }
 
 func sess(id string, ended bool) *report.Session {
-	return &report.Session{ID: id, Agent: "claude-code", StartedAt: now, EndedAt: now, Ended: ended,
+	return &report.Session{ID: id, Agent: "claude-code", StartedAt: now, EndedAt: now, Ended: ended, Root: "/repo",
 		Prompts: []report.Prompt{{At: now, Text: "hello " + id}}}
 }
 
@@ -99,6 +101,17 @@ func TestNoTokenSendsNothing(t *testing.T) {
 	o.Token = ""
 	out, err := Deliver([]*report.Session{sess("a", true)}, o)
 	if err != nil || out.Skipped == "" || len(srv.sessionsSent()) != 0 {
+		t.Errorf("out=%+v err=%v sent=%v", out, err, srv.sessionsSent())
+	}
+}
+
+// A session in no repository Swarmia could know isn't sent.
+func TestSessionOutsideRepositoriesIsNotSent(t *testing.T) {
+	srv := newServer(t)
+	s := sess("a", true)
+	s.Root = ""
+	out, err := Deliver([]*report.Session{s}, srv.opts(t, now))
+	if err != nil || out.Sent != 0 || len(srv.sessionsSent()) != 0 {
 		t.Errorf("out=%+v err=%v sent=%v", out, err, srv.sessionsSent())
 	}
 }

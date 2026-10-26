@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,15 +105,21 @@ func runLogHook(stdin io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("resolving log file: %w", err)
 	}
-	rec := events.Record{Format: events.Format, LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
+	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
 	ev, _ := ag.Parse(payload)
 	// Best-effort: an unreadable repo state must not stop the event being logged.
 	if repoErr == nil {
 		if st, err := repo.ReadState(); err == nil {
 			rec.Git = &events.Git{Root: repo.Root, Head: st.Head, Branch: st.Branch}
 		}
-		rec.Changes, rec.Snapshot = snapshotShellCommand(repo, ev, filepath.Join(filepath.Dir(path), "snapshots"))
 	}
+	store := snapshot.Store{Dir: filepath.Join(filepath.Dir(path), "snapshots")}
+	if ev.Cwd == "" {
+		ev.Cwd = dir // Claude Code's project directory, or where Codex runs hooks
+	}
+	touchWorkingSet(store, ev)
+	snapshotShellCommand(store, ev, &rec)
+	rec.Format = events.FormatOf(rec)
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding record: %w", err)
@@ -193,50 +201,80 @@ func hooksFileRunsLogHook(path string) bool {
 	return false
 }
 
-// snapshotShellCommand brackets a shell tool call: before it runs, it snapshots
-// the worktree's dirty files; when it finishes (successfully or not), it returns
-// what the command authored. Edits through the agent's own edit tools are in
-// their payloads already, so only shell calls need this, and not read-only
-// ones. Errors just mean no changes are recorded — logging the event matters
-// more — and the returned marker (see events.Record.Snapshot) says so.
-func snapshotShellCommand(repo gitrepo.Repo, ev agent.Event, dir string) ([]events.FileChange, string) {
-	if !ev.Tool.Shell || ev.Tool.UseID == "" {
-		return nil, ""
+// touchWorkingSet adds the worktrees a tool call works in, its file's and its
+// working directory's, to the session's working set, which later shell
+// commands are snapshotted in (see snapshot.Scope).
+func touchWorkingSet(store snapshot.Store, ev agent.Event) {
+	if ev.Tool.Name == "" {
+		return
 	}
-	store := snapshot.Store{Dir: dir}
+	var roots []string
+	if filepath.IsAbs(ev.Tool.File) {
+		if repo, err := gitrepo.Find(filepath.Dir(ev.Tool.File)); err == nil {
+			roots = append(roots, repo.Root)
+		}
+	}
+	if repo, err := gitrepo.Find(ev.Cwd); err == nil {
+		roots = append(roots, repo.Root)
+	}
+	store.Touch(ev.SessionID, roots...)
+}
+
+// snapshotShellCommand brackets a shell tool call: before it runs, it
+// snapshots the dirty files of each worktree the call may write in (see
+// snapshot.Scope); when it finishes (successfully or not), it records on rec
+// what the command authored in them. Edits through the agent's own edit tools
+// are in their payloads already, so only shell calls need this, and not
+// read-only ones. Errors just mean changes go unrecorded in that worktree —
+// logging the event matters more — and rec.Snapshot says so.
+func snapshotShellCommand(store snapshot.Store, ev agent.Event, rec *events.Record) {
+	if !ev.Tool.Shell || ev.Tool.UseID == "" {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), snapshot.Budget)
 	defer cancel()
 	switch ev.Name {
 	case "PreToolUse":
 		store.Prune(time.Now())
 		if snapshot.ReadOnly(ev.Tool.Command) {
-			return nil, events.SnapshotReadOnly // so the command's end has nothing to diff
+			rec.Snapshot = events.SnapshotReadOnly // so the command's end has nothing to diff
+			return
 		}
-		snap, err := store.Take(ctx, repo)
-		if err == nil {
-			err = store.Save(ev.Tool.UseID, snap)
+		repos := snapshot.Scope(ev.Tool.Command, ev.Cwd, store.WorkingSet(ev.SessionID))
+		pre, err := store.Before(ctx, repos)
+		if len(pre) > 0 {
+			if serr := store.Save(ev.Tool.UseID, pre); err == nil {
+				err = serr
+			}
 		}
-		return nil, snapshotMarker(err)
+		rec.Snapshot, rec.Snapshotted = snapshotMarker(err), slices.Sorted(maps.Keys(pre))
 	case "PostToolUse", "PostToolUseFailure":
 		pre, ok := store.Load(ev.Tool.UseID)
 		if !ok {
-			return nil, "" // read-only, or its start already says what went wrong
+			return // read-only, or its start already says what went wrong
 		}
-		changes, err := store.Changes(ctx, repo, pre)
-		if err != nil {
-			return nil, snapshotMarker(err)
+		changes, err := store.After(ctx, pre)
+		rec.Snapshot, rec.Snapshotted = snapshotMarker(err), slices.Sorted(maps.Keys(pre))
+		own := ""
+		if rec.Git != nil {
+			own = rec.Git.Root
 		}
-		var out []events.FileChange
-		for _, c := range changes {
-			fc := events.FileChange{Path: c.Path}
-			for _, h := range c.Hunks {
-				fc.Hunks = append(fc.Hunks, h.Encode())
+		var changed []string
+		for _, root := range slices.Sorted(maps.Keys(changes)) {
+			changed = append(changed, root)
+			for _, c := range changes[root] {
+				fc := events.FileChange{Path: c.Path}
+				if root != own {
+					fc.Root = root
+				}
+				for _, h := range c.Hunks {
+					fc.Hunks = append(fc.Hunks, h.Encode())
+				}
+				rec.Changes = append(rec.Changes, fc)
 			}
-			out = append(out, fc)
 		}
-		return out, ""
+		store.Touch(ev.SessionID, changed...)
 	}
-	return nil, ""
 }
 
 func snapshotMarker(err error) string {

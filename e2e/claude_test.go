@@ -172,7 +172,7 @@ func (claudeCode) run(e *env, step, sessionID, prompt string) agentRun {
 		args = append(args, "--session-id", sessionID)
 	}
 	cmd := exec.Command(e.agentBin, args...)
-	cmd.Dir = e.repo
+	cmd.Dir = e.workspace
 	cmd.Env = append(append([]string{}, e.base...), e.agentEnv()...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

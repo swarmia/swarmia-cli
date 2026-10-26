@@ -84,7 +84,7 @@ func (f *fixture) run(command func()) map[string][]string {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if err := f.store.Save("toolu_1", pre); err != nil {
+	if err := f.store.Save("toolu_1", Pending{f.repo.Root: pre}); err != nil {
 		f.t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond) // distinct mtimes on coarse filesystems
@@ -93,7 +93,7 @@ func (f *fixture) run(command func()) map[string][]string {
 	if !ok {
 		f.t.Fatal("snapshot not found after Save")
 	}
-	changes, err := f.store.Changes(context.Background(), f.repo, loaded)
+	changes, err := f.store.Changes(context.Background(), f.repo, loaded[f.repo.Root])
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -203,10 +203,10 @@ func TestTakeReusesBlobsForUnchangedFiles(t *testing.T) {
 
 func TestPruneRemovesStalePendingSnapshots(t *testing.T) {
 	f := newFixture(t)
-	if err := f.store.Save("stale", Snapshot{}); err != nil {
+	if err := f.store.Save("stale", Pending{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.Save("fresh", Snapshot{}); err != nil {
+	if err := f.store.Save("fresh", Pending{}); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-48 * time.Hour)

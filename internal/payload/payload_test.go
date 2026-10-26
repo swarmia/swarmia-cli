@@ -16,43 +16,66 @@ import (
 
 var at = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
+var app = RepoInfo{Slug: "github.com/acme/app", Prompts: true, AuthorEmail: "me@acme.com"}
+
+// contextFor is a Context, sharing prompts, whose worktrees are known by
+// root; any other is in no identifiable repository, and shares prompts too.
+func contextFor(repos map[string]RepoInfo) Context {
+	return Context{CLIVersion: "0.9.0", Prompts: true, Repo: func(root string) RepoInfo {
+		if ri, ok := repos[root]; ok {
+			return ri
+		}
+		return RepoInfo{Prompts: true}
+	}}
+}
+
+// only builds s, which must be sent.
+func only(t *testing.T, s *report.Session, ctx Context) Payload {
+	t.Helper()
+	p, ok := Build(s, ctx)
+	if !ok {
+		t.Fatal("session not sent")
+	}
+	return p
+}
+
 func session() *report.Session {
 	return &report.Session{
-		ID: "s1", Agent: "claude-code", Model: "m", StartedAt: at, EndedAt: at.Add(time.Hour),
+		ID: "s1", Agent: "claude-code", Model: "m", StartedAt: at, EndedAt: at.Add(time.Hour), Root: "/src/app",
 		Prompts: []report.Prompt{{At: at, Text: "use key ghp_" + strings.Repeat("a1B2", 9) + " to fix it"}},
 		Tools: []report.Tool{
-			{At: at, Name: "Bash", Command: "cat > /src/app/x.go <<'EOF'\nfunc Code() {}\nEOF\ngo test ./..."},
-			{At: at, Name: "Edit", File: "/src/app/internal/x.go"},
+			{At: at, Name: "Bash", Root: "/src/app", Command: "cat > /src/app/x.go <<'EOF'\nfunc Code() {}\nEOF\ngo test ./..."},
+			{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/internal/x.go"},
 			{At: at, Name: "Read", File: "/home/me/.claude/plans/plan.md"},
 		},
-		AILinesByPath: map[string]int{"internal/x.go": 5},
+		AILinesByRoot: map[string]map[string]int{"/src/app": {"internal/x.go": 5}},
 		Attribution: &report.Attribution{Commits: []report.Commit{
-			{SHA: "pushed1", Pushed: true, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 0, End: 2}}},
-			{SHA: "local1", Pushed: false, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 4, End: 5, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 3, End: 4}}},
+			{Root: "/src/app", SHA: "pushed1", Pushed: true, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 0, End: 2}}},
+			{Root: "/src/app", SHA: "local1", Pushed: false, Files: []report.File{{Path: "internal/x.go", Lines: []report.Range{{Start: 4, End: 5, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 3, End: 4}}},
 		}},
 	}
 }
 
 func TestBuildAppliesPrivacyRules(t *testing.T) {
-	p := Build(session(), Context{RepoRoot: "/src/app", Repo: "github.com/acme/app", Prompts: true})
+	p := only(t, session(), contextFor(map[string]RepoInfo{"/src/app": app}))
 
 	if len(p.Prompts) != 1 || !strings.Contains(p.Prompts[0].Text, "[REDACTED:github-token]") || strings.Contains(p.Prompts[0].Text, "ghp_") {
 		t.Errorf("prompt not redacted: %+v", p.Prompts)
 	}
-	if want := "cat > <repo>/x.go <<'EOF'\n[1 lines omitted]\nEOF\ngo test ./..."; p.Tools[0].Command != want {
+	if want := "cat > <repo:github.com/acme/app>/x.go <<'EOF'\n[1 lines omitted]\nEOF\ngo test ./..."; p.Tools[0].Command != want {
 		t.Errorf("command = %q, want %q", p.Tools[0].Command, want)
 	}
-	if p.Tools[1].File != "internal/x.go" || p.Tools[2].File != "" {
-		t.Errorf("tool files = %q, %q; want repo-relative and dropped", p.Tools[1].File, p.Tools[2].File)
+	if p.Tools[0].Repo != app.Slug || p.Tools[1].Repo != app.Slug || p.Tools[1].File != "internal/x.go" || p.Tools[2].Repo != "" || p.Tools[2].File != "" {
+		t.Errorf("tools = %+v; want the repository's with relative files, the other without either", p.Tools)
 	}
-	if want := []Commit{{SHA: "pushed1", Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}; !reflect.DeepEqual(p.Commits, want) {
+	if want := []Commit{{Repo: app.Slug, SHA: "pushed1", Path: "internal/x.go", Lines: []report.Range{{Start: 1, End: 3, Class: attribution.Exact}}}}; !reflect.DeepEqual(p.Commits, want) {
 		t.Errorf("commits = %+v, want only the pushed one", p.Commits)
 	}
-	if p.Ended {
-		t.Error("session wasn't ended")
+	if want := []Repo{{Repo: app.Slug, AILines: 5, AILinesKept: 3}}; !reflect.DeepEqual(p.Repos, want) {
+		t.Errorf("repos = %+v, want %+v", p.Repos, want)
 	}
-	if p.AILines != 5 || p.AILinesKept != 3 || p.MatcherVersion != attribution.Version {
-		t.Errorf("counts: generated=%d committed=%d version=%q", p.AILines, p.AILinesKept, p.MatcherVersion)
+	if p.Ended || p.AuthorEmail != "me@acme.com" || p.MatcherVersion != attribution.Version || p.CLIVersion != "0.9.0" {
+		t.Errorf("payload = %+v", p)
 	}
 
 	// Nothing in the serialized payload should carry the local home directory.
@@ -64,15 +87,26 @@ func TestBuildAppliesPrivacyRules(t *testing.T) {
 
 func TestBuildMasksLocalPaths(t *testing.T) {
 	s := session()
+	s.Root = "/home/jdoe/src/app"
 	s.Tools = []report.Tool{
-		{At: at, Name: "Bash", Command: "cd /home/jdoe/src/app && ls /home/jdoe/notes /tmp/claude-501/-home-jdoe-src/x"},
+		{At: at, Name: "Bash", Root: s.Root, Command: "cd /home/jdoe/src/app && ls /home/jdoe/notes /tmp/claude-501/-home-jdoe-src/x"},
+		// A sibling directory sharing the root's name isn't the root.
+		{At: at, Name: "Bash", Root: s.Root, Command: "diff /home/jdoe/src/app/a /home/jdoe/src/app-v2/a"},
 	}
-	s.Prompts = []report.Prompt{{At: at, Text: "see /home/jdoe/src/app/README"}}
-	p := Build(s, Context{RepoRoot: "/home/jdoe/src/app", Home: "/home/jdoe", UserName: "jdoe", Prompts: true})
-	if want := "cd <repo> && ls ~/notes /tmp/claude-501/-home-<user>-src/x"; p.Tools[0].Command != want {
-		t.Errorf("command = %q, want %q", p.Tools[0].Command, want)
+	s.Prompts = []report.Prompt{{At: at, Text: "see /home/jdoe/src/app/README. Paths are relative to /home/jdoe/src/app. Not /home/jdoe/src/app.old"}}
+	ctx := contextFor(map[string]RepoInfo{s.Root: {Slug: "github.com/jdoe/app", Prompts: true}})
+	ctx.Home, ctx.UserName = "/home/jdoe", "jdoe"
+	p := only(t, s, ctx)
+	// The user name is masked, but not inside the slug, which isn't local.
+	for i, want := range []string{
+		"cd <repo:github.com/jdoe/app> && ls ~/notes /tmp/claude-501/-home-<user>-src/x",
+		"diff <repo:github.com/jdoe/app>/a ~/src/app-v2/a",
+	} {
+		if p.Tools[i].Command != want {
+			t.Errorf("command = %q, want %q", p.Tools[i].Command, want)
+		}
 	}
-	if want := "see <repo>/README"; p.Prompts[0].Text != want {
+	if want := "see <repo:github.com/jdoe/app>/README. Paths are relative to <repo:github.com/jdoe/app>. Not ~/src/app.old"; p.Prompts[0].Text != want {
 		t.Errorf("prompt = %q, want %q", p.Prompts[0].Text, want)
 	}
 }
@@ -81,16 +115,16 @@ func TestBuildSendsToolStatus(t *testing.T) {
 	s := session()
 	code := 1
 	s.Tools = []report.Tool{
-		{At: at, Name: "Bash", Command: "go test ./...", Status: "failed", ExitCode: &code},
-		{At: at, Name: "Edit", File: "/src/app/x.go", Status: "ok"},
+		{At: at, Name: "Bash", Root: "/src/app", Command: "go test ./...", Status: "failed", ExitCode: &code},
+		{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/x.go", Status: "ok"},
 		{At: at, Name: "apply_patch"}, // an agent that doesn't say
 	}
-	data, err := json.Marshal(Build(s, Context{RepoRoot: "/src/app"}).Tools)
+	data, err := json.Marshal(only(t, s, contextFor(map[string]RepoInfo{"/src/app": app})).Tools)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `[{"at":"2026-10-01T12:00:00Z","name":"Bash","command":"go test ./...","status":"failed","exit_code":1},` +
-		`{"at":"2026-10-01T12:00:00Z","name":"Edit","file":"x.go","status":"ok"},` +
+	want := `[{"at":"2026-10-01T12:00:00Z","name":"Bash","repo":"github.com/acme/app","command":"go test ./...","status":"failed","exit_code":1},` +
+		`{"at":"2026-10-01T12:00:00Z","name":"Edit","repo":"github.com/acme/app","file":"x.go","status":"ok"},` +
 		`{"at":"2026-10-01T12:00:00Z","name":"apply_patch"}]`
 	if string(data) != want {
 		t.Errorf("tools =\n%s\nwant\n%s", data, want)
@@ -110,18 +144,153 @@ func TestBuildFallsBackToTheUsageModel(t *testing.T) {
 	}
 	os.WriteFile(tr, []byte(line("1", "claude-small")+line("2", "claude-big")+line("3", "claude-big")), 0o600)
 	s.Usage.Update(usage.ClaudeTranscript, tr)
-	if p := Build(s, Context{}); p.Model != "claude-big" {
+	if p := only(t, s, contextFor(map[string]RepoInfo{"/src/app": app})); p.Model != "claude-big" {
 		t.Errorf("model = %q, want claude-big", p.Model)
 	}
 }
 
 func TestBuildWithholdsPrompts(t *testing.T) {
-	p := Build(session(), Context{RepoRoot: "/src/app", Prompts: false})
+	withheld := app
+	withheld.Prompts = false
+	p := only(t, session(), contextFor(map[string]RepoInfo{"/src/app": withheld}))
 	if len(p.Prompts) != 0 || !p.PromptsWithheld {
 		t.Errorf("prompts = %+v, withheld = %v", p.Prompts, p.PromptsWithheld)
 	}
 	if len(p.Tools) != 3 || len(p.Commits) != 1 {
 		t.Error("withholding prompts must not drop tools or attribution")
+	}
+
+	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
+	ctx.Prompts = false // the project's configuration opts out
+	if p := only(t, session(), ctx); len(p.Prompts) != 0 || !p.PromptsWithheld {
+		t.Errorf("project opt-out: prompts = %+v, withheld = %v", p.Prompts, p.PromptsWithheld)
+	}
+}
+
+// A session that worked in several repositories lists them all in one
+// payload, whatever they're configured with: a developer reports to one
+// organization. Any of them opting out of prompts withholds them.
+func TestBuildAcrossRepositories(t *testing.T) {
+	s := &report.Session{
+		ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at, Root: "/src/app",
+		Prompts: []report.Prompt{{At: at, Text: "port the fix from /src/client-api to /src/lib"}},
+		Tools: []report.Tool{
+			{At: at, Name: "Edit", Root: "/src/client-api", File: "/src/client-api/fix.go"},
+			{At: at, Name: "Bash", Root: "/src/app", Command: "cp /src/client-api/fix.go /src/lib/fix.go"},
+			{At: at, Name: "Edit", Root: "/src/lib", File: "/src/lib/fix.go"},
+			{At: at, Name: "Edit", Root: "/src/scratch", File: "/src/scratch/notes.go"},
+		},
+		AILinesByRoot: map[string]map[string]int{"/src/client-api": {"fix.go": 2}, "/src/lib": {"fix.go": 4}},
+		Attribution: &report.Attribution{Commits: []report.Commit{
+			{Root: "/src/client-api", SHA: "c1", Pushed: true, Files: []report.File{{Path: "fix.go", Lines: []report.Range{{Start: 1, End: 2, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 0, End: 1}}},
+			{Root: "/src/lib", SHA: "l1", Pushed: true, Files: []report.File{{Path: "fix.go", Lines: []report.Range{{Start: 1, End: 4, Class: attribution.Exact}}}}, Kept: []report.Span{{Start: 2, End: 5}}},
+		}},
+	}
+	repos := map[string]RepoInfo{
+		"/src/app":        {Slug: "github.com/acme/app", Prompts: true},
+		"/src/lib":        {Slug: "github.com/acme/lib", Prompts: true, AuthorEmail: "me@acme.com"},
+		"/src/client-api": {Slug: "github.com/client/api", Prompts: true, AuthorEmail: "me@client.com"},
+		// /src/scratch has no origin: not identifiable, never listed.
+		"/src/scratch": {Prompts: true},
+	}
+	p := only(t, s, contextFor(repos))
+	if want := []Repo{
+		{Repo: "github.com/acme/app"},
+		{Repo: "github.com/client/api", AILines: 2, AILinesKept: 2},
+		{Repo: "github.com/acme/lib", AILines: 4, AILinesKept: 4},
+	}; !reflect.DeepEqual(p.Repos, want) {
+		t.Errorf("repos = %+v, want %+v", p.Repos, want)
+	}
+	if len(p.Commits) != 2 || p.AuthorEmail != "me@client.com" {
+		t.Errorf("commits %+v, author %q", p.Commits, p.AuthorEmail)
+	}
+	if want := "port the fix from <repo:github.com/client/api> to <repo:github.com/acme/lib>"; len(p.Prompts) != 1 || p.Prompts[0].Text != want {
+		t.Errorf("prompts = %+v, want %q", p.Prompts, want)
+	}
+	if p.Tools[3].Repo != "" || p.Tools[3].File != "" {
+		t.Errorf("unidentified repository's tool = %+v", p.Tools[3])
+	}
+
+	// Any repository the session worked in can withhold prompts, even one
+	// that isn't identifiable.
+	for _, root := range []string{"/src/client-api", "/src/scratch"} {
+		optOut := repos[root]
+		optOut.Prompts = false
+		ctx := contextFor(repos)
+		ctx.Repo = func(r string) RepoInfo {
+			if r == root {
+				return optOut
+			}
+			return repos[r]
+		}
+		if p := only(t, s, ctx); !p.PromptsWithheld || len(p.Prompts) != 0 {
+			t.Errorf("%s opts out: prompts = %+v", root, p.Prompts)
+		}
+	}
+}
+
+// Worktrees of one repository are one entry in repos, each file relative to
+// its own worktree.
+func TestBuildMergesWorktreesOfARepository(t *testing.T) {
+	s := &report.Session{ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at, Root: "/src/app",
+		Tools: []report.Tool{
+			{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/a.go"},
+			{At: at, Name: "Edit", Root: "/src/app-wt", File: "/src/app-wt/pkg/b.go"},
+		},
+		AILinesByRoot: map[string]map[string]int{"/src/app": {"a.go": 1}, "/src/app-wt": {"pkg/b.go": 2}},
+	}
+	p := only(t, s, contextFor(map[string]RepoInfo{"/src/app": app, "/src/app-wt": app}))
+	if want := []Repo{{Repo: app.Slug, AILines: 3}}; !reflect.DeepEqual(p.Repos, want) {
+		t.Errorf("repos = %+v, want %+v", p.Repos, want)
+	}
+	if p.Tools[0].File != "a.go" || p.Tools[1].File != "pkg/b.go" {
+		t.Errorf("tools = %+v", p.Tools)
+	}
+}
+
+// A repository inside another (vendored, say) is masked as itself, even when
+// the session worked in the outer one first.
+func TestBuildMasksNestedRepository(t *testing.T) {
+	s := session()
+	s.Tools = []report.Tool{
+		{At: at, Name: "Bash", Root: "/src/app", Command: "make"},
+		{At: at, Name: "Bash", Root: "/src/app/vendor/lib", Command: "cd /src/app/vendor/lib && cat /src/app/go.mod"},
+	}
+	lib := app
+	lib.Slug = "github.com/acme/lib"
+	p := only(t, s, contextFor(map[string]RepoInfo{"/src/app": app, "/src/app/vendor/lib": lib}))
+	if want := "cd <repo:github.com/acme/lib> && cat <repo:github.com/acme/app>/go.mod"; p.Tools[1].Command != want {
+		t.Errorf("command = %q, want %q", p.Tools[1].Command, want)
+	}
+}
+
+// A session started in a directory holding repositories lists them in the
+// order it worked in them, and masks that directory as <project>; one that
+// worked in no identifiable repository isn't sent.
+func TestBuildOutsideRepository(t *testing.T) {
+	s := &report.Session{ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at,
+		Tools: []report.Tool{
+			{At: at, Name: "Bash", Command: "ls /work /work/b"},
+			{At: at, Name: "Edit", Root: "/work/b", File: "/work/b/x.go"},
+			{At: at, Name: "Edit", Root: "/work/a", File: "/work/a/y.go"},
+		},
+	}
+	ctx := contextFor(map[string]RepoInfo{
+		"/work/a": {Slug: "github.com/acme/a", Prompts: true},
+		"/work/b": {Slug: "github.com/acme/b", Prompts: true},
+	})
+	ctx.ProjectDir = "/work"
+	p := only(t, s, ctx)
+	if len(p.Repos) != 2 || p.Repos[0].Repo != "github.com/acme/b" || p.Repos[1].Repo != "github.com/acme/a" {
+		t.Errorf("repos = %+v, want b then a", p.Repos)
+	}
+	if want := "ls <project> <repo:github.com/acme/b>"; p.Tools[0].Command != want || p.Tools[0].Repo != "" {
+		t.Errorf("tool = %+v, want command %q and no repo", p.Tools[0], want)
+	}
+
+	s.Tools = s.Tools[:1]
+	if p, ok := Build(s, ctx); ok {
+		t.Errorf("payload = %+v, want none", p)
 	}
 }
 

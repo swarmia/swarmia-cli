@@ -279,7 +279,10 @@ type pending struct {
 func dueSessions(sessions []*report.Session, opts Options) ([]pending, error) {
 	var due []pending
 	for _, s := range sessions {
-		p := payload.Build(s, opts.Context)
+		p, ok := payload.Build(s, opts.Context)
+		if !ok {
+			continue // in no repository Swarmia could know
+		}
 		data, err := json.Marshal(p)
 		if err != nil {
 			return nil, err

@@ -19,20 +19,24 @@ example, because the repository isn't connected to the token's organization).
 ## What the data is
 
 A coding agent (Claude Code today; Codex, Cursor, Copilot CLI and Gemini CLI
-later) works in a developer's git repository. The CLI records the session
-locally, works out on the developer's machine which lines of which commits came
-from the agent, and sends Swarmia one **session payload** per agent session:
+later) works in one or more of a developer's git repositories: it may be started
+inside a repository, edit a sibling one, or be started in a directory holding
+many. The CLI records the session locally, works out on the developer's machine
+which lines of which commits came from the agent, and sends Swarmia one
+**session payload** per agent session:
 
 - session metadata: agent, model, start/end time, whether it has ended;
+- the **repositories** the session worked in;
 - the developer's **prompts** (secrets redacted; withheld entirely if the
   developer or repository opted out);
-- the **tool calls** the agent made: tool name, repository-relative file path,
+- the **tool calls** the agent made: tool name, the repository and the file path
+  within it,
   and shell commands with code stripped and secrets redacted;
 - **line attribution**: for each *pushed* commit that contains lines the agent
   wrote, which line ranges of which files, classified as `exact`, `normalized`
   or `modified`;
-- two counts: how many lines the agent wrote, and how many of them landed in
-  pushed commits unchanged or only reformatted;
+- two counts per repository: how many lines the agent wrote, and how many of
+  them landed in pushed commits unchanged or only reformatted;
 - **token usage** per model, read from the agent's transcript (no cost: the
   server prices it).
 
@@ -62,8 +66,21 @@ the client can't prevent: a developer may paste code into a prompt.
   before compression. Sessions in a batch are independent: the server answers
   for each one separately and never fails the batch as a whole because of one
   session.
-- **Sessions belong to one repository.** A session's `repo` is the repository the
-  agent worked in. (One agent session in one repository maps to one payload.)
+- **A session can span repositories.** One payload carries the whole session;
+  `repos` lists the repositories it worked in, and each tool call and commit
+  says which one it belongs to. The session's identity doesn't depend on its
+  repositories: `repos` only grows as the session continues, and every send
+  lists all of them.
+- **One organization per session.** A developer reports to one organization:
+  the whole session is sent with the token configured where the agent was
+  started, whatever the repositories it worked in are configured with. A
+  session is never split between tokens, so its prompts and usage are sent
+  once. Prompts are withheld if that configuration or any repository the
+  session worked in opts out.
+- **Partly connected sessions.** The server keeps a session if at least one of
+  its `repos` is connected to the token's organization, and discards whatever
+  belongs to the others (their entries in `repos`, `commits` and the `repo`
+  and `file` of their tool calls).
 
 ## Request
 
@@ -108,7 +125,6 @@ cap the decompressed size, see Limits).
   "model": "claude-opus-4-8[1m]",
   "matcher_version": "0.1.0",
   "cli_version": "0.4.0",
-  "repo": "github.com/acme/app",
   "author_email": "dev@acme.com",
   "started_at": "2026-10-06T20:43:00Z",
   "ended_at": "2026-10-06T21:41:57Z",
@@ -118,13 +134,15 @@ cap the decompressed size, see Limits).
   ],
   "prompts_withheld": false,
   "tools": [
-    { "at": "2026-10-06T20:44:01Z", "name": "Read", "file": "src/webhooks/sender.ts", "status": "ok" },
-    { "at": "2026-10-06T20:45:30Z", "name": "Edit", "file": "src/webhooks/sender.ts", "status": "ok" },
-    { "at": "2026-10-06T20:46:10Z", "name": "Bash", "command": "cat > src/webhooks/retry.ts <<'EOF'\n[24 lines omitted]\nEOF", "status": "ok" },
-    { "at": "2026-10-06T20:46:55Z", "name": "Bash", "command": "pnpm test src/webhooks", "status": "failed", "exit_code": 1 }
+    { "at": "2026-10-06T20:44:01Z", "name": "Read", "repo": "github.com/acme/app", "file": "src/webhooks/sender.ts", "status": "ok" },
+    { "at": "2026-10-06T20:45:30Z", "name": "Edit", "repo": "github.com/acme/app", "file": "src/webhooks/sender.ts", "status": "ok" },
+    { "at": "2026-10-06T20:46:10Z", "name": "Bash", "repo": "github.com/acme/app", "command": "cat > src/webhooks/retry.ts <<'EOF'\n[24 lines omitted]\nEOF", "status": "ok" },
+    { "at": "2026-10-06T20:46:55Z", "name": "Bash", "repo": "github.com/acme/app", "command": "pnpm test src/webhooks", "status": "failed", "exit_code": 1 },
+    { "at": "2026-10-06T20:48:02Z", "name": "Edit", "repo": "github.com/acme/common", "file": "lib/http.ts", "status": "ok" }
   ],
   "commits": [
     {
+      "repo": "github.com/acme/app",
       "sha": "59e69c61608f8b15237770925b6daafd7496f7eb",
       "path": "src/webhooks/sender.ts",
       "lines": [
@@ -134,13 +152,16 @@ cap the decompressed size, see Limits).
       ]
     },
     {
+      "repo": "github.com/acme/app",
       "sha": "59e69c61608f8b15237770925b6daafd7496f7eb",
       "path": "src/webhooks/retry.ts",
       "lines": [ { "start": 1, "end": 24, "class": "exact" } ]
     }
   ],
-  "ai_lines_generated": 61,
-  "ai_lines_committed": 54,
+  "repos": [
+    { "repo": "github.com/acme/app", "ai_lines_generated": 61, "ai_lines_committed": 54 },
+    { "repo": "github.com/acme/common", "ai_lines_generated": 3, "ai_lines_committed": 0 }
+  ],
   "usage": [
     {
       "model": "claude-opus-4-8", "speed": "standard",
@@ -166,18 +187,24 @@ cap the decompressed size, see Limits).
 | `model` | string, optional | The model the session started with, as the agent reports it (e.g. `claude-opus-4-8[1m]`). Omitted if unknown. |
 | `matcher_version` | string (semver) | Version of the client's attribution rules. If a version is later found to attribute wrongly, the server can discount or flag results from it. |
 | `cli_version` | string | Client version that built this payload. |
-| `repo` | string, optional | The repository as `host/path`, derived from the `origin` remote (e.g. `github.com/acme/app`; GitLab subgroups give `gitlab.com/group/sub/repo`). Every way of cloning gives the same value: credentials, port, query, a trailing `.git` and `/` are dropped, the host is lowercased, `~/.ssh/config` host aliases are resolved, and `ssh.github.com`, `altssh.gitlab.com` and `altssh.bitbucket.org` become `github.com`, `gitlab.com` and `bitbucket.org`. Azure DevOps Services remotes, in any of their forms (`dev.azure.com/org/project/_git/repo`, `org.visualstudio.com/…`, SSH `v3/org/project/repo`), give `dev.azure.com/org/project/repo`, with the project filled in when the URL leaves it out and percent-encoding decoded (`My Project`). The path is otherwise sent as the remote has it, so the server matches it to the repositories it knows: compare it case-insensitively (the hosts route paths that way), and expect self-hosted instances under a path prefix (`example.com/gitlab/group/repo`) and Bitbucket Data Center HTTPS remotes, whose paths start with `scm/` where their SSH ones don't. Empty/omitted if the repository has no `origin` remote or it is a local path. |
-| `author_email` | string, optional | The email the developer's commits in that repository carry: `$GIT_AUTHOR_EMAIL`, else `user.email` (never one git guesses; absent if neither is set). Use it to map the session to a Swarmia identity. It's self-asserted — anyone with the token, which may be committed, can send any email — so it's fine for analytics but must not grant access to anything. For sessions with `commits`, those commits' authors, as Swarmia knows them from the Git provider, are the stronger mapping. |
+| `author_email` | string, optional | The email the developer's commits carry, in the first of `repos`: `$GIT_AUTHOR_EMAIL`, else `user.email` (never one git guesses; absent if neither is set). Use it to map the session to a Swarmia identity. It's self-asserted — anyone with the token, which may be committed, can send any email — so it's fine for analytics but must not grant access to anything. For sessions with `commits`, those commits' authors, as Swarmia knows them from the Git provider, are the stronger mapping. |
 | `started_at` | string, RFC 3339 UTC | First event of the session. |
 | `ended_at` | string, RFC 3339 UTC | Last event seen so far (not necessarily the end — see `ended`). |
 | `ended` | boolean | Whether the agent reported the session's end. A later version may flip it back to `false` if the session is resumed. |
 | `prompts` | array of Prompt | The developer's prompts in order. Empty when withheld. Messages the agent submits itself (a background task's notification, a subagent's report) aren't prompts and aren't sent. |
-| `prompts_withheld` | boolean | `true` if the developer or the repository configuration opted out of sharing prompts. Then `prompts` is empty — that is not the same as a session without prompts. |
+| `prompts_withheld` | boolean | `true` if the developer, or the configuration of any repository in `repos`, opted out of sharing prompts (prompts belong to the whole session, so the strictest setting wins). Then `prompts` is empty — that is not the same as a session without prompts. |
+| `repos` | array of Repository | The repositories the session worked in, sent to this token: those the agent edited, read or searched, or ran shell commands in. Never empty: a session that worked in no repository configured with this token isn't sent to it. The first is the one the session was started in, or else the first it worked in. |
 | `tools` | array of Tool | The agent's tool calls, in order (only completed calls, successful or failed). |
-| `commits` | array of CommitAttribution | Line attribution, one entry per (commit, file). Only commits that were **pushed** (contained in a remote-tracking branch on the developer's machine) when the payload was built. Empty if nothing has been pushed yet. |
-| `ai_lines_generated` | integer | Non-blank lines the agent wrote that were still present after its last edit to each file. Lines it wrote and then replaced itself don't count. Includes lines written through shell commands. Says nothing about human-written lines. |
-| `ai_lines_committed` | integer | How many of the agent's lines `commits` holds `exact` or `normalized`. Each line counts once, however many commits hold it: a commit and its rebased copy both appear in `commits`, but don't double the count. It counts the agent's lines, not committed ones, so a line a formatter wrapped into several still counts as one (and lines it joined into one count separately). From matcher 0.3.0; before that, it summed the commits' lines and could exceed `ai_lines_generated`. The ratio `ai_lines_committed / ai_lines_generated` is the session's "survival" rate, but note the numerator only covers pushed commits. Says nothing about the commits' other lines, which are unknown. |
+| `commits` | array of CommitAttribution | Line attribution, one entry per (commit, file). Only commits that were **pushed** (contained in a remote-tracking branch on the developer's machine) when the payload was built, across all of `repos`. Empty if nothing has been pushed yet. |
 | `usage` | array of Usage, optional | The session's token usage so far, read from the agent's transcript (including its subagents' transcripts). Empty if unknown; absent from older clients. Cumulative: each send carries the totals to date, replacing the previous ones. |
+
+#### Repository
+
+| Field | Type | Description |
+|---|---|---|
+| `repo` | string | The repository as `host/path`, derived from the `origin` remote (e.g. `github.com/acme/app`; GitLab subgroups give `gitlab.com/group/sub/repo`). Every way of cloning gives the same value: credentials, port, query, a trailing `.git` and `/` are dropped, the host is lowercased, `~/.ssh/config` host aliases are resolved, and `ssh.github.com`, `altssh.gitlab.com` and `altssh.bitbucket.org` become `github.com`, `gitlab.com` and `bitbucket.org`. Azure DevOps Services remotes, in any of their forms (`dev.azure.com/org/project/_git/repo`, `org.visualstudio.com/…`, SSH `v3/org/project/repo`), give `dev.azure.com/org/project/repo`, with the project filled in when the URL leaves it out and percent-encoding decoded (`My Project`). The path is otherwise sent as the remote has it, so the server matches it to the repositories it knows: compare it case-insensitively (the hosts route paths that way), and expect self-hosted instances under a path prefix (`example.com/gitlab/group/repo`) and Bitbucket Data Center HTTPS remotes, whose paths start with `scm/` where their SSH ones don't. A repository with no `origin` remote, or a local path as its remote, can't be identified and isn't listed. Each repository appears once. |
+| `ai_lines_generated` | integer | Non-blank lines the agent wrote that were still present after its last edit to each file. Lines it wrote and then replaced itself don't count. Includes lines written through shell commands. Says nothing about human-written lines. |
+| `ai_lines_committed` | integer | How many of the agent's lines `commits` holds `exact` or `normalized`. Each line counts once, however many commits hold it: a commit and its rebased copy both appear in `commits`, but don't double the count. It counts the agent's lines, not committed ones, so a line a formatter wrapped into several still counts as one (and lines it joined into one count separately). From matcher 0.3.0; before that, it summed the commits' lines and could exceed `ai_lines_generated`. The ratio `ai_lines_committed / ai_lines_generated` is the session's "survival" rate in this repository, but note the numerator only covers pushed commits. Says nothing about the commits' other lines, which are unknown. |
 
 #### Usage
 
@@ -216,7 +243,8 @@ differences).
 |---|---|---|
 | `at` | string, RFC 3339 UTC | When the tool call finished. |
 | `name` | string | The agent's tool name, e.g. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, `WebFetch`, `Task`, `mcp__<server>__<tool>` (Claude Code) or `apply_patch`, `Bash` (Codex). Agent-specific; accept anything. |
-| `file` | string, optional | The file the tool acted on, relative to the repository root, `/`-separated (for Codex's `apply_patch`, which can change several, the first). Omitted if the tool has no file or it lies outside the repository. |
+| `repo` | string, optional | The repository the call worked in, as listed in `repos`: the one holding `file`, or for a call without one (a shell command, a search) the one its working directory is in. Omitted if that isn't one of `repos`. |
+| `file` | string, optional | The file the tool acted on, relative to the root of `repo`, `/`-separated (for Codex's `apply_patch`, which can change several, the first). Omitted if the tool has no file or it lies outside every repository in `repos`. |
 | `command` | string, optional | For shell tools: the command, with heredoc bodies replaced by `[N lines omitted]`, inline interpreter scripts (`python -c`, `node -e`, …) by `'[script omitted]'`, quoted strings over 120 characters by `'[N chars omitted]'`, secrets redacted, local paths masked, and capped at ~1000 characters (truncation ends with `…`). |
 | `status` | string, optional | How the call ended: `ok`, `failed` (the agent reported an error) or `interrupted` (the developer stopped it). Accept other values. Absent when unknown: Codex reports failed calls like successful ones, so its calls have none for now, and neither do calls recorded by older clients. A shell command that exits nonzero may still be `ok`: the agent decides, and Claude Code counts e.g. `grep` finding nothing as success. |
 | `exit_code` | integer, optional | For shell tools whose call failed or was interrupted: the command's exit status, when the agent reports it (e.g. `1`, `2`, `127` for a missing command, `130` for an interrupt). Never present on `ok` calls, whose exit status agents don't report. The error message itself is never sent. |
@@ -225,6 +253,7 @@ differences).
 
 | Field | Type | Description |
 |---|---|---|
+| `repo` | string | The repository holding the commit, as listed in `repos`. |
 | `sha` | string | Full commit SHA (40 hex characters, or 64 for SHA-256 repositories). The same commit appears once per attributed file. |
 | `path` | string | File path within the repository at that commit, `/`-separated. |
 | `lines` | array of LineRange, ascending, non-overlapping | The lines of `path` *as of `sha`* that came from this session. |
@@ -258,7 +287,11 @@ Free text (`prompts[].text`, `tools[].command`) may contain:
   `google-api-key`, `stripe-key`, `anthropic-key`, `openai-key`, `npm-token`,
   `sendgrid-key`, `jwt`, `private-key`, `password`, `secret`, `high-entropy`.
   New kinds may appear.
-- `<repo>` — the repository's local root directory.
+- `<repo:host/path>` — the local root directory of that repository in `repos`
+  (e.g. `<repo:github.com/acme/common>`).
+- `<repo>` — the local root directory of a repository not in `repos`.
+- `<project>` — the directory the session was started in, when it isn't inside
+  a repository.
 - `~` — the developer's home directory.
 - `<user>` — the developer's local user name.
 
@@ -284,7 +317,7 @@ Once the request passes the whole-request checks below, the server answers
 |---|---|---|
 | `results[].session_id` | string | Echoes the session's id. |
 | `results[].status` | string | `accepted` — queued for processing; `rejected` — failed a shape check. |
-| `results[].error` | string, only for `rejected` | `invalid payload: <field>` (a required field missing or of the wrong type), `repository unknown` (no `repo`), or `session too large` (over ~9 MiB). Shown to the developer by `swarmia-cli report`. |
+| `results[].error` | string, only for `rejected` | `invalid payload: <field>` (a required field missing or of the wrong type), `repository unknown` (`repos` is empty), or `session too large` (over ~9 MiB). Shown to the developer by `swarmia-cli report`. |
 
 Client behaviour:
 
@@ -355,8 +388,8 @@ that harmless.
   can read that repository can submit data with it, but it allows nothing else:
   no reads, and only sessions for repositories connected to its organization
   are kept.
-- Tokens are also distributed by MDM, user config files or the `SWARMIA_TOKEN`
-  environment variable.
+- Tokens are also distributed by MDM, user config files, a `.swarmia.json` in a
+  directory holding repositories, or the `SWARMIA_TOKEN` environment variable.
 
 ## Limits
 

@@ -45,7 +45,7 @@ type Agent struct {
 	injectedPrompt *regexp.Regexp
 	isEditTool     func(name string) bool
 	isShellTool    func(name string) bool
-	edits          func(payload []byte, root string) []attribution.Edit
+	edits          func(payload []byte, locate attribution.Locator) []attribution.Edit
 }
 
 var ClaudeCode = &Agent{
@@ -59,8 +59,8 @@ var ClaudeCode = &Agent{
 	injectedPrompt:  claudeInjectedPrompt,
 	isEditTool:      attribution.IsClaudeEditTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
-	edits: func(payload []byte, root string) []attribution.Edit {
-		if e, ok := attribution.ClaudeEdit(payload, root); ok {
+	edits: func(payload []byte, locate attribution.Locator) []attribution.Edit {
+		if e, ok := attribution.ClaudeEdit(payload, locate); ok {
 			return []attribution.Edit{e}
 		}
 		return nil
@@ -127,8 +127,11 @@ type Event struct {
 	Name           string
 	SessionID      string
 	TranscriptPath string
-	Model          string
-	Prompt         string
+	// Cwd is the agent's working directory when it sent the event: where a
+	// shell command runs.
+	Cwd    string
+	Model  string
+	Prompt string
 	// Injected is set for a prompt the agent submitted itself, not the person.
 	Injected bool
 	// Tool is the tool call a tool event is about.
@@ -175,6 +178,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		HookEventName  string `json:"hook_event_name"`
 		SessionID      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
+		Cwd            string `json:"cwd"`
 		Model          string `json:"model"`
 		Prompt         string `json:"prompt"`
 		ToolName       string `json:"tool_name"`
@@ -191,7 +195,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		return Event{}, false
 	}
 	ev = Event{Name: p.HookEventName, SessionID: p.SessionID, TranscriptPath: p.TranscriptPath,
-		Model: p.Model, Prompt: p.Prompt}
+		Cwd: p.Cwd, Model: p.Model, Prompt: p.Prompt}
 	ev.Injected = a.injectedPrompt != nil && a.injectedPrompt.MatchString(p.Prompt)
 	if p.ToolName != "" {
 		ev.Tool = Tool{Name: p.ToolName, UseID: p.ToolUseID, File: p.ToolInput.FilePath,
@@ -246,10 +250,11 @@ func (t *textOrNone) UnmarshalJSON(data []byte) error {
 }
 
 // Edits extracts the file edits in a PostToolUse payload: the files the
-// agent's edit tool changed inside root, and the hunks it wrote. Shell
-// commands aren't covered here: their changes come from worktree snapshots.
-func (a *Agent) Edits(payload []byte, root string) []attribution.Edit {
-	return a.edits(payload, root)
+// agent's edit tool changed that locate finds in a worktree, and the hunks it
+// wrote. Shell commands aren't covered here: their changes come from worktree
+// snapshots.
+func (a *Agent) Edits(payload []byte, locate attribution.Locator) []attribution.Edit {
+	return a.edits(payload, locate)
 }
 
 // Scope says which of an agent's settings files configures hooks.

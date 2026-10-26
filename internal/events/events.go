@@ -15,7 +15,22 @@ import (
 // binary would lose or misread something in a new record: older binaries then
 // leave such records in the log, as they are, for a newer one to fold. Every
 // format's records must stay JSON objects with a "format" field.
-const Format = 1
+//
+// Format 2: shell changes in a worktree other than the record's (see
+// FileChange.Root), which format 1 readers would place in the record's. A
+// record without such changes is written as format 1, which every binary
+// reads (see FormatOf).
+const Format = 2
+
+// FormatOf is the format to write rec in: the oldest that holds it.
+func FormatOf(rec Record) int {
+	for _, c := range rec.Changes {
+		if c.Root != "" {
+			return 2
+		}
+	}
+	return 1
+}
 
 // Record is one line of the log.
 type Record struct {
@@ -33,8 +48,13 @@ type Record struct {
 	Changes []FileChange `json:"changes,omitempty"`
 	// Snapshot, on a shell command's records, says why its changes weren't
 	// looked for: SnapshotReadOnly, or SnapshotOverBudget / SnapshotFailed /
-	// SnapshotGitOperation when they went unrecorded. Older binaries ignore it, losing only that.
+	// SnapshotGitOperation when they went unrecorded (in some worktree, if
+	// it was snapshotted in several). Older binaries ignore it, losing only that.
 	Snapshot string `json:"snapshot,omitempty"`
+	// Snapshotted, on a shell command's records, lists the worktree roots it
+	// was snapshotted in (see snapshot.Scope): its changes anywhere else went
+	// unrecorded.
+	Snapshotted []string `json:"snapshotted,omitempty"`
 }
 
 // Values of Record.Snapshot.
@@ -47,9 +67,11 @@ const (
 	SnapshotGitOperation = "git-operation"
 )
 
-// FileChange is one file a shell command changed: hunks in diff-style lines,
-// "+" for lines it authored, " " for context.
+// FileChange is one file a shell command changed: its worktree (Root, empty
+// for the record's own, Git.Root), its path there, and hunks in diff-style
+// lines, "+" for lines it authored, " " for context.
 type FileChange struct {
+	Root  string     `json:"root,omitempty"`
 	Path  string     `json:"path"`
 	Hunks [][]string `json:"hunks"`
 }

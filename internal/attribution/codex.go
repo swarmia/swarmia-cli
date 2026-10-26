@@ -61,14 +61,14 @@ func CodexPatch(toolInput json.RawMessage) string {
 }
 
 // CodexEdits extracts the edits from a Codex apply_patch payload, one per file
-// the patch adds or updates inside root. Paths in the patch are relative to
+// the patch adds or updates that locate finds. Paths in the patch are relative to
 // the session's working directory (cwd in the payload) unless absolute.
 //
 // Each update chunk carries its context, removed and added lines, which give
 // the chunk's text before and after; those are diffed like an Edit tool's
 // old_string and new_string. Codex applies chunks with some fuzz (trailing
 // whitespace and the like), which doesn't matter for matching lines later.
-func CodexEdits(payload []byte, root string) []Edit {
+func CodexEdits(payload []byte, locate Locator) []Edit {
 	var ev codexToolEvent
 	if json.Unmarshal(payload, &ev) != nil || ev.HookEventName != "PostToolUse" || !IsCodexPatchTool(ev.ToolName) {
 		return nil
@@ -82,11 +82,11 @@ func CodexEdits(payload []byte, root string) []Edit {
 			}
 			path = filepath.Join(ev.CWD, path)
 		}
-		rel, ok := relPath(root, filepath.Clean(path))
+		root, rel, ok := locate(filepath.Clean(path))
 		if !ok {
 			continue
 		}
-		e := Edit{Path: rel}
+		e := Edit{Root: root, Path: rel}
 		for _, c := range f.Chunks {
 			e.Hunks = append(e.Hunks, diffHunks(strings.Join(c.Before, "\n"), strings.Join(c.After, "\n"))...)
 		}

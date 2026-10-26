@@ -44,12 +44,42 @@ func TestPrecedence(t *testing.T) {
 	write(t, filepath.Join(userDir, "swarmia", "config.json"), `{"token":"user-token"}`)
 
 	cfg, _ := Load(repo)
-	if cfg.Token != "user-token" || cfg.Endpoint != "https://repo.example" {
-		t.Errorf("got token %q endpoint %q, want user token and repo endpoint", cfg.Token, cfg.Endpoint)
+	if cfg.Token != "user-token" || cfg.Endpoint != DefaultEndpoint {
+		t.Errorf("got token %q endpoint %q, want user token and the default endpoint", cfg.Token, cfg.Endpoint)
 	}
 	t.Setenv("SWARMIA_TOKEN", "env-token")
 	if cfg, _ := Load(repo); cfg.Token != "env-token" || cfg.TokenSource != "environment" {
 		t.Errorf("env should win: %+v", cfg)
+	}
+	t.Setenv("SWARMIA_ENDPOINT", "http://localhost:8080")
+	if cfg, _ := Load(repo); cfg.Endpoint != "http://localhost:8080" {
+		t.Errorf("env endpoint should apply: %+v", cfg)
+	}
+}
+
+// A repository's file (one the agent cloned, say) can't send a token from
+// elsewhere to an endpoint it chose: its endpoint goes only with its own token.
+func TestSharedEndpointOnlyWithItsOwnToken(t *testing.T) {
+	repo, userDir := setup(t)
+	write(t, filepath.Join(repo, RepoFile), `{"endpoint":"https://evil.example"}`)
+	write(t, filepath.Join(userDir, "swarmia", "config.json"), `{"token":"user-token"}`)
+	if cfg, _ := Load(repo); cfg.Endpoint != DefaultEndpoint || cfg.EndpointSource != "default" {
+		t.Errorf("user token with a repository's endpoint: %+v", cfg)
+	}
+	os.Remove(filepath.Join(userDir, "swarmia", "config.json"))
+	t.Setenv("SWARMIA_TOKEN", "env-token")
+	if cfg, _ := Load(repo); cfg.Endpoint != DefaultEndpoint {
+		t.Errorf("environment token with a repository's endpoint: %+v", cfg)
+	}
+
+	// Nor a token from the directory above it.
+	_, _ = setup(t)
+	top := t.TempDir()
+	write(t, filepath.Join(top, RepoFile), `{"token":"top-token","endpoint":"https://top.example"}`)
+	inner := mkRepo(t, filepath.Join(top, "inner"))
+	write(t, filepath.Join(inner, RepoFile), `{"endpoint":"https://evil.example"}`)
+	if cfg, _ := Load(inner); cfg.Token != "top-token" || cfg.Endpoint != "https://top.example" {
+		t.Errorf("directory token with a repository's endpoint: %+v", cfg)
 	}
 }
 
@@ -102,5 +132,75 @@ func TestTokenWarning(t *testing.T) {
 func TestMaskedToken(t *testing.T) {
 	if got := (Config{Token: "swm_abcdefghijkl"}).MaskedToken(); got != "swm_…ijkl" {
 		t.Errorf("MaskedToken = %q", got)
+	}
+}
+
+// mkRepo makes dir look like a repository's worktree root.
+func mkRepo(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// A .swarmia.json in a directory above a repository applies to it: the
+// nearest one, filling in what the repository's own doesn't set, under the
+// user's and the environment's.
+func TestDirectoryLayer(t *testing.T) {
+	_, userDir := setup(t)
+	top := t.TempDir()
+	write(t, filepath.Join(top, RepoFile), `{"token":"top-token","prompts":false}`)
+	write(t, filepath.Join(top, "work", RepoFile), `{"token":"work-token","endpoint":"https://work.example"}`)
+	plain := mkRepo(t, filepath.Join(top, "work", "group", "plain"))
+	own := mkRepo(t, filepath.Join(top, "work", "own"))
+	write(t, filepath.Join(own, RepoFile), `{"token":"own-token"}`)
+
+	cfg, err := Load(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Token != "work-token" || cfg.TokenSource != filepath.Join(top, "work", RepoFile) || cfg.Endpoint != "https://work.example" {
+		t.Errorf("plain: %+v, want the nearest directory's token and endpoint", cfg)
+	}
+	if !cfg.Prompts {
+		t.Errorf("plain: a farther directory's file applied: %+v", cfg)
+	}
+	if cfg, _ := Load(own); cfg.Token != "own-token" || cfg.Endpoint != DefaultEndpoint {
+		t.Errorf("own: %+v, want its own token and not the directory's endpoint", cfg)
+	}
+
+	// Outside any repository (where an agent was started), the directory's
+	// own file applies.
+	if cfg, _ := Load(filepath.Join(top, "work")); cfg.Token != "work-token" {
+		t.Errorf("work dir: %+v", cfg)
+	}
+
+	// The user's file and the environment win over directories.
+	write(t, filepath.Join(userDir, "swarmia", "config.json"), `{"token":"user-token"}`)
+	if cfg, _ := Load(plain); cfg.Token != "user-token" || cfg.Endpoint != DefaultEndpoint {
+		t.Errorf("with a user token: %+v", cfg)
+	}
+	t.Setenv("SWARMIA_TOKEN", "env-token")
+	if cfg, _ := Load(plain); cfg.Token != "env-token" {
+		t.Errorf("with an environment token: %+v", cfg)
+	}
+}
+
+// A repository inside another (vendored, say) isn't configured by the outer
+// one's .swarmia.json, nor by anything above it.
+func TestDirectoryLayerStopsAtEnclosingRepository(t *testing.T) {
+	setup(t)
+	top := t.TempDir()
+	write(t, filepath.Join(top, RepoFile), `{"token":"top-token"}`)
+	outer := mkRepo(t, filepath.Join(top, "outer"))
+	write(t, filepath.Join(outer, RepoFile), `{"token":"outer-token"}`)
+	inner := mkRepo(t, filepath.Join(outer, "vendor", "inner"))
+
+	if cfg, _ := Load(inner); cfg.Token != "" {
+		t.Errorf("inner: %+v, want no token", cfg)
+	}
+	if cfg, _ := Load(outer); cfg.Token != "outer-token" {
+		t.Errorf("outer: %+v, want its own", cfg)
 	}
 }

@@ -39,7 +39,8 @@ type env struct {
 	root      string // everything lives under here
 	home      string
 	repo      string // the developer's clone of the fixture
-	origin    string // bare repository standing in for GitHub
+	workspace string // where the agent runs and its hooks are installed: repo, or a directory holding it
+	remotes   string // bare repositories standing in for GitHub (see addRemote)
 	team      string // a teammate's clone
 	swarmia   string // swarmia-cli binary
 	agent     agent
@@ -59,8 +60,9 @@ func newEnv(t *testing.T, ag agent) *env {
 		root = r
 	}
 	e := &env{t: t, root: root, home: filepath.Join(root, "home"), repo: filepath.Join(root, "repo"),
-		origin: filepath.Join(root, "origin.git"), team: filepath.Join(root, "team"),
+		remotes: filepath.Join(root, "remotes"), team: filepath.Join(root, "team"),
 		agent: ag, artifacts: os.Getenv("E2E_ARTIFACTS"), auth: ag.detectAuth()}
+	e.workspace = e.repo
 	for _, d := range []string{e.home, filepath.Join(root, "claude-config"), filepath.Join(root, "codex-home"), filepath.Join(root, "state"), filepath.Join(root, "bin")} {
 		must(t, os.MkdirAll(d, 0o755))
 	}
@@ -75,6 +77,8 @@ func newEnv(t *testing.T, ag agent) *env {
 			t.Error("a credential reached the artifacts (scrubbed before upload); find out how")
 		}
 	})
+	sshStandIn := filepath.Join(root, "bin", "e2e-ssh")
+	must(t, os.WriteFile(sshStandIn, []byte(sshStandInScript), 0o755))
 	gitconfig := filepath.Join(root, "gitconfig")
 	must(t, os.WriteFile(gitconfig, []byte(fmt.Sprintf(
 		"[user]\n\tname = %s\n\temail = %s\n[init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n", devName, devEmail)), 0o644))
@@ -93,6 +97,9 @@ func newEnv(t *testing.T, ag agent) *env {
 		"SWARMIA_STATE_DIR=" + filepath.Join(root, "state"),
 		"GIT_CONFIG_GLOBAL=" + gitconfig,
 		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_SSH_COMMAND=" + sshStandIn,
+		"GIT_SSH_VARIANT=simple",
+		"E2E_REMOTES=" + e.remotes,
 		"DISABLE_AUTOUPDATER=1",
 		"CI=1",
 	}
@@ -218,8 +225,36 @@ func (e *env) buildSwarmia() {
 	}
 }
 
-// setupFixture fetches the fixture at its pinned commit, creates the bare
-// origin and the teammate's clone, installs dependencies and our hooks.
+// sshStandInScript stands in for ssh to e2e.example, so remotes look like
+// real hosted repositories (ssh://git@e2e.example/acme/app.git, which gives
+// the repository a slug in payloads) while living on disk: it runs the git
+// command it's given against the bare repositories under $E2E_REMOTES. With
+// GIT_SSH_VARIANT=simple, git calls it as: <host> <command>.
+const sshStandInScript = `#!/bin/sh
+case "$2" in
+  "git-upload-pack '/"*|"git-receive-pack '/"*|"git-upload-archive '/"*) ;;
+  *) echo "e2e-ssh: unexpected command: $2" >&2; exit 1 ;;
+esac
+exec sh -c "$(printf '%s' "$2" | sed "s|'/|'$E2E_REMOTES/|")"
+`
+
+// remoteURL is the URL of the stand-in hosted repository acme/<name>.
+func remoteURL(name string) string { return "ssh://git@e2e.example/acme/" + name + ".git" }
+
+// addRemote publishes the repository in dir as acme/<name> and makes that
+// its origin, tracking main.
+func (e *env) addRemote(dir, name string) {
+	e.t.Helper()
+	bare := filepath.Join(e.remotes, "acme", name+".git")
+	must(e.t, os.MkdirAll(filepath.Dir(bare), 0o755))
+	e.run(e.root, nil, "git", "clone", "-q", "--bare", dir, bare)
+	e.run(dir, nil, "git", "remote", "add", "origin", remoteURL(name))
+	e.run(dir, nil, "git", "fetch", "-q", "origin")
+	e.run(dir, nil, "git", "branch", "-q", "--set-upstream-to=origin/main", "main")
+}
+
+// setupFixture fetches the fixture at its pinned commit, publishes it as
+// acme/ufo with a teammate's clone, installs dependencies and our hooks.
 func (e *env) setupFixture() {
 	e.t.Helper()
 	must(e.t, os.MkdirAll(e.repo, 0o755))
@@ -227,26 +262,28 @@ func (e *env) setupFixture() {
 	e.run(e.repo, nil, "git", "remote", "add", "upstream", fixtureURL)
 	e.run(e.repo, nil, "git", "fetch", "-q", "--depth", "1", "upstream", fixtureSHA)
 	e.run(e.repo, nil, "git", "checkout", "-q", "-b", "main", "FETCH_HEAD")
-
-	e.run(e.root, nil, "git", "clone", "-q", "--bare", e.repo, e.origin)
-	e.run(e.repo, nil, "git", "remote", "add", "origin", e.origin)
-	e.run(e.repo, nil, "git", "fetch", "-q", "origin")
-	e.run(e.repo, nil, "git", "branch", "-q", "--set-upstream-to=origin/main", "main")
-	e.run(e.root, nil, "git", "clone", "-q", e.origin, e.team)
+	e.addRemote(e.repo, "ufo")
+	e.run(e.root, nil, "git", "clone", "-q", remoteURL("ufo"), e.team)
 
 	e.run(e.repo, nil, "npx", "-y", fixturePNPM, "install", "--frozen-lockfile", "--reporter=silent")
+}
 
-	// Our hooks go into the project's settings for the agent (.claude/,
-	// .codex/), which is excluded so it's never committed.
+// installHooks installs our hooks into the workspace's settings for the
+// agent (.claude/, .codex/), excluded from git if the workspace is a
+// repository so they're never committed.
+func (e *env) installHooks() {
+	e.t.Helper()
 	dir := e.agent.projectDir()
-	must(e.t, os.MkdirAll(filepath.Join(e.repo, dir), 0o755))
-	exclude := filepath.Join(e.repo, ".git", "info", "exclude")
-	f, err := os.OpenFile(exclude, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	must(e.t, err)
-	f.WriteString("\n" + dir + "/\n")
-	f.Close()
-	args := append([]string{"install", "--scope", "project", "--dir", e.repo, "--binary", e.swarmia}, e.agent.installFlags()...)
-	out := e.run(e.repo, nil, e.swarmia, args...)
+	must(e.t, os.MkdirAll(filepath.Join(e.workspace, dir), 0o755))
+	if _, err := os.Stat(filepath.Join(e.workspace, ".git")); err == nil {
+		exclude := filepath.Join(e.workspace, ".git", "info", "exclude")
+		f, err := os.OpenFile(exclude, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		must(e.t, err)
+		f.WriteString("\n" + dir + "/\n")
+		f.Close()
+	}
+	args := append([]string{"install", "--scope", "project", "--dir", e.workspace, "--binary", e.swarmia}, e.agent.installFlags()...)
+	out := e.run(e.workspace, nil, e.swarmia, args...)
 	e.t.Logf("swarmia-cli install:\n%s", out)
 	e.agent.prepare(e)
 }

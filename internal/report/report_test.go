@@ -26,7 +26,15 @@ type fixture struct {
 }
 
 func newFixture(t *testing.T) *fixture {
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	return newFixtureAt(t, t.TempDir())
+}
+
+// newFixtureAt makes the repository in dir, creating it if needed.
+func newFixtureAt(t *testing.T, dir string) *fixture {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +162,7 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 	// agent's lines it carries along were introduced earlier, not here.
 	second := f.commit(t0.Add(3*time.Minute), "me@example.com", "Mine", map[string]string{"app.go": base + tweaked + "var teammate = 1\nvar mine = 2\n"})
 
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root, AuthorEmail: emailIs("me@example.com")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +205,7 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 
 	// Without the author filter, the later commits are scanned but still get
 	// nothing: they didn't introduce the agent's lines.
-	all, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	all, err := Build(f.recs, Options{FallbackRoot: f.root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +226,7 @@ func TestSurvivedCountsLinesOnceAcrossCommits(t *testing.T) {
 	f.commit(t0.Add(2*time.Minute), "me@example.com", "Unrelated", map[string]string{"README": "hello\n"})
 	second := f.commit(t0.Add(2*time.Minute), "me@example.com", "Add x", map[string]string{"x.go": content})
 
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +254,7 @@ func TestAILinesExcludesSelfReplacedLines(t *testing.T) {
 	f.agentWrite(t0, "x.go", "func a() { return firstVersion() }\nfunc b() { return keep() }\n", nil)
 	f.agentWrite(t0.Add(time.Second), "x.go", "func a() { return secondVersion() }\nfunc b() { return keep() }\n",
 		"func a() { return firstVersion() }\nfunc b() { return keep() }\n")
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +295,7 @@ func TestBuildAttributesShellCommandChanges(t *testing.T) {
 		"gen/api.go": "package gen\n\nfunc Generated() string { return \"generated value\" }\n",
 	})
 
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +327,7 @@ func TestOwnCommitsUseTheReflog(t *testing.T) {
 	fetched := theirs.commit(t0.Add(2*time.Minute), "teammate@example.com", "teammate", map[string]string{"theirs.go": code})
 	f.git(t0, "me@example.com", "fetch", "-q", theirs.root, "main:refs/remotes/teammate/main")
 
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root, AuthorEmail: emailIs("me@example.com")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +382,7 @@ func TestRebasedCommitIsNotCreditedToALaterEditor(t *testing.T) {
 	f.git(t0.Add(4*time.Minute), "me@example.com", "rebase", "-q", "teammate")
 	rebased := f.git(t0, "me@example.com", "rev-parse", "HEAD")
 
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root, AuthorEmail: "me@example.com"})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root, AuthorEmail: emailIs("me@example.com")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +417,7 @@ func TestBuildAttributesCodexPatch(t *testing.T) {
 		"src/util/new.ts": "export const created = makeThing(\"created by codex\");\n",
 	})
 
-	sessions, err := Build(f.recs, Options{RepoDir: f.root, FallbackRoot: f.root})
+	sessions, err := Build(f.recs, Options{FallbackRoot: f.root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,4 +452,9 @@ func TestFoldCountsUnrecordedShellCommands(t *testing.T) {
 	if got := sessions["s"].ShellUnrecorded; got != 2 {
 		t.Errorf("ShellUnrecorded = %d, want 2", got)
 	}
+}
+
+// emailIs is Options.AuthorEmail for a user with the same email everywhere.
+func emailIs(email string) func(string) string {
+	return func(string) string { return email }
 }

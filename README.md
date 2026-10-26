@@ -215,8 +215,10 @@ Session 7999d991  claude-opus-4-8  2026-10-06 16:43 → 17:00
 
 Configure a token (from Swarmia; it looks like `swm_cli_…`). It is
 **write-only** — it can submit sessions for its organization and nothing else —
-so a team can commit it in `.swarmia.json` at the repository root, or you can
-keep it in `~/.config/swarmia/config.json`:
+so a team can commit it in `.swarmia.json` at the repository root. If you keep
+many repositories in one directory, a `.swarmia.json` in that directory applies
+to every repository below it that doesn't have its own. Or keep it in
+`~/.config/swarmia/config.json`, which applies everywhere:
 
 ```json
 { "token": "swm_cli_…" }
@@ -225,7 +227,11 @@ keep it in `~/.config/swarmia/config.json`:
 Settings can also come from the environment: `SWARMIA_TOKEN`,
 `SWARMIA_ENDPOINT` (default `https://hook.swarmia.com/cli`), and
 `SWARMIA_PROMPTS=0` to withhold your prompts. The environment wins over your
-user file, which wins over the repository's. Check what applies:
+user file, which wins over the repository's, which wins over a directory's.
+A session is sent whole with the settings where the agent was started, even if
+it worked in other repositories too. An `endpoint` in a repository's or
+directory's file is only used with a token from that same file, so a
+repository you cloned can't send your token elsewhere. Check what applies:
 
 ```sh
 swarmia-cli config
