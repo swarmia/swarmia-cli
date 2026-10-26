@@ -51,6 +51,9 @@ type env struct {
 	base      []string // environment for every command
 	secrets   []string // credential values that must never reach the artifacts
 	leaked    bool     // a secret was found (and scrubbed) in an artifact
+	// settingSources is Claude Code's --setting-sources: "project" (only the
+	// workspace's hooks), or "user,project" to also run user-scope ones.
+	settingSources string
 }
 
 func newEnv(t *testing.T, ag agent) *env {
@@ -61,7 +64,7 @@ func newEnv(t *testing.T, ag agent) *env {
 	}
 	e := &env{t: t, root: root, home: filepath.Join(root, "home"), repo: filepath.Join(root, "repo"),
 		remotes: filepath.Join(root, "remotes"), team: filepath.Join(root, "team"),
-		agent: ag, artifacts: os.Getenv("E2E_ARTIFACTS"), auth: ag.detectAuth()}
+		agent: ag, artifacts: os.Getenv("E2E_ARTIFACTS"), auth: ag.detectAuth(), settingSources: "project"}
 	e.workspace = e.repo
 	for _, d := range []string{e.home, filepath.Join(root, "claude-config"), filepath.Join(root, "codex-home"), filepath.Join(root, "state"), filepath.Join(root, "bin")} {
 		must(t, os.MkdirAll(d, 0o755))
