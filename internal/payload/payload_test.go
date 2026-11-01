@@ -42,7 +42,7 @@ func only(t *testing.T, s *report.Session, ctx Context) Payload {
 func session() *report.Session {
 	return &report.Session{
 		ID: "s1", Agent: "claude-code", Model: "m", StartedAt: at, EndedAt: at.Add(time.Hour), Root: "/src/app",
-		Prompts: []report.Prompt{{At: at, Text: "use key ghp_" + strings.Repeat("a1B2", 9) + " to fix it"}},
+		Turns: []report.Turn{{At: at, Text: "use key ghp_" + strings.Repeat("a1B2", 9) + " to fix it"}},
 		Tools: []report.Tool{
 			{At: at, Name: "Bash", Root: "/src/app", Command: "cat > /src/app/x.go <<'EOF'\nfunc Code() {}\nEOF\ngo test ./..."},
 			{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/internal/x.go"},
@@ -59,8 +59,8 @@ func session() *report.Session {
 func TestBuildAppliesPrivacyRules(t *testing.T) {
 	p := only(t, session(), contextFor(map[string]RepoInfo{"/src/app": app}))
 
-	if len(p.Prompts) != 1 || !strings.Contains(p.Prompts[0].Text, "[REDACTED:github-token]") || strings.Contains(p.Prompts[0].Text, "ghp_") {
-		t.Errorf("prompt not redacted: %+v", p.Prompts)
+	if len(p.Turns) != 1 || !strings.Contains(p.Turns[0].Prompt, "[REDACTED:github-token]") || strings.Contains(p.Turns[0].Prompt, "ghp_") {
+		t.Errorf("prompt not redacted: %+v", p.Turns)
 	}
 	if want := "cat > <repo:github.com/acme/app>/x.go <<'EOF'\n[1 lines omitted]\nEOF\ngo test ./..."; p.Tools[0].Command != want {
 		t.Errorf("command = %q, want %q", p.Tools[0].Command, want)
@@ -93,7 +93,7 @@ func TestBuildMasksLocalPaths(t *testing.T) {
 		// A sibling directory sharing the root's name isn't the root.
 		{At: at, Name: "Bash", Root: s.Root, Command: "diff /home/jdoe/src/app/a /home/jdoe/src/app-v2/a"},
 	}
-	s.Prompts = []report.Prompt{{At: at, Text: "see /home/jdoe/src/app/README. Paths are relative to /home/jdoe/src/app. Not /home/jdoe/src/app.old"}}
+	s.Turns = []report.Turn{{At: at, Text: "see /home/jdoe/src/app/README. Paths are relative to /home/jdoe/src/app. Not /home/jdoe/src/app.old"}}
 	ctx := contextFor(map[string]RepoInfo{s.Root: {Slug: "github.com/jdoe/app", Prompts: true}})
 	ctx.Home, ctx.UserName = "/home/jdoe", "jdoe"
 	p := only(t, s, ctx)
@@ -106,8 +106,8 @@ func TestBuildMasksLocalPaths(t *testing.T) {
 			t.Errorf("command = %q, want %q", p.Tools[i].Command, want)
 		}
 	}
-	if want := "see <repo:github.com/jdoe/app>/README. Paths are relative to <repo:github.com/jdoe/app>. Not ~/src/app.old"; p.Prompts[0].Text != want {
-		t.Errorf("prompt = %q, want %q", p.Prompts[0].Text, want)
+	if want := "see <repo:github.com/jdoe/app>/README. Paths are relative to <repo:github.com/jdoe/app>. Not ~/src/app.old"; p.Turns[0].Prompt != want {
+		t.Errorf("prompt = %q, want %q", p.Turns[0].Prompt, want)
 	}
 }
 
@@ -153,8 +153,8 @@ func TestBuildWithholdsPrompts(t *testing.T) {
 	withheld := app
 	withheld.Prompts = false
 	p := only(t, session(), contextFor(map[string]RepoInfo{"/src/app": withheld}))
-	if len(p.Prompts) != 0 || !p.PromptsWithheld {
-		t.Errorf("prompts = %+v, withheld = %v", p.Prompts, p.PromptsWithheld)
+	if hasText(p) || !p.PromptsWithheld {
+		t.Errorf("prompts = %+v, withheld = %v", p.Turns, p.PromptsWithheld)
 	}
 	if len(p.Tools) != 3 || len(p.Commits) != 1 {
 		t.Error("withholding prompts must not drop tools or attribution")
@@ -162,8 +162,53 @@ func TestBuildWithholdsPrompts(t *testing.T) {
 
 	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
 	ctx.Prompts = false // the project's configuration opts out
-	if p := only(t, session(), ctx); len(p.Prompts) != 0 || !p.PromptsWithheld {
-		t.Errorf("project opt-out: prompts = %+v, withheld = %v", p.Prompts, p.PromptsWithheld)
+	if p := only(t, session(), ctx); hasText(p) || !p.PromptsWithheld {
+		t.Errorf("project opt-out: prompts = %+v, withheld = %v", p.Turns, p.PromptsWithheld)
+	}
+}
+
+// hasText reports whether any turn carries a prompt or a reply.
+func hasText(p Payload) bool {
+	for _, t := range p.Turns {
+		if t.Prompt != "" || t.Response != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Turns carry the prompt and the agent's reply, stripped of code, redacted and
+// masked; withholding prompts withholds both but keeps every turn's timing.
+func TestBuildSendsTurns(t *testing.T) {
+	end := at.Add(time.Minute)
+	s := session()
+	s.Turns = []report.Turn{
+		{At: at, Text: "fix /src/app/x.go", EndedAt: &end,
+			Response: "Fixed /src/app/x.go:\n```go\nfunc Code() {}\n```\nKey ghp_" + strings.Repeat("a1B2", 9)},
+		{At: end.Add(time.Minute), Automatic: true, EndedAt: &end},
+		{At: end.Add(2 * time.Minute), Text: "and the tests"}, // interrupted
+	}
+	repos := map[string]RepoInfo{"/src/app": app}
+
+	p := only(t, s, contextFor(repos))
+	want := []Turn{
+		{StartedAt: at, EndedAt: &end, Prompt: "fix <repo:github.com/acme/app>/x.go",
+			Response: "Fixed <repo:github.com/acme/app>/x.go:\n[go code omitted: 1 line]\nKey [REDACTED:github-token]"},
+		{StartedAt: end.Add(time.Minute), EndedAt: &end, Automatic: true},
+		{StartedAt: end.Add(2 * time.Minute), Prompt: "and the tests"},
+	}
+	if !reflect.DeepEqual(p.Turns, want) {
+		t.Errorf("turns = %+v\nwant %+v", p.Turns, want)
+	}
+
+	withheld := app
+	withheld.Prompts = false
+	p = only(t, s, contextFor(map[string]RepoInfo{"/src/app": withheld}))
+	for i := range want {
+		want[i].Prompt, want[i].Response = "", ""
+	}
+	if !p.PromptsWithheld || !reflect.DeepEqual(p.Turns, want) {
+		t.Errorf("withheld: turns = %+v\nwant only their timing", p.Turns)
 	}
 }
 
@@ -173,7 +218,7 @@ func TestBuildWithholdsPrompts(t *testing.T) {
 func TestBuildAcrossRepositories(t *testing.T) {
 	s := &report.Session{
 		ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at, Root: "/src/app",
-		Prompts: []report.Prompt{{At: at, Text: "port the fix from /src/client-api to /src/lib"}},
+		Turns: []report.Turn{{At: at, Text: "port the fix from /src/client-api to /src/lib"}},
 		Tools: []report.Tool{
 			{At: at, Name: "Edit", Root: "/src/client-api", File: "/src/client-api/fix.go"},
 			{At: at, Name: "Bash", Root: "/src/app", Command: "cp /src/client-api/fix.go /src/lib/fix.go"},
@@ -204,8 +249,8 @@ func TestBuildAcrossRepositories(t *testing.T) {
 	if len(p.Commits) != 2 || p.AuthorEmail != "me@client.com" {
 		t.Errorf("commits %+v, author %q", p.Commits, p.AuthorEmail)
 	}
-	if want := "port the fix from <repo:github.com/client/api> to <repo:github.com/acme/lib>"; len(p.Prompts) != 1 || p.Prompts[0].Text != want {
-		t.Errorf("prompts = %+v, want %q", p.Prompts, want)
+	if want := "port the fix from <repo:github.com/client/api> to <repo:github.com/acme/lib>"; len(p.Turns) != 1 || p.Turns[0].Prompt != want {
+		t.Errorf("prompts = %+v, want %q", p.Turns, want)
 	}
 	if p.Tools[3].Repo != "" || p.Tools[3].File != "" {
 		t.Errorf("unidentified repository's tool = %+v", p.Tools[3])
@@ -223,8 +268,8 @@ func TestBuildAcrossRepositories(t *testing.T) {
 			}
 			return repos[r]
 		}
-		if p := only(t, s, ctx); !p.PromptsWithheld || len(p.Prompts) != 0 {
-			t.Errorf("%s opts out: prompts = %+v", root, p.Prompts)
+		if p := only(t, s, ctx); !p.PromptsWithheld || hasText(p) {
+			t.Errorf("%s opts out: prompts = %+v", root, p.Turns)
 		}
 	}
 }

@@ -134,6 +134,8 @@ type Event struct {
 	Prompt string
 	// Injected is set for a prompt the agent submitted itself, not the person.
 	Injected bool
+	// Response is the agent's final reply in a turn, on a Stop event.
+	Response string
 	// Tool is the tool call a tool event is about.
 	Tool Tool
 }
@@ -181,6 +183,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		Cwd            string `json:"cwd"`
 		Model          string `json:"model"`
 		Prompt         string `json:"prompt"`
+		LastAssistant  string `json:"last_assistant_message"`
 		ToolName       string `json:"tool_name"`
 		ToolUseID      string `json:"tool_use_id"`
 		ToolInput      struct {
@@ -195,7 +198,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		return Event{}, false
 	}
 	ev = Event{Name: p.HookEventName, SessionID: p.SessionID, TranscriptPath: p.TranscriptPath,
-		Cwd: p.Cwd, Model: p.Model, Prompt: p.Prompt}
+		Cwd: p.Cwd, Model: p.Model, Prompt: p.Prompt, Response: p.LastAssistant}
 	ev.Injected = a.injectedPrompt != nil && a.injectedPrompt.MatchString(p.Prompt)
 	if p.ToolName != "" {
 		ev.Tool = Tool{Name: p.ToolName, UseID: p.ToolUseID, File: p.ToolInput.FilePath,

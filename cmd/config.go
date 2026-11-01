@@ -31,9 +31,10 @@ var configCmd = &cobra.Command{
 		"File format: {\"token\": \"…\", \"endpoint\": \"…\", \"prompts\": false}\n\n" +
 		"It also warns about swarmia-cli hooks Codex won't run because they aren't\n" +
 		"trusted yet, and shows it if Swarmia asked this version to be upgraded.\n\n" +
-		"Prompts are shared unless any layer sets prompts to false: you can always\n" +
-		"withhold your own prompts, e.g. with SWARMIA_PROMPTS=0. swarmia-cli never\n" +
-		"writes these files.",
+		"Prompts, and the agent's replies to them, are shared unless any layer sets\n" +
+		"prompts to false: you can always withhold your own, e.g. with\n" +
+		"SWARMIA_PROMPTS=0. When each turn started and ended is still sent.\n" +
+		"swarmia-cli never writes these files.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root := ""

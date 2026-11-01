@@ -171,8 +171,19 @@ func runScenario(t *testing.T, ag agent) {
 					t.Logf("%s: captured %d %s calls; the agent's streams show %d (no hooks ran for the rest)", c.name, captured[name], name, n)
 				}
 			}
-			if len(c.p.Prompts) != len(c.runs) {
-				t.Errorf("%s: %d prompts captured, want %d", c.name, len(c.p.Prompts), len(c.runs))
+			prompts := 0
+			for _, turn := range c.p.Turns {
+				if turn.Automatic {
+					continue
+				}
+				prompts++
+				// Each run is a whole turn: the agent's Stop ends it.
+				if turn.EndedAt == nil || turn.Response == "" {
+					t.Errorf("%s: turn started %v has no end or reply: %+v", c.name, turn.StartedAt, turn)
+				}
+			}
+			if prompts != len(c.runs) {
+				t.Errorf("%s: %d prompts captured, want %d", c.name, prompts, len(c.runs))
 			}
 			if !c.p.Ended || c.p.Model == "" || c.p.Agent != ag.name() {
 				t.Errorf("%s: ended=%v model=%q agent=%q", c.name, c.p.Ended, c.p.Model, c.p.Agent)
@@ -332,8 +343,8 @@ func runScenario(t *testing.T, ag agent) {
 		if strings.Contains(raw, fakeSecret) {
 			t.Error("the planted secret reached the payload")
 		}
-		if len(p1.Prompts) == 0 || !strings.Contains(p1.Prompts[0].Text, "[REDACTED:") {
-			t.Errorf("prompt not redacted: %+v", p1.Prompts)
+		if len(p1.Turns) == 0 || !strings.Contains(p1.Turns[0].Prompt, "[REDACTED:") {
+			t.Errorf("prompt not redacted: %+v", p1.Turns)
 		}
 		// The repository and home directories are masked. (The sandbox's own
 		// root above them isn't: agents probe parent directories for
@@ -521,9 +532,13 @@ type payload struct {
 	Agent     string `json:"agent"`
 	Model     string `json:"model"`
 	Ended     bool   `json:"ended"`
-	Prompts   []struct {
-		Text string `json:"text"`
-	} `json:"prompts"`
+	Turns     []struct {
+		StartedAt string  `json:"started_at"`
+		EndedAt   *string `json:"ended_at"`
+		Automatic bool    `json:"automatic"`
+		Prompt    string  `json:"prompt"`
+		Response  string  `json:"response"`
+	} `json:"turns"`
 	Repos []struct {
 		Repo        string `json:"repo"`
 		AILines     int    `json:"ai_lines_generated"`

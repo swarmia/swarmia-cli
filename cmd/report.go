@@ -44,7 +44,8 @@ var reportCmd = &cobra.Command{
 		"would ever be sent.\n\n" +
 		"--json prints exactly what delivery would send for each session: pushed\n" +
 		"commits only, secrets redacted, commands stripped of heredoc bodies and inline\n" +
-		"scripts, prompts withheld if configuration opts out (see `swarmia-cli config`).\n" +
+		"scripts, the agent's replies stripped of code blocks, prompts and replies\n" +
+		"withheld if configuration opts out (see `swarmia-cli config`).\n" +
 		"Nothing is sent by this command.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -132,7 +133,7 @@ func writeSessionText(out io.Writer, s *report.Session) {
 	if n := s.ShellEdits(); n > 0 {
 		shell = fmt.Sprintf(" (%d via shell)", n)
 	}
-	fmt.Fprintf(out, "  %d prompt(s), %d edit(s)%s, %d AI line(s) at session end\n", len(s.Prompts), len(s.Edits), shell, s.AILines())
+	fmt.Fprintf(out, "  %d prompt(s), %d response(s), %d edit(s)%s, %d AI line(s) at session end\n", s.PromptCount(), s.ResponseCount(), len(s.Edits), shell, s.AILines())
 	if s.ShellUnrecorded > 0 {
 		fmt.Fprintf(out, "  %d shell command(s) not checked for edits: the worktree snapshot took over %v, failed, or found a git operation stopped part way\n", s.ShellUnrecorded, snapshot.Budget)
 	}

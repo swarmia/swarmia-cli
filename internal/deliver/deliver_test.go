@@ -92,7 +92,7 @@ func (s *server) opts(t *testing.T, at time.Time) Options {
 
 func sess(id string, ended bool) *report.Session {
 	return &report.Session{ID: id, Agent: "claude-code", StartedAt: now, EndedAt: now, Ended: ended, Root: "/repo",
-		Prompts: []report.Prompt{{At: now, Text: "hello " + id}}}
+		Turns: []report.Turn{{At: now, Text: "hello " + id}}}
 }
 
 func TestNoTokenSendsNothing(t *testing.T) {
@@ -136,8 +136,8 @@ func TestSendsChangedSessionsOnce(t *testing.T) {
 
 	// Both change. b is still going and was sent moments ago: throttled. a
 	// has ended: sent.
-	a.Prompts = append(a.Prompts, report.Prompt{At: now, Text: "more"})
-	b.Prompts = append(b.Prompts, report.Prompt{At: now, Text: "more"})
+	a.Turns = append(a.Turns, report.Turn{At: now, Text: "more"})
+	b.Turns = append(b.Turns, report.Turn{At: now, Text: "more"})
 	o.Now = now.Add(time.Minute)
 	Deliver([]*report.Session{a, b}, o)
 	if got := srv.sessionsSent(); strings.Join(got, ",") != "a,b,a" {
@@ -279,7 +279,7 @@ func TestForceIgnoresBackoffAndThrottle(t *testing.T) {
 	a := sess("a", false)
 	o := srv.opts(t, now)
 	Deliver([]*report.Session{a}, o)
-	a.Prompts = append(a.Prompts, report.Prompt{At: now, Text: "more"})
+	a.Turns = append(a.Turns, report.Turn{At: now, Text: "more"})
 	saveState(o.StateDir, state{Failures: 3, NextAttempt: now.Add(time.Hour), LastError: "x"})
 	o.Force, o.Now = true, now.Add(time.Second)
 	if out, err := Deliver([]*report.Session{a}, o); err != nil || out.Accepted != 1 {

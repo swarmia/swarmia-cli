@@ -34,8 +34,9 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
    your commits, line by line: each committed line it introduced is `exact`,
    `normalized` (only a formatter touched it) or `modified` (edited by a human).
 3. **Deliver.** If a Swarmia token is configured, changed sessions are sent:
-   your git email, line ranges in *pushed* commits, prompts (redacted), tool
-   names and commands (stripped of code), and token usage.
+   your git email, line ranges in *pushed* commits, prompts and the agent's
+   final replies (redacted, replies stripped of code), tool names and commands
+   (stripped of code), and token usage.
 
 `swarmia-cli report` shows all of this locally, at any time.
 
@@ -46,8 +47,9 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
 - **No source code leaves your machine.** Attribution is line numbers in
   pushed commits; where code needs to be shown, Swarmia can read it from your
   Git provider, which it's already connected to. Shell commands are sent with heredoc bodies, inline scripts and
-  long quoted strings removed. Tool output is never sent.
-- **Secrets are redacted** from prompts and commands before sending (provider
+  long quoted strings removed, and the agent's replies without their code
+  blocks. Tool output is never sent.
+- **Secrets are redacted** from prompts, replies and commands before sending (provider
   tokens, private keys, passwords in URLs and connection strings, secret-looking
   assignments, random-looking strings), each becoming `[REDACTED:<kind>]`.
 - **You're identified by your git email** — the one your commits carry
@@ -56,8 +58,9 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
   identifying detail sent. Without either, sessions are sent without one.
 - **Local details are masked:** the repository root becomes `<repo>`, your home
   directory `~`, your user name `<user>`; file paths are repository-relative.
-- **You can withhold your prompts** (`SWARMIA_PROMPTS=0`), whatever the team's
-  configuration says.
+- **You can withhold your prompts** (`SWARMIA_PROMPTS=0`), and the agent's
+  replies with them, whatever the team's configuration says. Only their
+  timing is then sent.
 - **Nothing is sent without a token**, and only pushed commits are ever sent.
   Local state lives outside your repositories, readable only by you.
 
@@ -203,7 +206,7 @@ swarmia-cli report --json          # exactly what would be sent
 
 ```
 Session 7999d991  claude-opus-4-8  2026-10-06 16:43 → 17:00
-  2 prompt(s), 10 edit(s) (3 via shell), 1698 AI line(s) at session end
+  2 prompt(s), 2 response(s), 10 edit(s) (3 via shell), 1698 AI line(s) at session end
   277 model call(s): 100.3M input tokens (98% cache reads), 408k output
   59e69c6  pushed  Add line-level matcher for attributing agent edits to commi…
       internal/attribution/align.go                 339 line(s)  (318 exact, 2 normalized, 19 modified)
@@ -226,7 +229,7 @@ to every repository below it that doesn't have its own. Or keep it in
 
 Settings can also come from the environment: `SWARMIA_TOKEN`,
 `SWARMIA_ENDPOINT` (default `https://hook.swarmia.com/cli`), and
-`SWARMIA_PROMPTS=0` to withhold your prompts. The environment wins over your
+`SWARMIA_PROMPTS=0` to withhold your prompts and the agent's replies. The environment wins over your
 user file, which wins over the repository's, which wins over a directory's.
 A session is sent whole with the settings where the agent was started, even if
 it worked in other repositories too. An `endpoint` in a repository's or
