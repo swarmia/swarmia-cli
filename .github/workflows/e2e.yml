@@ -5,6 +5,12 @@ name: E2E
 # See docs/e2e.md.
 
 on:
+  # After every merge, so a break shows up on the commit that caused it.
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   schedule:
     - cron: "17 3 * * *" # nightly
   workflow_dispatch:
@@ -31,7 +37,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      # Nightly: each agent's newest release and its other channel (Claude
+      # Nightly and on merges: each agent's newest release and its other channel (Claude
       # Code's stable, Codex's alpha), which separates "the agent changed"
       # from "we broke something". On demand: what was asked for.
       - id: plan
