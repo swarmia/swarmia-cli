@@ -3,7 +3,7 @@
 package e2e
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -77,6 +77,7 @@ func setupTurns(t *testing.T, ag agent) *env {
 	}
 	e := newEnv(t, ag)
 	e.buildSwarmia()
+	e.captureHookEvents()
 	ag.install(e, envOr(ag.versionVar(), "latest"))
 	e.setupFixture()
 	e.installHooks()
@@ -133,37 +134,69 @@ type hookEvent struct {
 	ToolName    string
 }
 
-// hookEvents reads every event swarmia-cli logged, in the order logged, and
-// keeps a summary of them as hook-events.txt.
+// captureHookEvents makes the hooks call swarmia-cli through a wrapper that
+// keeps a copy of every hook event in hook-events.jsonl. swarmia-cli's own
+// log can't be read afterwards: processing it at session end empties it.
+// Install the hooks after this.
+func (e *env) captureHookEvents() {
+	e.t.Helper()
+	real := e.swarmia
+	e.swarmia = filepath.Join(e.root, "bin", "swarmia-cli-capture")
+	script := fmt.Sprintf(captureScript, shellQuote(e.hookEventsPath()), shellQuote(real))
+	must(e.t, os.WriteFile(e.swarmia, []byte(script), 0o755))
+}
+
+func (e *env) hookEventsPath() string { return filepath.Join(e.root, "hook-events.jsonl") }
+
+// captureScript runs swarmia-cli (%[2]s), first appending a log-hook call's
+// event to %[1]s as {"logged_at": …, "event": <the payload>}. Each record is
+// appended with one cat of a finished file, so concurrent hooks don't
+// interleave in practice; a torn record would end hookEvents' reading early,
+// which it reports.
+const captureScript = `#!/bin/sh
+[ "$1" = log-hook ] || exec %[2]s "$@"
+payload=$(mktemp) && record=$(mktemp) || exit 1
+cat > "$payload"
+{ printf '{"logged_at":"%%s","event":' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)"; cat "$payload"; printf '}\n'; } > "$record"
+cat "$record" >> %[1]s
+%[2]s "$@" < "$payload"
+status=$?
+rm -f "$payload" "$record"
+exit $status
+`
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// hookEvents returns every hook event the agent sent, in the order sent (see
+// captureHookEvents), and keeps a summary of them as hook-events.txt.
 func (e *env) hookEvents() []hookEvent {
 	e.t.Helper()
-	files, err := filepath.Glob(filepath.Join(e.root, "state", "repos", "*", "events.jsonl"))
-	must(e.t, err)
+	data, err := os.ReadFile(e.hookEventsPath())
+	if err != nil && !os.IsNotExist(err) {
+		e.t.Fatal(err)
+	}
+	e.keepBytes("hook-events.jsonl", data)
 	var evs []hookEvent
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		must(e.t, err)
-		sc := bufio.NewScanner(strings.NewReader(string(data)))
-		sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
-		for sc.Scan() {
-			var rec struct {
-				LoggedAt string `json:"logged_at"`
-				Event    struct {
-					Name        string `json:"hook_event_name"`
-					SessionID   string `json:"session_id"`
-					AgentID     string `json:"agent_id"`
-					Prompt      string `json:"prompt"`
-					LastMessage string `json:"last_assistant_message"`
-					ToolName    string `json:"tool_name"`
-				} `json:"event"`
-			}
-			if json.Unmarshal(sc.Bytes(), &rec) != nil {
-				continue
-			}
-			ev := rec.Event
-			evs = append(evs, hookEvent{LoggedAt: rec.LoggedAt, Name: ev.Name, SessionID: ev.SessionID,
-				AgentID: ev.AgentID, Prompt: ev.Prompt, LastMessage: ev.LastMessage, ToolName: ev.ToolName})
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for dec.More() {
+		var rec struct {
+			LoggedAt string `json:"logged_at"`
+			Event    struct {
+				Name        string `json:"hook_event_name"`
+				SessionID   string `json:"session_id"`
+				AgentID     string `json:"agent_id"`
+				Prompt      string `json:"prompt"`
+				LastMessage string `json:"last_assistant_message"`
+				ToolName    string `json:"tool_name"`
+			} `json:"event"`
 		}
+		if err := dec.Decode(&rec); err != nil {
+			e.t.Errorf("reading the captured hook events after %d: %v", len(evs), err)
+			break
+		}
+		ev := rec.Event
+		evs = append(evs, hookEvent{LoggedAt: rec.LoggedAt, Name: ev.Name, SessionID: ev.SessionID,
+			AgentID: ev.AgentID, Prompt: ev.Prompt, LastMessage: ev.LastMessage, ToolName: ev.ToolName})
 	}
 	var b strings.Builder
 	for _, ev := range evs {

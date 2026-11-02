@@ -115,7 +115,9 @@ class agreement); no local paths. It costs one agent turn.
 
 `e2e/turns_test.go` checks how agents report turns in cases the scenario
 doesn't reach. Each runs one short session in the fixture, keeps the hook
-events the agent sent as `hook-events.txt`, and checks the payload's turns.
+events the agent sent (`hook-events.jsonl`, summarized in `hook-events.txt`;
+the hooks call swarmia-cli through a wrapper that copies them, as swarmia-cli
+empties its own log once it processes it), and checks the payload's turns.
 
 | Test | The agent | Checks |
 |---|---|---|

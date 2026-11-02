@@ -5,6 +5,7 @@ package e2e
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,4 +100,40 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// The capturing wrapper keeps each hook event and hands it on unchanged.
+func TestCaptureHookEvents(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A stand-in for swarmia-cli recording what it's given.
+	got := filepath.Join(root, "got")
+	fake := filepath.Join(root, "bin", "fake")
+	os.WriteFile(fake, []byte("#!/bin/sh\necho \"$@\" > "+got+"\ncat >> "+got+"\n"), 0o755)
+	e := &env{t: t, root: root, swarmia: fake}
+	e.captureHookEvents()
+
+	stop := `{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"It's done:\n\n- a\n- b"}`
+	for _, payload := range []string{`{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"go"}`, stop} {
+		cmd := exec.Command(e.swarmia, "log-hook", "--x")
+		cmd.Stdin = strings.NewReader(payload)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	if data, _ := os.ReadFile(got); string(data) != "log-hook --x\n"+stop {
+		t.Errorf("swarmia-cli got %q", data)
+	}
+	if out, err := exec.Command(e.swarmia, "report", "--json").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if data, _ := os.ReadFile(got); string(data) != "report --json\n" {
+		t.Errorf("other commands: swarmia-cli got %q", data)
+	}
+	evs := e.hookEvents()
+	if len(evs) != 2 || evs[0].Prompt != "go" || evs[1].Name != "Stop" || evs[1].LastMessage != "It's done:\n\n- a\n- b" || evs[1].LoggedAt == "" {
+		t.Errorf("events = %+v", evs)
+	}
 }
