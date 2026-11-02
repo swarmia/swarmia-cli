@@ -122,9 +122,10 @@ empties its own log once it processes it), and checks the payload's turns.
 | Test | The agent | Checks |
 |---|---|---|
 | `TestCodexSubagentTurns` | runs `ls`, delegates counting files to a subagent (`spawn_agent`), replies | Stop sends `last_assistant_message`; one prompt, in a turn ended with a reply; the subagent's prompt isn't the developer's, nor is the subagent a session of its own |
+| `TestClaudeCodeMidTurnNotification` | runs `sleep 5` in the background, then `sleep 25` in the foreground, replies | whether the background task's notification reaches the prompt hook mid-turn or only after the turn (logged, and kept as `finding.txt`); one prompt, in a turn ended with a reply |
 
 A run where the agent didn't do what the check needs (it never called
-`spawn_agent`) is skipped as inconclusive.
+`spawn_agent`, or ran nothing in the background) is skipped as inconclusive.
 
 ## Checks
 

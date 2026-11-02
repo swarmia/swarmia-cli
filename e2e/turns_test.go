@@ -68,6 +68,71 @@ func TestCodexSubagentTurns(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeMidTurnNotification has a background task finish while
+// Claude Code is still working on the turn that started it. It finds out
+// whether the task's notification reaches the prompt hook mid-turn, which
+// swarmia-cli folds into the running turn, or only once the turn has ended,
+// when it starts an automatic turn: swarmia-cli can't tell a turn the
+// developer interrupted from one still running, so which it is decides how
+// to fix interrupted turns. Either way, the session has one prompt, in a turn
+// ended with a reply.
+func TestClaudeCodeMidTurnNotification(t *testing.T) {
+	ag := claudeCode{}
+	e := setupTurns(t, ag)
+	run := e.agentStep(&agentWork{raw: map[string]bool{}, norm: map[string]bool{}}, "1-background", "",
+		"Do exactly these steps, in order. 1. Run `sleep 5` with the Bash tool, in the background "+
+			"(run_in_background). 2. Right away, without checking on it, run `sleep 25` with the Bash tool in the "+
+			"foreground. 3. When that has finished, reply with one sentence saying both commands are done. "+
+			"Run no other commands, and do not wait for or check on the background command.")
+	evs := e.hookEvents()
+	background := false
+	for _, ev := range evs {
+		background = background || (ev.Name == "PreToolUse" && ev.ToolName == "Bash" && ev.Background)
+	}
+	if !background {
+		t.Skipf("inconclusive: the agent ran no command in the background (result %q, %d turns)", run.Result, run.NumTurns)
+	}
+	if len(run.HookErrors) > 0 {
+		t.Errorf("hooks reported errors: %v", run.HookErrors)
+	}
+
+	mid, after := notificationDelivery(evs, run.SessionID)
+	finding := fmt.Sprintf("Claude Code %s: %d task notification(s) reached the prompt hook mid-turn, %d after the turn ended", e.version, mid, after)
+	switch {
+	case mid > 0:
+		finding += "\n=> mid-turn notifications reach UserPromptSubmit: an interrupted turn can't be told from a running one by hook events alone"
+	case after > 0:
+		finding += "\n=> notifications reach UserPromptSubmit only between turns: one always starts an automatic turn"
+	default:
+		finding += "\n=> the notification didn't reach the prompt hook (delivered without it, or not at all in -p mode)"
+	}
+	t.Log(finding)
+	e.keepBytes("finding.txt", []byte(finding+"\n"))
+
+	checkOneTurn(t, findPayload(t, e.payloads(), run.SessionID))
+}
+
+// notificationDelivery counts a session's background task notifications that
+// reached the prompt hook before the agent first ended a turn (mid-turn, as
+// the session has one prompt) and after it.
+func notificationDelivery(evs []hookEvent, sessionID string) (mid, after int) {
+	stopped := false
+	for _, ev := range evs {
+		switch {
+		case ev.SessionID != sessionID:
+		case ev.Name == "Stop":
+			stopped = true
+		case ev.Name == "UserPromptSubmit" && strings.Contains(ev.Prompt, "<task-notification"):
+			if stopped {
+				after++
+			} else {
+				mid++
+			}
+		}
+	}
+	return mid, after
+}
+
 // setupTurns prepares a run of a turns check against ag: the fixture with
 // our hooks installed, and the agent's credentials, or it skips the test.
 func setupTurns(t *testing.T, ag agent) *env {
@@ -132,6 +197,8 @@ type hookEvent struct {
 	// LastMessage is Stop's last_assistant_message.
 	LastMessage string
 	ToolName    string
+	// Background is set for a Bash command run in the background.
+	Background bool
 }
 
 // captureHookEvents makes the hooks call swarmia-cli through a wrapper that
@@ -188,6 +255,9 @@ func (e *env) hookEvents() []hookEvent {
 				Prompt      string `json:"prompt"`
 				LastMessage string `json:"last_assistant_message"`
 				ToolName    string `json:"tool_name"`
+				ToolInput   struct {
+					RunInBackground bool `json:"run_in_background"`
+				} `json:"tool_input"`
 			} `json:"event"`
 		}
 		if err := dec.Decode(&rec); err != nil {
@@ -196,7 +266,8 @@ func (e *env) hookEvents() []hookEvent {
 		}
 		ev := rec.Event
 		evs = append(evs, hookEvent{LoggedAt: rec.LoggedAt, Name: ev.Name, SessionID: ev.SessionID,
-			AgentID: ev.AgentID, Prompt: ev.Prompt, LastMessage: ev.LastMessage, ToolName: ev.ToolName})
+			AgentID: ev.AgentID, Prompt: ev.Prompt, LastMessage: ev.LastMessage, ToolName: ev.ToolName,
+			Background: ev.ToolInput.RunInBackground})
 	}
 	var b strings.Builder
 	for _, ev := range evs {
@@ -206,6 +277,9 @@ func (e *env) hookEvents() []hookEvent {
 		}
 		if ev.ToolName != "" {
 			fmt.Fprintf(&b, " tool=%s", ev.ToolName)
+		}
+		if ev.Background {
+			b.WriteString(" (background)")
 		}
 		if ev.Prompt != "" {
 			fmt.Fprintf(&b, " prompt=%q", truncate(ev.Prompt, 120))

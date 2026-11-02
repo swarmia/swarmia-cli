@@ -137,3 +137,19 @@ func TestCaptureHookEvents(t *testing.T) {
 		t.Errorf("events = %+v", evs)
 	}
 }
+
+func TestNotificationDelivery(t *testing.T) {
+	note := "<task-notification>\n<task-id>b1</task-id>\n</task-notification>"
+	evs := []hookEvent{
+		{Name: "UserPromptSubmit", SessionID: "s", Prompt: "run the sleeps"},
+		{Name: "PreToolUse", SessionID: "s", ToolName: "Bash", Background: true},
+		{Name: "UserPromptSubmit", SessionID: "s", Prompt: note},     // mid-turn
+		{Name: "UserPromptSubmit", SessionID: "other", Prompt: note}, // another session
+		{Name: "Stop", SessionID: "s"},
+		{Name: "UserPromptSubmit", SessionID: "s", Prompt: note}, // after the turn
+		{Name: "Stop", SessionID: "s"},
+	}
+	if mid, after := notificationDelivery(evs, "s"); mid != 1 || after != 1 {
+		t.Errorf("mid, after = %d, %d; want 1, 1", mid, after)
+	}
+}
