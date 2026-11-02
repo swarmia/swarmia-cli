@@ -79,11 +79,15 @@ func TestCodexSubagentTurns(t *testing.T) {
 func TestClaudeCodeMidTurnNotification(t *testing.T) {
 	ag := claudeCode{}
 	e := setupTurns(t, ag)
+	// Claude Code refuses a long standalone sleep, so the foreground command
+	// is a script that takes a while.
+	must(t, os.WriteFile(filepath.Join(e.repo, "slow-check.sh"), []byte(slowCheck), 0o755))
 	run := e.agentStep(&agentWork{raw: map[string]bool{}, norm: map[string]bool{}}, "1-background", "",
 		"Do exactly these steps, in order. 1. Run `sleep 5` with the Bash tool, in the background "+
-			"(run_in_background). 2. Right away, without checking on it, run `sleep 25` with the Bash tool in the "+
-			"foreground. 3. When that has finished, reply with one sentence saying both commands are done. "+
-			"Run no other commands, and do not wait for or check on the background command.")
+			"(run_in_background). 2. Right away, without checking on it, run `sh slow-check.sh` with the Bash tool "+
+			"in the foreground; it takes about 25 seconds. 3. When that has finished, reply with one sentence "+
+			"saying both commands are done. Run no other commands, and do not wait for or check on the "+
+			"background command.")
 	evs := e.hookEvents()
 	background := false
 	for _, ev := range evs {
@@ -111,6 +115,15 @@ func TestClaudeCodeMidTurnNotification(t *testing.T) {
 
 	checkOneTurn(t, findPayload(t, e.payloads(), run.SessionID))
 }
+
+// slowCheck is a stand-in for a slow check: it runs about 25 seconds.
+const slowCheck = `#!/bin/sh
+for step in 1 2 3 4 5; do
+  echo "check $step of 5"
+  sleep 5
+done
+echo "all checks passed"
+`
 
 // notificationDelivery counts a session's background task notifications that
 // reached the prompt hook before the agent first ended a turn (mid-turn, as
