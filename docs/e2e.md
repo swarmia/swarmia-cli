@@ -111,6 +111,19 @@ a tool call worked in it; tool calls carry their repository and a path
 relative to it; per repository, the same oracle as above (precision, recall,
 class agreement); no local paths. It costs one agent turn.
 
+## Turn checks
+
+`e2e/turns_test.go` checks how agents report turns in cases the scenario
+doesn't reach. Each runs one short session in the fixture, keeps the hook
+events the agent sent as `hook-events.txt`, and checks the payload's turns.
+
+| Test | The agent | Checks |
+|---|---|---|
+| `TestCodexSubagentTurns` | runs `ls`, delegates counting files to a subagent (`spawn_agent`), replies | Stop sends `last_assistant_message`; one prompt, in a turn ended with a reply; the subagent's prompt isn't the developer's, nor is the subagent a session of its own |
+
+A run where the agent didn't do what the check needs (it never called
+`spawn_agent`) is skipped as inconclusive.
+
 ## Checks
 
 The agent writes different code every run, so checks are properties, not
