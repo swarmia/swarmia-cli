@@ -34,7 +34,7 @@ func contractTables(t *testing.T) map[string]map[string]bool {
 			tables[section][m[1]] = !strings.Contains(m[2], "optional")
 		}
 	}
-	for _, s := range []string{"SessionPayload", "Repository", "Usage", "Prompt", "Tool", "CommitAttribution", "LineRange"} {
+	for _, s := range []string{"SessionPayload", "Repository", "Usage", "Turn", "Tool", "CommitAttribution", "LineRange"} {
 		if len(tables[s]) == 0 {
 			t.Fatalf("docs/ingest-api.md has no field table for %s", s)
 		}
@@ -67,6 +67,10 @@ func TestReportJSONFollowsTheContract(t *testing.T) {
 	git(t, lib, "commit", "-q", "-m", "generate")
 	hook(t, map[string]any{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_use_id": "toolu_test", "cwd": app,
 		"tool_input": map[string]any{"command": "go test ./..."}, "error": "Exit code 1\nFAIL"})
+	hook(t, map[string]any{"hook_event_name": "Stop", "cwd": parent,
+		"last_assistant_message": "Added `Helper` in " + filepath.Join(app, "helper.go") + ":\n\n```go\nfunc Helper() string { return \"from the agent\" }\n```"})
+	hook(t, map[string]any{"hook_event_name": "UserPromptSubmit", "cwd": parent,
+		"prompt": "<task-notification>\n<task-id>b1</task-id>\n</task-notification>"})
 	hook(t, map[string]any{"hook_event_name": "SessionEnd", "cwd": parent})
 	pushed(t, app)
 	pushed(t, lib)
@@ -112,8 +116,8 @@ func TestReportJSONFollowsTheContract(t *testing.T) {
 	for _, r := range objects(p["repos"]) {
 		check("Repository", "repos[]", r)
 	}
-	for _, x := range objects(p["prompts"]) {
-		check("Prompt", "prompts[]", x)
+	for _, x := range objects(p["turns"]) {
+		check("Turn", "turns[]", x)
 	}
 	for _, x := range objects(p["tools"]) {
 		check("Tool", "tools[]", x)
@@ -188,8 +192,13 @@ func TestReportJSONFollowsTheContract(t *testing.T) {
 			prev = end
 		}
 	}
+	turns := objects(p["turns"])
+	if len(turns) != 2 || turns[0]["ended_at"] == nil || turns[1]["ended_at"] != nil || turns[1]["prompt"] != nil ||
+		turns[0]["response"] != "Added `Helper` in <repo:github.com/acme/app>/helper.go:\n\n[go code omitted: 1 line]" {
+		t.Errorf("turns = %v, want the prompt's turn ended with its reply (path masked, code stripped), then an automatic one", turns)
+	}
 	data, _ := json.Marshal(p)
-	for _, leak := range []string{parent, "ghp_"} {
+	for _, leak := range []string{parent, "ghp_", "from the agent", "task-notification"} {
 		if strings.Contains(string(data), leak) {
 			t.Errorf("payload contains %q", leak)
 		}

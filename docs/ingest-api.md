@@ -27,8 +27,10 @@ which lines of which commits came from the agent, and sends Swarmia one
 
 - session metadata: agent, model, start/end time, whether it has ended;
 - the **repositories** the session worked in;
-- the developer's **prompts** (secrets redacted; withheld entirely if the
-  developer or repository opted out);
+- the session's **turns**: when each prompt was submitted and when the agent
+  finished working on it, with the developer's prompt and the agent's final
+  reply (secrets redacted, code blocks stripped from replies; the text is
+  withheld if the developer or repository opted out, the timing never is);
 - the **tool calls** the agent made: tool name, the repository and the file path
   within it,
   and shell commands with code stripped and secrets redacted;
@@ -42,8 +44,10 @@ which lines of which commits came from the agent, and sends Swarmia one
 
 **No source code is sent.** Attribution is line numbers only. Tool output
 (file contents, command output) is never included. Shell commands lose heredoc
-bodies, inline interpreter scripts and long quoted strings. The one exception
-the client can't prevent: a developer may paste code into a prompt.
+bodies, inline interpreter scripts and long quoted strings. The agent's replies
+lose fenced code blocks and long inline code. The one exception the client
+can't prevent: a developer may paste code into a prompt (and a reply may still
+quote a short snippet inline).
 
 ## Delivery semantics (read this first)
 
@@ -129,8 +133,13 @@ cap the decompressed size, see Limits).
   "started_at": "2026-10-06T20:43:00Z",
   "ended_at": "2026-10-06T21:41:57Z",
   "ended": true,
-  "prompts": [
-    { "at": "2026-10-06T20:43:12Z", "text": "Add retries to the webhook sender. The test key is [REDACTED:stripe-key]." }
+  "turns": [
+    {
+      "started_at": "2026-10-06T20:43:12Z",
+      "ended_at": "2026-10-06T20:49:40Z",
+      "prompt": "Add retries to the webhook sender. The test key is [REDACTED:stripe-key].",
+      "response": "Added exponential backoff to `sendWebhook`:\n\n[ts code omitted: 18 lines]\n\nThe tests in `sender.test.ts` pass."
+    }
   ],
   "prompts_withheld": false,
   "tools": [
@@ -191,8 +200,8 @@ cap the decompressed size, see Limits).
 | `started_at` | string, RFC 3339 UTC | First event of the session. |
 | `ended_at` | string, RFC 3339 UTC | Last event seen so far (not necessarily the end — see `ended`). |
 | `ended` | boolean | Whether the agent reported the session's end. A later version may flip it back to `false` if the session is resumed. |
-| `prompts` | array of Prompt | The developer's prompts in order. Empty when withheld. Messages the agent submits itself (a background task's notification, a subagent's report) aren't prompts and aren't sent. |
-| `prompts_withheld` | boolean | `true` if the developer, or the configuration of any repository in `repos`, opted out of sharing prompts (prompts belong to the whole session, so the strictest setting wins). Then `prompts` is empty — that is not the same as a session without prompts. |
+| `turns` | array of Turn | The session's turns in order: each prompt and the agent's work on it. Always sent, also when prompts are withheld: then turns carry their timing only. |
+| `prompts_withheld` | boolean | `true` if the developer, or the configuration of any repository in `repos`, opted out of sharing prompts (prompts belong to the whole session, so the strictest setting wins). The setting covers the agent's replies too: then no turn has a `prompt` or `response` — that is not the same as turns without them. |
 | `repos` | array of Repository | The repositories the session worked in, sent to this token: those the agent edited, read or searched, or ran shell commands in. Never empty: a session that worked in no repository configured with this token isn't sent to it. The first is the one the session was started in, or else the first it worked in. |
 | `tools` | array of Tool | The agent's tool calls, in order (only completed calls, successful or failed). |
 | `commits` | array of CommitAttribution | Line attribution, one entry per (commit, file). Only commits that were **pushed** (contained in a remote-tracking branch on the developer's machine) when the payload was built, across all of `repos`. Empty if nothing has been pushed yet. |
@@ -230,12 +239,19 @@ differences).
 | `web_search_requests` | integer, optional | Server-side web searches. |
 | `web_fetch_requests` | integer, optional | Server-side web fetches. |
 
-#### Prompt
+#### Turn
+
+A turn runs from a prompt to the end of the agent's work on it: the agent's
+final reply, when it hands control back to the developer. The time until the
+next turn starts is the agent waiting on the developer (or idle).
 
 | Field | Type | Description |
 |---|---|---|
-| `at` | string, RFC 3339 UTC | When the prompt was submitted. |
-| `text` | string | The prompt, with secrets replaced by `[REDACTED:<kind>]` and local details masked (see Redaction markers). Can be long, and can contain code the developer pasted. |
+| `started_at` | string, RFC 3339 UTC | When the prompt was submitted. |
+| `ended_at` | string, RFC 3339 UTC, optional | When the agent ended the turn. Absent if the agent didn't report it: the developer interrupted the turn, it's still running (the last turn of a session that hasn't ended), a new prompt arrived while it ran, or the agent or an older client doesn't report turn ends. |
+| `automatic` | boolean, optional | `true` for a turn the agent started itself, on a message it submits (a background task's notification, a subagent's report) once it had ended the previous turn; such a message arriving mid-turn is part of that turn. Absent otherwise. An automatic turn has no `prompt`. |
+| `prompt` | string, optional | The developer's prompt, with secrets replaced by `[REDACTED:<kind>]` and local details masked (see Redaction markers). Can be long, and can contain code the developer pasted. Absent for automatic turns and when prompts are withheld. |
+| `response` | string, optional | The agent's final reply: the text it ended the turn with, not its narration between tool calls nor its reasoning. Fenced code blocks are replaced by `[<language> code omitted: <n> lines]` and inline code over 120 characters by `` `[<n> chars omitted]` ``; secrets are redacted and local details masked, as in `prompt`. Markdown, capped at 8000 characters (then ending in `…`). Absent without `ended_at`, when the agent ended the turn without a reply, and when prompts are withheld. |
 
 #### Tool
 
@@ -280,7 +296,7 @@ Blank lines are never attributed, so ranges break at blank lines.
 
 ### Redaction markers
 
-Free text (`prompts[].text`, `tools[].command`) may contain:
+Free text (`turns[].prompt`, `turns[].response`, `tools[].command`) may contain:
 
 - `[REDACTED:<kind>]` — a secret the client removed. Kinds: `swarmia-token`, `github-token`,
   `gitlab-token`, `slack-token`, `slack-webhook`, `aws-access-key`,

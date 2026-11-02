@@ -50,9 +50,12 @@ type Session struct {
 	Model     string    `json:"model,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at"`
-	Prompts   []Prompt  `json:"prompts,omitempty"`
-	Tools     []Tool    `json:"tools,omitempty"`
-	Edits     []Edit    `json:"edits,omitempty"`
+	// Turns are the session's prompts and the agent's work on each, in order.
+	Turns []Turn `json:"turns,omitempty"`
+	// Prompts is Turns in format 3 and earlier: prompts alone (see upgrade).
+	Prompts []Turn `json:"prompts,omitempty"`
+	Tools   []Tool `json:"tools,omitempty"`
+	Edits   []Edit `json:"edits,omitempty"`
 	// AILinesByRoot counts, per worktree root and file, the non-blank lines the
 	// agent wrote that were still there after its last edit to the file — lines
 	// it wrote and then replaced itself don't count.
@@ -84,9 +87,42 @@ type Delivery struct {
 	Rejected string    `json:"rejected,omitempty"`
 }
 
-type Prompt struct {
-	At   time.Time `json:"at"`
-	Text string    `json:"text"`
+// Turn is one prompt and the agent's work on it: from the prompt's
+// submission to the agent's final reply, which its Stop hook reports. A turn
+// the developer interrupted, or one still going, has no end.
+type Turn struct {
+	At time.Time `json:"at"`
+	// Text is the prompt; Automatic marks a prompt the agent submitted itself
+	// (a background task's notification, a subagent's report), whose text
+	// isn't kept.
+	Text      string `json:"text,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
+	// EndedAt is when the agent ended the turn, and Response the text it
+	// ended it with: its final reply, not its narration between tool calls.
+	EndedAt  *time.Time `json:"ended_at,omitempty"`
+	Response string     `json:"response,omitempty"`
+}
+
+// PromptCount counts the developer's prompts: turns that weren't automatic.
+func (s *Session) PromptCount() int {
+	n := 0
+	for _, t := range s.Turns {
+		if !t.Automatic {
+			n++
+		}
+	}
+	return n
+}
+
+// ResponseCount counts the turns the agent ended with a reply.
+func (s *Session) ResponseCount() int {
+	n := 0
+	for _, t := range s.Turns {
+		if t.Response != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // Tool is one tool call. File and Command are set when the tool has them.
@@ -369,11 +405,28 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 			}
 			s.Ended = false // resumed
 		case "UserPromptSubmit":
-			if !ev.Injected {
-				s.Prompts = append(s.Prompts, Prompt{At: at, Text: ev.Prompt})
+			n := len(s.Turns)
+			switch {
+			case !ev.Injected:
+				s.Turns = append(s.Turns, Turn{At: at, Text: ev.Prompt})
+			case n == 0 || s.Turns[n-1].EndedAt != nil:
+				// Something the agent was waiting on (a background task)
+				// starts a turn of its own...
+				s.Turns = append(s.Turns, Turn{At: at, Automatic: true})
 			}
+			// ...but arriving mid-turn, it's part of that turn.
 			if s.Model == "" && ev.Model != "" { // Codex sends the model with every event
 				s.Model = ev.Model
+			}
+		case "Stop":
+			// It ends the latest turn. A stop hook can make the agent go on,
+			// and then the turn ends at the next Stop instead.
+			if n := len(s.Turns); n > 0 {
+				t := &s.Turns[n-1]
+				t.EndedAt = &at
+				if ev.Response != "" {
+					t.Response = ev.Response
+				}
 			}
 		case "SessionEnd":
 			s.Ended = true

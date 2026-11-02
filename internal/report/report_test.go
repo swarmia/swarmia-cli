@@ -142,6 +142,14 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 	f.agentWrite(t0.Add(20*time.Second), "new.go", newFile, nil)
 	// ...and writes wip.go, which is never committed.
 	f.agentWrite(t0.Add(30*time.Second), "wip.go", lines(3, "func unfinished%d() { panic(\"todo: finish this\") }"), nil)
+	// It ends the turn with a reply. A stop hook makes it go on, so the turn
+	// ends at the next Stop, which (as from older agents) has no reply.
+	f.log(t0.Add(40*time.Second), map[string]any{"hook_event_name": "Stop", "last_assistant_message": "Added five helpers."})
+	f.log(t0.Add(41*time.Second), map[string]any{"hook_event_name": "Stop", "stop_hook_active": true})
+	// A background task finishing after the turn starts one of its own.
+	f.log(t0.Add(45*time.Second), map[string]any{"hook_event_name": "UserPromptSubmit",
+		"prompt": "<task-notification>\n<task-id>b2</task-id>\n<status>completed</status>\n</task-notification>"})
+	f.log(t0.Add(50*time.Second), map[string]any{"hook_event_name": "Stop", "last_assistant_message": "The build passed."})
 
 	// I commit app.go with one helper tweaked, plus new.go reformatted; then
 	// push it.
@@ -170,8 +178,16 @@ func TestBuildAttributesSessionToCommits(t *testing.T) {
 		t.Fatalf("got %d sessions, want 1", len(sessions))
 	}
 	s := sessions[0]
-	if s.Model != "claude-test" || len(s.Prompts) != 1 || len(s.Edits) != 3 {
-		t.Errorf("session metadata: model=%q prompts=%d edits=%d", s.Model, len(s.Prompts), len(s.Edits))
+	if s.Model != "claude-test" || s.PromptCount() != 1 || len(s.Edits) != 3 {
+		t.Errorf("session metadata: model=%q prompts=%d edits=%d", s.Model, s.PromptCount(), len(s.Edits))
+	}
+	// The first background task's notification arrives mid-turn: part of it.
+	end, end2 := t0.Add(41*time.Second), t0.Add(50*time.Second)
+	if want := []Turn{
+		{At: t0.Add(time.Second), Text: "add helpers", EndedAt: &end, Response: "Added five helpers."},
+		{At: t0.Add(45 * time.Second), Automatic: true, EndedAt: &end2, Response: "The build passed."},
+	}; !reflect.DeepEqual(s.Turns, want) {
+		t.Errorf("turns = %+v, want %+v", s.Turns, want)
 	}
 	if want := 5 + 4 + 3; s.AILines() != want { // new.go has 4 non-blank lines
 		t.Errorf("AILines = %d, want %d", s.AILines(), want)

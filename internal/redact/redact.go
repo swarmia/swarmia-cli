@@ -1,4 +1,5 @@
-// Package redact removes secrets from free text (prompts, shell commands)
+// Package redact removes secrets from free text (prompts, shell commands,
+// agent replies)
 // before it leaves the machine. It layers several detectors, each replacing
 // what it finds with a [REDACTED:<kind>] marker:
 //

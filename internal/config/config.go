@@ -17,9 +17,9 @@
 // repository the agent cloned, a shared directory), so its endpoint is used
 // only with its own token: a token from another layer is never sent to an
 // endpoint such a file chose. A directory's file is also ignored unless the
-// user or root owns it. Prompts are shared unless any layer turns them off: an
-// individual can always withhold their own prompts, and so can a repository's
-// configuration.
+// user or root owns it. Prompts, and the agent's replies to them, are shared
+// unless any layer turns them off: an individual can always withhold their
+// own, and so can a repository's configuration.
 //
 // swarmia-cli only reads these files; it never writes them.
 package config

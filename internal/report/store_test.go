@@ -244,3 +244,20 @@ func TestProcessLeavesNewerFormatsAlone(t *testing.T) {
 		t.Errorf("saved session lacks its format: %.80s…", got)
 	}
 }
+
+// Sessions stored before turns kept prompts alone; they become turns.
+func TestListReadsPromptsAsTurns(t *testing.T) {
+	st := Store{Dir: t.TempDir()}
+	old := `{"format":3,"id":"old","agent":"claude-code","prompts":[{"at":"2026-10-07T10:00:00Z","text":"fix it"}]}`
+	if err := os.WriteFile(filepath.Join(st.Dir, "old.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessions, _, err := st.List()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("List = %v, %v", sessions, err)
+	}
+	s := sessions[0]
+	if len(s.Turns) != 1 || s.Turns[0].Text != "fix it" || s.Turns[0].EndedAt != nil || s.Prompts != nil {
+		t.Errorf("turns = %+v, prompts = %+v", s.Turns, s.Prompts)
+	}
+}

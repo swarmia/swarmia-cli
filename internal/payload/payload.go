@@ -2,9 +2,11 @@
 // where the privacy rules are applied, in one place:
 //
 //   - no source code: line attribution only, commands with heredoc bodies and
-//     inline scripts stripped, and tool output never included;
-//   - secrets redacted from prompts and commands;
-//   - prompts withheld entirely when configuration opts out;
+//     inline scripts stripped, the agent's replies with code blocks stripped,
+//     and tool output never included;
+//   - secrets redacted from prompts, replies and commands;
+//   - prompts and the agent's replies withheld entirely when configuration
+//     opts out (their timing is still sent);
 //   - only pushed commits, file paths relative to their repository, and local
 //     paths and the user name masked in free text.
 package payload
@@ -26,20 +28,22 @@ import (
 
 // Payload is one session as sent to Swarmia.
 type Payload struct {
-	SessionID       string    `json:"session_id"`
-	Agent           string    `json:"agent"`
-	Model           string    `json:"model,omitempty"`
-	MatcherVersion  string    `json:"matcher_version"`
-	CLIVersion      string    `json:"cli_version"`
-	AuthorEmail     string    `json:"author_email,omitempty"`
-	StartedAt       time.Time `json:"started_at"`
-	EndedAt         time.Time `json:"ended_at"`
-	Ended           bool      `json:"ended"`
-	Prompts         []Prompt  `json:"prompts"`
-	PromptsWithheld bool      `json:"prompts_withheld"`
-	Repos           []Repo    `json:"repos"`
-	Tools           []Tool    `json:"tools"`
-	Commits         []Commit  `json:"commits"`
+	SessionID      string    `json:"session_id"`
+	Agent          string    `json:"agent"`
+	Model          string    `json:"model,omitempty"`
+	MatcherVersion string    `json:"matcher_version"`
+	CLIVersion     string    `json:"cli_version"`
+	AuthorEmail    string    `json:"author_email,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	EndedAt        time.Time `json:"ended_at"`
+	Ended          bool      `json:"ended"`
+	// Turns are always sent; their prompts and replies only if
+	// PromptsWithheld isn't set.
+	Turns           []Turn   `json:"turns"`
+	PromptsWithheld bool     `json:"prompts_withheld"`
+	Repos           []Repo   `json:"repos"`
+	Tools           []Tool   `json:"tools"`
+	Commits         []Commit `json:"commits"`
 	// Usage is the session's token usage per model, speed and main session vs
 	// subagents, read from the agent's transcript. Cost is left to the server.
 	Usage []usage.Totals `json:"usage"`
@@ -53,9 +57,13 @@ type Repo struct {
 	AILinesKept int    `json:"ai_lines_committed"`
 }
 
-type Prompt struct {
-	At   time.Time `json:"at"`
-	Text string    `json:"text"`
+// Turn is one prompt and the agent's work on it (see report.Turn).
+type Turn struct {
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
+	Automatic bool       `json:"automatic,omitempty"`
+	Prompt    string     `json:"prompt,omitempty"`
+	Response  string     `json:"response,omitempty"`
 }
 
 type Tool struct {
@@ -78,7 +86,7 @@ type Commit struct {
 // RepoInfo is what a payload needs to know about a worktree.
 type RepoInfo struct {
 	Slug        string // see RepoSlug; "" if it can't be identified, and then never sent
-	Prompts     bool   // its configuration lets prompts be shared
+	Prompts     bool   // its configuration lets prompts and replies be shared
 	AuthorEmail string // the developer's commit email there
 }
 
@@ -86,7 +94,7 @@ type RepoInfo struct {
 type Context struct {
 	CLIVersion string
 	// Prompts is whether the configuration the session is sent with lets
-	// prompts be shared.
+	// prompts, and the agent's replies to them, be shared.
 	Prompts bool
 	// Repo describes the worktree at root; Build calls it once per root.
 	Repo func(root string) RepoInfo
@@ -105,7 +113,8 @@ type Context struct {
 // The whole session goes where the project's configuration says, whatever
 // the repositories it worked in are configured with: a developer reports to
 // one organization. Prompts are withheld if the project's configuration, or
-// that of any repository the session worked in, opts out.
+// that of any repository the session worked in, opts out, and so are the
+// agent's replies with them; the turns' timing is sent either way.
 func Build(s *report.Session, ctx Context) (Payload, bool) {
 	info := map[string]RepoInfo{}
 	var roots []string // in the order the session worked in them
@@ -151,7 +160,7 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		MatcherVersion: attribution.Version, CLIVersion: ctx.CLIVersion,
 		AuthorEmail: author,
 		StartedAt:   s.StartedAt, EndedAt: s.EndedAt, Ended: s.Ended,
-		Prompts: []Prompt{}, PromptsWithheld: !prompts,
+		Turns: []Turn{}, PromptsWithheld: !prompts,
 		Repos: []Repo{}, Tools: []Tool{}, Commits: []Commit{},
 		Usage: []usage.Totals{},
 	}
@@ -161,10 +170,13 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 	if p.Model == "" {
 		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start
 	}
-	if prompts {
-		for _, pr := range s.Prompts {
-			p.Prompts = append(p.Prompts, Prompt{At: pr.At, Text: masks.apply(redact.Text(pr.Text))})
+	for _, t := range s.Turns {
+		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic}
+		if prompts {
+			turn.Prompt = masks.around(t.Text, redact.Text)
+			turn.Response = masks.around(t.Response, redact.Response)
 		}
+		p.Turns = append(p.Turns, turn)
 	}
 	for _, slug := range slugs {
 		r := Repo{Repo: slug}
@@ -236,12 +248,25 @@ func (ctx Context) masks(roots []string, slugOf func(root string) string) masks 
 
 // apply masks s. Each replacement first goes in as a placeholder, so a later
 // one (the user name) never rewrites an earlier one's text (a slug).
-func (m masks) apply(s string) string {
+func (m masks) apply(s string) string { return m.around(s, nil) }
+
+// around masks s and redacts it with redact in between: directories are
+// masked before redaction, so a path redaction would cut into is still
+// masked, but the user name only after it, so a secret that happens to
+// contain the user name isn't split into pieces redaction no longer
+// recognizes.
+func (m masks) around(s string, redact func(string) string) string {
 	placeholder := func(i int) string { return fmt.Sprintf("\x00%d\x00", i) }
 	for i, r := range m {
 		if r.dir {
 			s = replaceDir(s, r.from, placeholder(i))
-		} else {
+		}
+	}
+	if redact != nil {
+		s = redact(s)
+	}
+	for i, r := range m {
+		if !r.dir {
 			s = strings.ReplaceAll(s, r.from, placeholder(i))
 		}
 	}
