@@ -173,9 +173,8 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 	for _, t := range s.Turns {
 		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic}
 		if prompts {
-			// Masked first: a path that redaction cut into would stay unmasked.
-			turn.Prompt = redact.Text(masks.apply(t.Text))
-			turn.Response = redact.Response(masks.apply(t.Response))
+			turn.Prompt = masks.around(t.Text, redact.Text)
+			turn.Response = masks.around(t.Response, redact.Response)
 		}
 		p.Turns = append(p.Turns, turn)
 	}
@@ -249,12 +248,25 @@ func (ctx Context) masks(roots []string, slugOf func(root string) string) masks 
 
 // apply masks s. Each replacement first goes in as a placeholder, so a later
 // one (the user name) never rewrites an earlier one's text (a slug).
-func (m masks) apply(s string) string {
+func (m masks) apply(s string) string { return m.around(s, nil) }
+
+// around masks s and redacts it with redact in between: directories are
+// masked before redaction, so a path redaction would cut into is still
+// masked, but the user name only after it, so a secret that happens to
+// contain the user name isn't split into pieces redaction no longer
+// recognizes.
+func (m masks) around(s string, redact func(string) string) string {
 	placeholder := func(i int) string { return fmt.Sprintf("\x00%d\x00", i) }
 	for i, r := range m {
 		if r.dir {
 			s = replaceDir(s, r.from, placeholder(i))
-		} else {
+		}
+	}
+	if redact != nil {
+		s = redact(s)
+	}
+	for i, r := range m {
+		if !r.dir {
 			s = strings.ReplaceAll(s, r.from, placeholder(i))
 		}
 	}

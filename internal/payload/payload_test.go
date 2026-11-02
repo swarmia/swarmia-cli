@@ -111,6 +111,26 @@ func TestBuildMasksLocalPaths(t *testing.T) {
 	}
 }
 
+// The user name is masked after redaction: masked first, it would split a
+// secret that happens to contain it into pieces no detector recognizes.
+func TestBuildRedactsSecretsContainingTheUserName(t *testing.T) {
+	s := session()
+	s.Root = "/home/jdoe/src/app"
+	// The Stripe key is split so that secret scanners don't flag this file.
+	secrets := "Use sk_" + "live_51Hxyzjdoe9aBcDeFgHiJkLmNoP, ghp_A1b2C3d4E5f6G7h8I9j0jdoeK1l2M3n4O5p6Q7r8 and token: a8f3jdoe92kd in /home/jdoe/src/app."
+	s.Turns = []report.Turn{{At: at, Text: secrets, EndedAt: &at, Response: secrets}}
+	ctx := contextFor(map[string]RepoInfo{s.Root: {Slug: "github.com/jdoe/app", Prompts: true}})
+	ctx.Home, ctx.UserName = "/home/jdoe", "jdoe"
+	p := only(t, s, ctx)
+	want := "Use [REDACTED:stripe-key], [REDACTED:github-token] and token: [REDACTED:secret] in <repo:github.com/jdoe/app>."
+	if got := p.Turns[0].Prompt; got != want {
+		t.Errorf("prompt = %q, want %q", got, want)
+	}
+	if got := p.Turns[0].Response; got != want {
+		t.Errorf("response = %q, want %q", got, want)
+	}
+}
+
 func TestBuildSendsToolStatus(t *testing.T) {
 	s := session()
 	code := 1
