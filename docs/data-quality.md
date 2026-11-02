@@ -131,3 +131,31 @@ sessions nothing prevents two sessions from claiming the same committed line,
 for example when one session's shell command restores lines another session
 wrote (see "Content restored by git without a trace"). A server summing across
 sessions should count each (commit, path, line) once.
+
+## Turns
+
+### An interrupted turn can take the next automatic turn's end and reply
+
+**Skews:** the agent's working time up and the developer's down, for that
+turn; the reply is paired with the wrong prompt; automatic turns down by one.
+
+A turn the developer interrupts never ends: Claude Code doesn't run its Stop
+hook on an interrupt, and has no interrupt hook. A message the agent submits
+itself (a background task's notification) that arrives while a turn has no end
+is folded into that turn, because it can also arrive mid-turn: Claude Code runs
+the prompt hook for it between tool calls (confirmed by
+`TestClaudeCodeMidTurnNotification`, see `docs/e2e.md`). From hook events
+alone, an interrupted turn looks like one still running.
+
+So if the developer interrupts while a background task (a test run, a build)
+is still going, and it finishes before their next prompt, the interrupted turn
+gets the end and reply of the agent's answer to the notification ("The tests
+passed."), instead of no end, and there's no automatic turn for it. If the
+developer prompts again first, which is common after an interrupt, nothing
+goes wrong.
+
+Not reproduced end to end: headless `claude -p` can't be interrupted. The fix
+is to read the interrupt from the transcript, where Claude Code records it as
+a user entry (`[Request interrupted by user]`), and end the open turn there.
+Codex has an `Interrupt` hook, which swarmia-cli doesn't install yet, and no
+messages it submits itself, so it isn't affected.
