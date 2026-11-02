@@ -144,9 +144,10 @@ Artifacts (agent output streams, transcripts, swarmia-cli sessions, payloads, a
 
 ## CI
 
-`.github/workflows/e2e.yml`: nightly and on demand (pick the agent, a version
-and a model), on Ubuntu. Nightly runs each agent on two release channels, which
-separates "the agent changed" from "we broke something":
+`.github/workflows/e2e.yml`: nightly, after every merge to `main` (unless only
+Markdown or `docs/` changed), and on demand (pick the agent, a version and a
+model), on Ubuntu. Nightly and merge runs test each agent on two release
+channels, which separates "the agent changed" from "we broke something":
 
 | Agent | Development | Stable |
 |---|---|---|
