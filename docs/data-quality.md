@@ -157,5 +157,6 @@ goes wrong.
 Not reproduced end to end: headless `claude -p` can't be interrupted. The fix
 is to read the interrupt from the transcript, where Claude Code records it as
 a user entry (`[Request interrupted by user]`), and end the open turn there.
-Codex has an `Interrupt` hook, which swarmia-cli doesn't install yet, and no
-messages it submits itself, so it isn't affected.
+Codex isn't affected: swarmia-cli takes every Codex prompt for the
+developer's, so nothing is folded into an open turn. (Codex also has an
+`Interrupt` hook, which swarmia-cli doesn't install yet.)
