@@ -48,7 +48,7 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
   pushed commits; where code needs to be shown, Swarmia can read it from your
   Git provider, which it's already connected to. Shell commands are sent with heredoc bodies, inline scripts and
   long quoted strings removed, prompts without the content you pasted into
-  them, and the agent's replies without their code blocks. Tool output is never sent.
+  them or their code blocks, and the agent's replies without their code blocks. Tool output is never sent.
 - **Secrets are redacted** from prompts, replies and commands before sending (provider
   tokens, private keys, passwords in URLs and connection strings, secret-looking
   assignments, random-looking strings), each becoming `[REDACTED:<kind>]`.
@@ -64,8 +64,8 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
 - **Nothing is sent without a token**, and only pushed commits are ever sent.
   Local state lives outside your repositories, readable only by you.
 
-Prompts can still contain code the agent doesn't mark as pasted (typed in, or
-pasted where the agent doesn't tag it); redaction can't tell.
+Prompts can still contain code outside code blocks that the agent doesn't mark
+as pasted; redaction can't tell.
 
 ### Never in the way
 

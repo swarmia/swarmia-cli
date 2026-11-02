@@ -23,6 +23,11 @@ func TestPrompt(t *testing.T) {
 		{"unclosed paste runs to the end", "Look: <pasted_content id=\"q\">\na\nb", "Look: [pasted content omitted: 2 lines]"},
 		{"empty paste", "<pasted_content id=\"e\"></pasted_content id=\"e\">hi", "[pasted content omitted: 0 lines]hi"},
 		{"secret in paste is gone with it", "<pasted_content id=\"s\">AKIAABCDEFGHIJKLMNOP</pasted_content id=\"s\">", "[pasted content omitted: 1 line]"},
+		{"fenced code block", "Why does this panic?\n\n```go\nvar m map[string]int\nm[\"a\"] = 1\n```\nThanks",
+			"Why does this panic?\n\n[go code omitted: 2 lines]\nThanks"},
+		{"fence inside a paste goes with the paste", "<pasted_content id=\"f\">\n```\nx\n```\n</pasted_content id=\"f\">\nok",
+			"[pasted content omitted: 3 lines]\nok"},
+		{"inline code kept", "Rename `parseRange` to `parseSpan`.", "Rename `parseRange` to `parseSpan`."},
 		{"secret outside paste is redacted", "Use ghp_" + strings.Repeat("a", 36) + " <pasted_content id=\"s\">x</pasted_content id=\"s\">",
 			"Use [REDACTED:github-token] [pasted content omitted: 1 line]"},
 	}

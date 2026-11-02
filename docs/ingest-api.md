@@ -46,8 +46,9 @@ which lines of which commits came from the agent, and sends Swarmia one
 (file contents, command output) is never included. Shell commands lose heredoc
 bodies, inline interpreter scripts and long quoted strings. The agent's replies
 lose fenced code blocks and long inline code. Prompts lose content the agent
-marks as pasted. The one exception the client can't prevent: a prompt may still
-contain code the agent didn't mark as pasted (and a reply may still quote a
+marks as pasted and fenced code blocks. The one exception the client can't
+prevent: a prompt may still contain code outside a code block that the agent
+didn't mark as pasted (and a reply may still quote a
 short snippet inline).
 
 ## Delivery semantics (read this first)
@@ -251,7 +252,7 @@ next turn starts is the agent waiting on the developer (or idle).
 | `started_at` | string, RFC 3339 UTC | When the prompt was submitted. |
 | `ended_at` | string, RFC 3339 UTC, optional | When the agent ended the turn. Absent if the agent didn't report it: the developer interrupted the turn, it's still running (the last turn of a session that hasn't ended), a new prompt arrived while it ran, or the agent or an older client doesn't report turn ends. |
 | `automatic` | boolean, optional | `true` for a turn the agent started itself, on a message it submits (a background task's notification, a subagent's report) once it had ended the previous turn; such a message arriving mid-turn is part of that turn. Absent otherwise. An automatic turn has no `prompt`. |
-| `prompt` | string, optional | The developer's prompt, with content the agent marked as pasted replaced by `[pasted content omitted: <n> lines]`, secrets replaced by `[REDACTED:<kind>]` and local details masked (see Redaction markers). Can be long, and can contain code the agent didn't mark as pasted. Absent for automatic turns and when prompts are withheld. |
+| `prompt` | string, optional | The developer's prompt, with content the agent marked as pasted replaced by `[pasted content omitted: <n> lines]`, fenced code blocks by `[<language> code omitted: <n> lines]`, secrets replaced by `[REDACTED:<kind>]` and local details masked (see Redaction markers). Can be long, and can contain code outside code blocks that the agent didn't mark as pasted. Absent for automatic turns and when prompts are withheld. |
 | `response` | string, optional | The agent's final reply: the text it ended the turn with, not its narration between tool calls nor its reasoning. Fenced code blocks are replaced by `[<language> code omitted: <n> lines]` and inline code over 120 characters by `` `[<n> chars omitted]` ``; secrets are redacted and local details masked, as in `prompt`. Markdown, capped at 8000 characters (then ending in `…`). Absent without `ended_at`, when the agent ended the turn without a reply, and when prompts are withheld. |
 
 #### Tool
@@ -305,7 +306,7 @@ Free text (`turns[].prompt`, `turns[].response`, `tools[].command`) may contain:
   `sendgrid-key`, `jwt`, `private-key`, `password`, `secret`, `high-entropy`.
   New kinds may appear.
 - `[pasted content omitted: <n> lines]` (prompts), `[<language> code omitted:
-  <n> lines]` (replies), `[N lines omitted]` and similar (commands) — content
+  <n> lines]` (prompts and replies), `[N lines omitted]` and similar (commands) — content
   the client dropped.
 - `<repo:host/path>` — the local root directory of that repository in `repos`
   (e.g. `<repo:github.com/acme/common>`).

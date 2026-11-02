@@ -10,17 +10,19 @@ import (
 // <pasted_content id="…"> … </pasted_content id="…"> tags. What gets pasted is
 // mostly logs, stack traces, code and data: the material least safe to share
 // and least telling about what the developer asked for. Prompt keeps the words
-// the developer typed and drops the paste.
+// the developer typed and drops the paste. Code pasted without the tags,
+// inside a Markdown code fence, is dropped the same way as in replies.
 
 // pasteOpen matches an opening paste tag and captures its id, if any. Tags
 // nested inside a paste arrive escaped (<\pasted_content …>), so they never
 // match and go with the paste that holds them.
 var pasteOpen = regexp.MustCompile(`<pasted_content(?:\s+id="([^"]*)")?\s*>`)
 
-// Prompt returns a developer's prompt with pasted content replaced by a line
-// saying how much there was, then redacted (see Text).
+// Prompt returns a developer's prompt with pasted content and fenced code
+// blocks replaced by lines saying how much there was, then redacted (see
+// Text).
 func Prompt(text string) string {
-	return Text(stripPastes(text))
+	return Text(stripFences(stripPastes(text)))
 }
 
 // stripPastes replaces each paste, tags included, with a placeholder. A paste
