@@ -4,7 +4,8 @@
 //   - no source code: line attribution only, commands with heredoc bodies and
 //     inline scripts stripped, the agent's replies with code blocks stripped,
 //     and tool output never included;
-//   - secrets redacted from prompts, replies and commands;
+//   - secrets redacted from prompts, replies and commands, and the
+//     <system-reminder> blocks agents add to prompts cut;
 //   - prompts and the agent's replies withheld entirely when configuration
 //     opts out (their timing is still sent);
 //   - only pushed commits, file paths relative to their repository, and local
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/redact"
 	"github.com/swarmia/swarmia-cli/internal/report"
@@ -171,9 +173,12 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start
 	}
 	for _, t := range s.Turns {
-		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic}
+		// Turns stored before system reminders were cut from prompts at
+		// parse time have them still.
+		text := agent.PromptText(t.Text)
+		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic || text == "" && t.Text != ""}
 		if prompts {
-			turn.Prompt = masks.around(t.Text, redact.Text)
+			turn.Prompt = masks.around(text, redact.Text)
 			turn.Response = masks.around(t.Response, redact.Response)
 		}
 		p.Turns = append(p.Turns, turn)
