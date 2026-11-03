@@ -137,6 +137,7 @@ cap the decompressed size, see Limits).
   "started_at": "2026-10-06T20:43:00Z",
   "ended_at": "2026-10-06T21:41:57Z",
   "ended": true,
+  "last_activity_at": "2026-10-06T20:49:40Z",
   "turns": [
     {
       "started_at": "2026-10-06T20:43:12Z",
@@ -203,6 +204,7 @@ cap the decompressed size, see Limits).
 | `author_email` | string, optional | The email the developer's commits carry, in the first of `repos`: `$GIT_AUTHOR_EMAIL`, else `user.email` (never one git guesses; absent if neither is set). Use it to map the session to a Swarmia identity. It's self-asserted — anyone with the token, which may be committed, can send any email — so it's fine for analytics but must not grant access to anything. For sessions with `commits`, those commits' authors, as Swarmia knows them from the Git provider, are the stronger mapping. |
 | `started_at` | string, RFC 3339 UTC | First event of the session. |
 | `ended_at` | string, RFC 3339 UTC | Last event seen so far (not necessarily the end — see `ended`). |
+| `last_activity_at` | string, RFC 3339 UTC, optional | The session's last prompt, agent reply or tool call. Unlike `ended_at`, not the session starting or ending, which can come long after its last activity: a session resumed only to look at it, or one ended when its terminal was closed days later. Use it, not `ended_at`, for how long a session was worked in. Absent if the session had no activity, and from older clients. |
 | `ended` | boolean | Whether the agent reported the session's end. A later version may flip it back to `false` if the session is resumed. |
 | `turns` | array of Turn | The session's turns in order: each prompt and the agent's work on it. Always sent, also when prompts are withheld: then turns carry their timing only. |
 | `prompts_withheld` | boolean | `true` if the developer, or the configuration of any repository in `repos`, opted out of sharing prompts (prompts belong to the whole session, so the strictest setting wins). The setting covers the agent's replies too: then no turn has a `prompt` or `response` — that is not the same as turns without them. |
