@@ -23,7 +23,9 @@ later) works in one or more of a developer's git repositories: it may be started
 inside a repository, edit a sibling one, or be started in a directory holding
 many. The CLI records the session locally, works out on the developer's machine
 which lines of which commits came from the agent, and sends Swarmia one
-**session payload** per agent session:
+**session payload** per agent session (except empty ones — no turns, tool
+calls or usage — which an agent leaves behind when it replaces a session as
+soon as it started it, or is quit right away):
 
 - session metadata: agent, model, start/end time, whether it has ended;
 - the **repositories** the session worked in;
@@ -45,9 +47,11 @@ which lines of which commits came from the agent, and sends Swarmia one
 **No source code is sent.** Attribution is line numbers only. Tool output
 (file contents, command output) is never included. Shell commands lose heredoc
 bodies, inline interpreter scripts and long quoted strings. The agent's replies
-lose fenced code blocks and long inline code. The one exception the client
-can't prevent: a developer may paste code into a prompt (and a reply may still
-quote a short snippet inline).
+lose fenced code blocks and long inline code. Prompts lose content the agent
+marks as pasted and fenced code blocks. The one exception the client can't
+prevent: a prompt may still contain code outside a code block that the agent
+didn't mark as pasted (and a reply may still quote a
+short snippet inline).
 
 ## Delivery semantics (read this first)
 
@@ -221,8 +225,8 @@ One bucket per (model, speed, main session vs subagents). The client doesn't
 compute cost — prices change and depend on contracts — so the server prices
 these counts. Each API response counts once (Claude Code writes one transcript
 line per content block, which the client deduplicates by message and request
-id; Codex records cumulative totals, which the client turns into per-response
-differences).
+id; Codex records each response's usage alongside a cumulative total, and the
+client counts a response when the total changes).
 
 | Field | Type | Description |
 |---|---|---|
@@ -250,7 +254,7 @@ next turn starts is the agent waiting on the developer (or idle).
 | `started_at` | string, RFC 3339 UTC | When the prompt was submitted. |
 | `ended_at` | string, RFC 3339 UTC, optional | When the agent ended the turn. Absent if the agent didn't report it: the developer interrupted the turn, it's still running (the last turn of a session that hasn't ended), a new prompt arrived while it ran, or the agent or an older client doesn't report turn ends. |
 | `automatic` | boolean, optional | `true` for a turn the agent started itself, on a message it submits (a background task's notification, a subagent's report, or a prompt made only of `<system-reminder>` blocks) once it had ended the previous turn; such a message arriving mid-turn is part of that turn. Absent otherwise. An automatic turn has no `prompt`. |
-| `prompt` | string, optional | The developer's prompt, without the `<system-reminder>` blocks an agent or its hooks add to prompts (e.g. a worktree's path), with secrets replaced by `[REDACTED:<kind>]` and local details masked (see Redaction markers). Can be long, and can contain code the developer pasted. Absent for automatic turns and when prompts are withheld. |
+| `prompt` | string, optional | The developer's prompt, without the `<system-reminder>` blocks an agent or its hooks add to prompts (e.g. a worktree's path), with content the agent marked as pasted replaced by `[pasted content omitted: <n> lines]`, fenced code blocks by `[<language> code omitted: <n> lines]`, secrets replaced by `[REDACTED:<kind>]` and local details masked (see Redaction markers). Can be long, and can contain code outside code blocks that the agent didn't mark as pasted. Absent for automatic turns and when prompts are withheld. |
 | `response` | string, optional | The agent's final reply: the text it ended the turn with, not its narration between tool calls nor its reasoning. Fenced code blocks are replaced by `[<language> code omitted: <n> lines]` and inline code over 120 characters by `` `[<n> chars omitted]` ``; secrets are redacted and local details masked, as in `prompt`. Markdown, capped at 8000 characters (then ending in `…`). Absent without `ended_at`, when the agent ended the turn without a reply, and when prompts are withheld. |
 
 #### Tool
@@ -303,6 +307,9 @@ Free text (`turns[].prompt`, `turns[].response`, `tools[].command`) may contain:
   `google-api-key`, `stripe-key`, `anthropic-key`, `openai-key`, `npm-token`,
   `sendgrid-key`, `jwt`, `private-key`, `password`, `secret`, `high-entropy`.
   New kinds may appear.
+- `[pasted content omitted: <n> lines]` (prompts), `[<language> code omitted:
+  <n> lines]` (prompts and replies), `[N lines omitted]` and similar (commands) — content
+  the client dropped.
 - `<repo:host/path>` — the local root directory of that repository in `repos`
   (e.g. `<repo:github.com/acme/common>`).
 - `<repo>` — the local root directory of a repository not in `repos`.
