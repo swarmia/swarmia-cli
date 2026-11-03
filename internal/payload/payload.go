@@ -173,7 +173,7 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 	for _, t := range s.Turns {
 		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic}
 		if prompts {
-			turn.Prompt = masks.around(t.Text, redact.Text)
+			turn.Prompt = masks.around(t.Text, redact.Prompt)
 			turn.Response = masks.around(t.Response, redact.Response)
 		}
 		p.Turns = append(p.Turns, turn)
