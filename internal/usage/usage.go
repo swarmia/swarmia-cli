@@ -89,7 +89,8 @@ type claudeState struct {
 	LastKey string `json:"last_key,omitempty"`
 }
 
-// codexState is the model of the current turn, and the last cumulative total.
+// codexState is the model of the current turn, and the last cumulative total
+// (to tell a new response from a repeated count).
 type codexState struct {
 	Model     string      `json:"model,omitempty"`
 	LastTotal *codexUsage `json:"last_total,omitempty"`
@@ -204,12 +205,17 @@ type codexLine struct {
 		Model string `json:"model"`
 		Info  *struct {
 			TotalTokenUsage *codexUsage `json:"total_token_usage"`
+			LastTokenUsage  *codexUsage `json:"last_token_usage"`
 		} `json:"info"`
 	} `json:"payload"`
 }
 
 // codexLine folds in one rollout line if it's a turn context (the model) or a
-// token count (the cumulative usage).
+// token count. A token count whose cumulative total changed is a new
+// response, and its own usage (last_token_usage) is what's counted. The
+// total can't be differenced instead: a rollout can start from a total it
+// inherited (a subagent's starts from its parent's), and the counter can
+// restart, and either would book everything before as one response.
 func (st *fileState) codexLine(line []byte) {
 	if !bytes.Contains(line, tokenCountMarker) && !bytes.Contains(line, turnContextMarker) {
 		return
@@ -221,31 +227,39 @@ func (st *fileState) codexLine(line []byte) {
 	if l.Type == "turn_context" && l.Payload.Model != "" {
 		st.Model = l.Payload.Model
 	}
-	if l.Type != "event_msg" || l.Payload.Type != "token_count" || l.Payload.Info == nil || l.Payload.Info.TotalTokenUsage == nil {
+	info := l.Payload.Info
+	if l.Type != "event_msg" || l.Payload.Type != "token_count" || info == nil || info.TotalTokenUsage == nil {
 		return // e.g. a rate-limit update without usage
 	}
-	cur := *l.Payload.Info.TotalTokenUsage
-	last := codexUsage{}
-	if st.LastTotal != nil {
-		last = *st.LastTotal
-	}
-	if cur.TotalTokens < last.TotalTokens {
-		last = codexUsage{} // the counter restarted
-	}
-	if cur == last {
+	cur := *info.TotalTokenUsage
+	if st.LastTotal != nil && cur == *st.LastTotal {
 		return // repeated, no new response
+	}
+	resp := codexUsage{}
+	switch {
+	case info.LastTokenUsage != nil && info.LastTokenUsage.TotalTokens > 0:
+		resp = *info.LastTokenUsage
+	case st.LastTotal != nil && cur.TotalTokens >= st.LastTotal.TotalTokens:
+		// Older Codex without the response's own usage: the difference.
+		last := *st.LastTotal
+		resp = codexUsage{InputTokens: cur.InputTokens - last.InputTokens,
+			CachedInputTokens:     cur.CachedInputTokens - last.CachedInputTokens,
+			OutputTokens:          cur.OutputTokens - last.OutputTokens,
+			ReasoningOutputTokens: cur.ReasoningOutputTokens - last.ReasoningOutputTokens,
+			TotalTokens:           cur.TotalTokens - last.TotalTokens}
+	default:
+		resp = cur // the first count, or a restarted counter
 	}
 	st.LastTotal = &cur
 	model := st.Model
 	if model == "" {
 		model = "unknown"
 	}
-	cached := cur.CachedInputTokens - last.CachedInputTokens
 	t := Totals{Model: model, Speed: "standard", Requests: 1,
-		InputTokens:           cur.InputTokens - last.InputTokens - cached,
-		CacheReadInputTokens:  cached,
-		OutputTokens:          cur.OutputTokens - last.OutputTokens,
-		ReasoningOutputTokens: cur.ReasoningOutputTokens - last.ReasoningOutputTokens}
+		InputTokens:           resp.InputTokens - resp.CachedInputTokens,
+		CacheReadInputTokens:  resp.CachedInputTokens,
+		OutputTokens:          resp.OutputTokens,
+		ReasoningOutputTokens: resp.ReasoningOutputTokens}
 	st.addTotals(t)
 }
 

@@ -170,3 +170,38 @@ func TestCodexRollout(t *testing.T) {
 		t.Errorf("after a second turn: %+v", got)
 	}
 }
+
+// tokenCountWithLast renders a token_count event as current Codex writes it:
+// the cumulative total and the response's own usage.
+func tokenCountWithLast(total, last [4]int64) string {
+	u := func(v [4]int64) string {
+		return fmt.Sprintf(`{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d,"reasoning_output_tokens":%d,"total_tokens":%d}`,
+			v[0], v[1], v[2], v[3], v[0]+v[2])
+	}
+	return fmt.Sprintf(`{"timestamp":"2026-10-07T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":%s,"last_token_usage":%s},"rate_limits":null}}`,
+		u(total), u(last))
+}
+
+// A rollout that starts from a total it inherited (a subagent's starts from
+// its parent's) counts only its own responses, and so does one whose counter
+// restarted.
+func TestCodexRolloutCountsEachResponseOwnUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-10-07T12-00-00-abc.jsonl")
+	write(t, path,
+		turnContext("gpt-6"),
+		tokenCountWithLast([4]int64{9_000_000, 8_000_000, 50_000, 10_000}, [4]int64{70_000, 60_000, 400, 100}),
+		tokenCountWithLast([4]int64{9_000_000, 8_000_000, 50_000, 10_000}, [4]int64{70_000, 60_000, 400, 100}), // repeated
+		tokenCountWithLast([4]int64{9_080_000, 8_070_000, 50_500, 10_100}, [4]int64{80_000, 70_000, 500, 100}),
+		tokenCountWithLast([4]int64{90_000, 10_000, 300, 50}, [4]int64{90_000, 10_000, 300, 50}), // restarted
+	)
+	var tr Tracker
+	if err := tr.Update(CodexRollout, path); err != nil {
+		t.Fatal(err)
+	}
+	want := []Totals{{Model: "gpt-6", Speed: "standard", Requests: 3,
+		InputTokens: 10_000 + 10_000 + 80_000, CacheReadInputTokens: 60_000 + 70_000 + 10_000,
+		OutputTokens: 1200, ReasoningOutputTokens: 250}}
+	if got := tr.Totals(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("totals = %+v\nwant %+v", got, want)
+	}
+}
