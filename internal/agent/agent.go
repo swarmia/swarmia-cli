@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/codex"
@@ -84,6 +85,20 @@ var Codex = &Agent{
 // submits for a background task (<task-notification>) or a subagent reporting
 // back (<agent-message>).
 var claudeInjectedPrompt = regexp.MustCompile(`^\s*(?:<(?:task-notification|agent-message)\b[^>]*>(?s:.*?)</(?:task-notification|agent-message)>\s*)+$`)
+
+// systemReminder matches a <system-reminder> block, with the whitespace after
+// it: context the agent or one of its hooks (e.g. one creating a worktree)
+// adds to a prompt, which the developer didn't write.
+var systemReminder = regexp.MustCompile(`(?s)<system-reminder\b[^>]*>.*?</system-reminder>\s*`)
+
+// PromptText is the developer's part of a prompt: without the
+// <system-reminder> blocks added to it. A prompt made only of them is "".
+func PromptText(prompt string) string {
+	if !strings.Contains(prompt, "<system-reminder") {
+		return prompt
+	}
+	return strings.TrimSpace(systemReminder.ReplaceAllString(prompt, ""))
+}
 
 // claudeConfigDir is Claude Code's user configuration directory.
 func claudeConfigDir() (string, error) {
@@ -198,8 +213,11 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		return Event{}, false
 	}
 	ev = Event{Name: p.HookEventName, SessionID: p.SessionID, TranscriptPath: p.TranscriptPath,
-		Cwd: p.Cwd, Model: p.Model, Prompt: p.Prompt, Response: p.LastAssistant}
-	ev.Injected = a.injectedPrompt != nil && a.injectedPrompt.MatchString(p.Prompt)
+		Cwd: p.Cwd, Model: p.Model, Prompt: PromptText(p.Prompt), Response: p.LastAssistant}
+	// A prompt the agent submitted itself, or one with nothing but what it
+	// adds to prompts.
+	ev.Injected = a.injectedPrompt != nil && a.injectedPrompt.MatchString(p.Prompt) ||
+		ev.Prompt == "" && p.Prompt != ""
 	if p.ToolName != "" {
 		ev.Tool = Tool{Name: p.ToolName, UseID: p.ToolUseID, File: p.ToolInput.FilePath,
 			Edits: a.isEditTool(p.ToolName), Shell: a.isShellTool(p.ToolName)}

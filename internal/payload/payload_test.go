@@ -232,6 +232,19 @@ func TestBuildSendsTurns(t *testing.T) {
 	}
 }
 
+// Turns stored with the system reminders an agent added to the prompt are
+// sent without them; one with nothing else is the agent's, not the person's.
+func TestBuildCutsSystemRemindersFromStoredPrompts(t *testing.T) {
+	s := session()
+	reminder := "<system-reminder>\nWorkspace path: /src/app-wt\nWorkspace name: app-wt\n</system-reminder>\n"
+	s.Turns = []report.Turn{{At: at, Text: reminder + "fix it"}, {At: at, Text: reminder}}
+	p := only(t, s, contextFor(map[string]RepoInfo{"/src/app": app}))
+	want := []Turn{{StartedAt: at, Prompt: "fix it"}, {StartedAt: at, Automatic: true}}
+	if !reflect.DeepEqual(p.Turns, want) {
+		t.Errorf("turns = %+v, want %+v", p.Turns, want)
+	}
+}
+
 // A session that worked in several repositories lists them all in one
 // payload, whatever they're configured with: a developer reports to one
 // organization. Any of them opting out of prompts withholds them.
