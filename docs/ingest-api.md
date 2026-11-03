@@ -23,7 +23,9 @@ later) works in one or more of a developer's git repositories: it may be started
 inside a repository, edit a sibling one, or be started in a directory holding
 many. The CLI records the session locally, works out on the developer's machine
 which lines of which commits came from the agent, and sends Swarmia one
-**session payload** per agent session:
+**session payload** per agent session (except empty ones — no turns, tool
+calls or usage — which an agent leaves behind when it replaces a session as
+soon as it started it, or is quit right away):
 
 - session metadata: agent, model, start/end time, whether it has ended;
 - the **repositories** the session worked in;
