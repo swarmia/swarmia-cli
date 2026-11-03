@@ -193,7 +193,7 @@ cap the decompressed size, see Limits).
 |---|---|---|
 | `session_id` | string | The agent's session id (a UUID for Claude Code and Codex). Unique per agent session; together with the organization (from the token) it identifies the session. Treat it as opaque. |
 | `agent` | string | Which coding agent: `claude-code` or `codex`. Future values: `cursor`, `copilot-cli`, `gemini-cli`. Accept unknown values. |
-| `model` | string, optional | The model the session started with, as the agent reports it (e.g. `claude-opus-4-8[1m]`). Omitted if unknown. |
+| `model` | string, optional | The model the session started with, as the agent reports it (e.g. `claude-opus-4-8[1m]`): it keeps that value when the session is resumed with another. It is the agent's setting, which can be an alias, so group by `usage[].model` (the API's model ids) for the models a session used. Omitted if unknown. |
 | `matcher_version` | string (semver) | Version of the client's attribution rules. If a version is later found to attribute wrongly, the server can discount or flag results from it. |
 | `cli_version` | string | Client version that built this payload. |
 | `author_email` | string, optional | The email the developer's commits carry, in the first of `repos`: `$GIT_AUTHOR_EMAIL`, else `user.email` (never one git guesses; absent if neither is set). Use it to map the session to a Swarmia identity. It's self-asserted — anyone with the token, which may be committed, can send any email — so it's fine for analytics but must not grant access to anything. For sessions with `commits`, those commits' authors, as Swarmia knows them from the Git provider, are the stronger mapping. |

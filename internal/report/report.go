@@ -400,7 +400,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		}
 		switch ev.Name {
 		case "SessionStart":
-			if ev.Model != "" {
+			// The model the session started with: a resumed session's
+			// SessionStart reports the model it's resumed with.
+			if s.Model == "" && ev.Model != "" {
 				s.Model = ev.Model
 			}
 			s.Ended = false // resumed
