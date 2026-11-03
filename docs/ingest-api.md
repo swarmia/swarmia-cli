@@ -223,8 +223,8 @@ One bucket per (model, speed, main session vs subagents). The client doesn't
 compute cost — prices change and depend on contracts — so the server prices
 these counts. Each API response counts once (Claude Code writes one transcript
 line per content block, which the client deduplicates by message and request
-id; Codex records cumulative totals, which the client turns into per-response
-differences).
+id; Codex records each response's usage alongside a cumulative total, and the
+client counts a response when the total changes).
 
 | Field | Type | Description |
 |---|---|---|
