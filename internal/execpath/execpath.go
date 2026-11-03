@@ -9,7 +9,7 @@ import (
 
 // realPath is exe's real path if exe, read as text, doesn't lead to the same
 // file: it relies on a symlink being followed before a "..". Else ok is false.
-func realPath(exe string) (real string, ok bool) {
+func realPath(exe string) (resolved string, ok bool) {
 	clean := filepath.Clean(exe)
 	if clean == exe {
 		return "", false
@@ -21,9 +21,9 @@ func realPath(exe string) (real string, ok bool) {
 	if got, err := os.Stat(clean); err == nil && os.SameFile(got, want) {
 		return "", false
 	}
-	real, err = filepath.EvalSymlinks(exe)
+	resolved, err = filepath.EvalSymlinks(exe)
 	if err != nil {
 		return "", false
 	}
-	return real, true
+	return resolved, true
 }

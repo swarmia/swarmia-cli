@@ -12,7 +12,7 @@ func Fix() {
 	if err != nil {
 		return
 	}
-	if real, ok := realPath(exe); ok {
-		syscall.Exec(real, os.Args, os.Environ())
+	if resolved, ok := realPath(exe); ok {
+		syscall.Exec(resolved, os.Args, os.Environ())
 	}
 }

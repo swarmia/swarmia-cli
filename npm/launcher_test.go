@@ -173,14 +173,14 @@ func TestLauncherDeletedWorkingDirectory(t *testing.T) {
 	}
 	repo := filepath.Join(tmp, "repo")
 	installPnpm(t, repo, string(launcher))
-	gone := filepath.Join(tmp, "gone")
-	if err := os.Mkdir(gone, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	for _, shell := range []string{"sh", "dash", "bash", "ksh"} {
 		t.Run(shell, func(t *testing.T) {
 			if _, err := exec.LookPath(shell); err != nil {
 				t.Skipf("no %s", shell)
+			}
+			gone, err := os.MkdirTemp(tmp, "gone")
+			if err != nil {
+				t.Fatal(err)
 			}
 			script := `cd "$1" && rmdir "$1" && exec ` + shell + ` "$2"`
 			cmd := exec.Command("sh", "-c", script, "sh", gone, filepath.Join(repo, "node_modules", "@swarmia", "cli", "bin", "swarmia-cli"))
@@ -191,9 +191,6 @@ func TestLauncherDeletedWorkingDirectory(t *testing.T) {
 			}
 			if !strings.Contains(string(out), "stdin=payload") {
 				t.Errorf("binary didn't run as expected:\n%s", out)
-			}
-			if err := os.Mkdir(gone, 0o755); err != nil {
-				t.Fatal(err)
 			}
 		})
 	}

@@ -74,7 +74,10 @@ if [ "$count" -gt 0 ]; then
     if CDPATH= cd -P -- "${rel%/*}" 2>/dev/null; then
       first=$PWD/${first##*/}
     fi
-    CDPATH= cd -- "$here" || exit 1
+    if ! CDPATH= cd -- "$here" 2>/dev/null; then
+      echo "swarmia-cli: can't return to the working directory $here." >&2
+      exit 1
+    fi
   fi
   exec "$first" "$@"
 fi

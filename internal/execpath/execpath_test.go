@@ -158,7 +158,7 @@ func TestFix(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	real := filepath.Join(root, "real", "bin", "child")
+	resolved := filepath.Join(root, "real", "bin", "child")
 	// Not filepath.Join: it would clean the path.
 	bad := "links/pkg/../bin/child"
 
@@ -183,8 +183,8 @@ func TestFix(t *testing.T) {
 	for _, path := range []string{bad, root + "/" + bad} {
 		t.Run(path, func(t *testing.T) {
 			got := run(t, "fix", path)
-			if got["exe"] != real {
-				t.Errorf("exe = %q, want %q", got["exe"], real)
+			if got["exe"] != resolved {
+				t.Errorf("exe = %q, want %q", got["exe"], resolved)
 			}
 			if got["args"] != "a b|c" {
 				t.Errorf("args = %q, want %q", got["args"], "a b|c")
