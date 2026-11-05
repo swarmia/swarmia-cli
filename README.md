@@ -258,6 +258,34 @@ sends right away; `send --dry-run` shows how many would go.
 | `log-hook` | the hook itself; agents call it |
 | `version` | print version and build information |
 
+## Troubleshooting
+
+### Sessions aren't being delivered: firewall or network restrictions
+
+If sessions are recorded locally but aren't reaching Swarmia, check the
+`last_error` in `delivery.json` under `"$(swarmia-cli state-dir)"`. A connection
+timeout or network error may mean an egress firewall is blocking delivery, though
+DNS, proxy or TLS configuration can also be responsible.
+
+Run `swarmia-cli config` to check the effective endpoint. For the default
+endpoint, test HTTPS connectivity from the same environment where the CLI runs
+(including any container or development environment):
+
+```sh
+curl -v --connect-timeout 10 -o /dev/null https://hook.swarmia.com/cli
+```
+
+This sends no session data. A verified HTTPS connection and an HTTP response
+indicate the endpoint is reachable; the response need not be successful for
+this connectivity check. If the connection fails, check your network and proxy
+settings and allow outbound TCP traffic to `hook.swarmia.com` on port `443` in
+any applicable firewall. For a custom endpoint, test and allow its host and
+port instead.
+
+After connectivity is restored, background processing retries delivery with
+backoff. To attempt delivery immediately, run `swarmia-cli send` (this sends
+changed sessions to the configured endpoint).
+
 ## Internals
 
 ### Capture: `log-hook`
