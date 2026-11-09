@@ -155,3 +155,56 @@ func TestInstallCodexScopes(t *testing.T) {
 		t.Errorf("warned about stand-down user hooks:\n%s", out.String())
 	}
 }
+
+// Codex hooks are named; naming hooks an earlier version installed changes
+// their trust hash, so install says they need trusting again (and --trust
+// re-trusts them).
+func TestInstallCodexNamesHooks(t *testing.T) {
+	repo := codexRepo(t)
+	path := filepath.Join(repo, ".codex", "hooks.json")
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{trust: true}); err != nil {
+		t.Fatal(err)
+	}
+	handlers, err := codex.ReadHandlers(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range handlers {
+		if h.StatusMessage == nil || *h.StatusMessage != hookStatusMessage {
+			t.Errorf("%s: statusMessage %v", h.Event, h.StatusMessage)
+		}
+	}
+
+	// An unnamed install, as earlier versions wrote, trusted as it was.
+	data, _ := os.ReadFile(path)
+	unnamed := strings.ReplaceAll(string(data), `,
+            "statusMessage": "`+hookStatusMessage+`"`, "")
+	if unnamed == string(data) {
+		t.Fatalf("statusMessage not found in:\n%s", data)
+	}
+	os.WriteFile(path, []byte(unnamed), 0o644)
+	untrusted, err := untrustedCodexHooks(path)
+	if err != nil || len(untrusted) != 6 {
+		t.Fatalf("untrusted = %v, %v", untrusted, err)
+	}
+	configPath, _ := codex.ConfigPath()
+	if _, err := codex.Trust(configPath, untrusted); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	if err := runInstall(&out, repo, installOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "named 6 hook(s)") || !strings.Contains(out.String(), "approve the\n  6 swarmia-cli hook(s)") {
+		t.Errorf("output:\n%s", out.String())
+	}
+	out.Reset()
+	if err := runInstall(&out, repo, installOpts{trust: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "already configured") || !strings.Contains(out.String(), "Trusted 6 hook(s)") {
+		t.Errorf("output:\n%s", out.String())
+	}
+}
