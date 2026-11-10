@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/swarmia/swarmia-cli/internal/agent"
+	"github.com/swarmia/swarmia-cli/internal/deliver"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 )
@@ -277,5 +278,39 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	}
 	if len(started) != 2 {
 		t.Errorf("a large log didn't start a run: %v", started)
+	}
+}
+
+// A turn end folds the log once MinResendInterval has passed since the last
+// periodic run, so a session that never ends is still delivered.
+func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
+	var started []string
+	startBackgroundProcess = func(logPath string) { started = append(started, logPath) }
+	t.Cleanup(func() { startBackgroundProcess = func(string) {} })
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	stop := func() {
+		t.Helper()
+		if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop","session_id":"s"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stop() // starts the interval
+	stop()
+	if len(started) != 0 {
+		t.Fatalf("started = %v, want none within the interval", started)
+	}
+
+	stamp := filepath.Join(filepath.Dir(path), periodicProcessStamp)
+	past := time.Now().Add(-deliver.MinResendInterval - time.Minute)
+	if err := os.Chtimes(stamp, past, past); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	stop()
+	if len(started) != 1 || started[0] != path {
+		t.Errorf("started = %v, want one run once the interval passed", started)
 	}
 }

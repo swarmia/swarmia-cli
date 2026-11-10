@@ -348,7 +348,9 @@ and their records in the log, wait for a newer version to process them.
 - **Prune:** sessions inactive for 30 days are deleted.
 - **Deliver**, if a token is configured.
 
-It runs detached from `log-hook` at session end (or when the log passes 8 MB),
+It runs detached from `log-hook` at session end, when the log passes 8 MB, and at
+the end of a turn once 15 minutes have passed since the last such run (so a
+session that never ends, as in a container that is killed, still delivers),
 and before `report`. A lock keeps it to one run at a time.
 
 ### Attribution
