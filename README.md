@@ -258,6 +258,14 @@ sends right away; `send --dry-run` shows how many would go.
 | `log-hook` | the hook itself; agents call it |
 | `version` | print version and build information |
 
+## Troubleshooting
+
+### Why aren't my sessions being delivered?
+
+Ensure your firewall allows outbound connections to the backend endpoint
+(default: `https://hook.swarmia.com/cli`, TCP `hook.swarmia.com:443`). Run
+`swarmia-cli config` to check your configured endpoint.
+
 ## Internals
 
 ### Capture: `log-hook`
