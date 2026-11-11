@@ -309,8 +309,7 @@ func shouldProcess(ev agent.Event, logPath string) bool {
 const periodicProcessStamp = "periodic-process"
 
 // periodicProcessDue reports whether MinResendInterval has passed since the
-// last periodic run, and if so restarts the interval. The first turn end only
-// starts it: a session that ends soon after is delivered by SessionEnd anyway.
+// last periodic run (or there was none), and if so restarts the interval.
 func periodicProcessDue(stateDir string, now time.Time) bool {
 	stamp := filepath.Join(stateDir, periodicProcessStamp)
 	fi, err := os.Stat(stamp)
@@ -320,8 +319,5 @@ func periodicProcessDue(stateDir string, now time.Time) bool {
 	if err := os.WriteFile(stamp, nil, 0o600); err != nil {
 		return false
 	}
-	if err := os.Chtimes(stamp, now, now); err != nil {
-		return false
-	}
-	return fi != nil
+	return os.Chtimes(stamp, now, now) == nil
 }

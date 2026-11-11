@@ -260,6 +260,10 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	// A periodic run just happened, so the turn end below isn't due one.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), periodicProcessStamp), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, ev := range []string{"Stop", "PreToolUse", "SessionEnd"} {
 		if err := runLogHook(strings.NewReader(`{"hook_event_name":"` + ev + `","session_id":"s"}`)); err != nil {
@@ -281,8 +285,8 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	}
 }
 
-// A turn end folds the log once MinResendInterval has passed since the last
-// periodic run, so a session that never ends is still delivered.
+// A turn end folds the log when no periodic run has happened within
+// MinResendInterval, so a session that never ends is still delivered.
 func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 	var started []string
 	startBackgroundProcess = func(logPath string) { started = append(started, logPath) }
@@ -297,10 +301,10 @@ func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 		}
 	}
 
-	stop() // starts the interval
 	stop()
-	if len(started) != 0 {
-		t.Fatalf("started = %v, want none within the interval", started)
+	stop()
+	if len(started) != 1 || started[0] != path {
+		t.Fatalf("started = %v, want one run for the first turn end only", started)
 	}
 
 	stamp := filepath.Join(filepath.Dir(path), periodicProcessStamp)
@@ -310,7 +314,7 @@ func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 	}
 	stop()
 	stop()
-	if len(started) != 1 || started[0] != path {
-		t.Errorf("started = %v, want one run once the interval passed", started)
+	if len(started) != 2 {
+		t.Errorf("started = %v, want a second run once the interval passed", started)
 	}
 }
