@@ -77,11 +77,11 @@ as a budget:
 |---|---|
 | Prompts, edits, reads and other tool calls | ~5–7 ms per event: an append to a local file and a read of `.git/HEAD`, with no `git` process |
 | Shell commands (Bash) | read-only ones (`grep`, `cat`, `sed -n`, `git log`, …): like other tool calls; the rest: one `git status` before and after, for the snapshot: ~35 ms per command in a small repository, ~140 ms in a 14k-file one, at most 500 ms per side |
-| Session end | starts the background run and returns immediately |
+| Session end, and a turn end at most every 15 minutes | starts the background run and returns immediately |
 
 - Anything heavier — folding the log, matching edits to commits, delivery —
-  runs in a detached background process after the session ends, never while the
-  agent waits.
+  runs in a detached background process after a turn or the session ends, never
+  while the agent waits.
 - Hooks are passive: they always exit 0 and never print to the agent, so a
   failure can't block or derail a tool call.
 - Concurrent hooks are serialized with file locks; nothing is written into your
@@ -351,7 +351,9 @@ and their records in the log, wait for a newer version to process them.
 It runs detached from `log-hook` at session end, when the log passes 8 MB, and at
 the end of a turn at most every 15 minutes (so a session that never ends, as in a
 container that is killed, still delivers),
-and before `report`. A lock keeps it to one run at a time.
+and before `report`. A lock keeps it to one run at a time: the run at session end
+waits for one in progress, since that one may have read the log before the
+session's last events, and the others skip.
 
 ### Attribution
 

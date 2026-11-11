@@ -252,11 +252,16 @@ func TestLogHookSkipsReadOnlyShellCommands(t *testing.T) {
 	}
 }
 
-// Session end, or a log past the size threshold, starts a background fold.
+// Session end, or a log past the size threshold, starts a background fold;
+// only session end's waits for a run in progress.
 func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	var started []string
-	startBackgroundProcess = func(logPath string) { started = append(started, logPath) }
-	t.Cleanup(func() { startBackgroundProcess = func(string) {} })
+	var waits []bool
+	startBackgroundProcess = func(logPath string, wait bool) {
+		started = append(started, logPath)
+		waits = append(waits, wait)
+	}
+	t.Cleanup(func() { startBackgroundProcess = func(string, bool) {} })
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
@@ -281,7 +286,10 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(started) != 2 {
-		t.Errorf("a large log didn't start a run: %v", started)
+		t.Fatalf("a large log didn't start a run: %v", started)
+	}
+	if !waits[0] || waits[1] {
+		t.Errorf("waits = %v, want session end's run to wait and the large log's not to", waits)
 	}
 }
 
@@ -289,8 +297,12 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 // MinResendInterval, so a session that never ends is still delivered.
 func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 	var started []string
-	startBackgroundProcess = func(logPath string) { started = append(started, logPath) }
-	t.Cleanup(func() { startBackgroundProcess = func(string) {} })
+	var waits []bool
+	startBackgroundProcess = func(logPath string, wait bool) {
+		started = append(started, logPath)
+		waits = append(waits, wait)
+	}
+	t.Cleanup(func() { startBackgroundProcess = func(string, bool) {} })
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
@@ -315,6 +327,9 @@ func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 	stop()
 	stop()
 	if len(started) != 2 {
-		t.Errorf("started = %v, want a second run once the interval passed", started)
+		t.Fatalf("started = %v, want a second run once the interval passed", started)
+	}
+	if waits[0] || waits[1] {
+		t.Errorf("waits = %v, want turn-end runs to skip when one is in progress", waits)
 	}
 }

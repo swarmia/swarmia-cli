@@ -130,7 +130,9 @@ func runLogHook(stdin io.Reader) error {
 		return err
 	}
 	if shouldProcess(ev, path) {
-		startBackgroundProcess(path)
+		// Waiting at session end, so a periodic run already in progress can't
+		// leave the session's last events unsent.
+		startBackgroundProcess(path, ev.Name == "SessionEnd")
 	}
 	return nil
 }
