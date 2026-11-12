@@ -64,6 +64,7 @@ type Turn struct {
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	Automatic bool       `json:"automatic,omitempty"`
+	Skill     string     `json:"skill,omitempty"`
 	Prompt    string     `json:"prompt,omitempty"`
 	Response  string     `json:"response,omitempty"`
 }
@@ -187,6 +188,9 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 			turn.Response = masks.around(t.Response, redact.Response)
 		}
 		p.Turns = append(p.Turns, turn)
+	}
+	if s.Usage != nil {
+		typedSkills(p.Turns, s.Usage.Skills())
 	}
 	for _, slug := range slugs {
 		r := Repo{Repo: slug}
@@ -515,4 +519,22 @@ func parseRemote(remote string) (host, path string, ssh bool) {
 		path = p // as url.Parse gives it for URLs: My%20Project → My Project
 	}
 	return host, path, true
+}
+
+// typedSkills marks each skill the developer typed on the turn it started:
+// the last prompt submitted by then. Hook times are whole seconds, the
+// transcript's aren't, hence the second's slack.
+func typedSkills(turns []Turn, skills []usage.Skill) {
+	for _, sk := range skills {
+		for i := len(turns) - 1; i >= 0; i-- {
+			t := &turns[i]
+			if t.Automatic || t.StartedAt.After(sk.At.Add(time.Second)) {
+				continue
+			}
+			if t.Skill == "" {
+				t.Skill = sk.Name
+			}
+			break
+		}
+	}
 }
