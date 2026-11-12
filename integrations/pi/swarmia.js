@@ -74,8 +74,16 @@ async function logHook(ctx, event) {
       const child = spawn(binary, ["log-hook", "--agent", "pi"], {
         cwd: ctx.cwd, env, stdio: ["pipe", "ignore", "ignore"],
       });
-      const timer = setTimeout(() => child.kill(), timeoutMs);
       const finish = () => { clearTimeout(timer); done(); };
+      const timer = setTimeout(() => {
+        // Do not wait for close: a descendant may still hold a pipe open, or a
+        // broken hook may ignore SIGTERM. Tracking must never stall Pi.
+        try {
+          child.stdin.destroy();
+          child.kill("SIGKILL");
+          child.unref();
+        } finally { finish(); }
+      }, timeoutMs);
       child.on("error", finish);
       child.on("close", finish);
       child.stdin.on("error", () => {});
