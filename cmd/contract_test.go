@@ -54,9 +54,13 @@ func TestReportJSONFollowsTheContract(t *testing.T) {
 	projectIn(t, parent)
 
 	transcript := filepath.Join(t.TempDir(), "s.jsonl")
-	writeFile(t, transcript, `{"type":"assistant","requestId":"r1","message":{"id":"m1","model":"claude-test","usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":7}}}`+"\n")
+	usageLine := `{"type":"assistant","requestId":"r1","message":{"id":"m1","model":"claude-test","usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":7}}}` + "\n"
+	writeFile(t, transcript, usageLine)
 	hook(t, map[string]any{"hook_event_name": "SessionStart", "model": "claude-test", "transcript_path": transcript, "cwd": parent})
 	hook(t, map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "add the helper, the key is ghp_" + strings.Repeat("a1B2", 9), "cwd": parent})
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	writeFile(t, transcript, usageLine+`{"type":"user","timestamp":"`+now+`","message":{"content":"<command-name>/helper</command-name>"}}`+"\n"+
+		`{"type":"user","timestamp":"`+now+`","isMeta":true,"message":{"content":"Base directory for this skill: /x"}}`+"\n")
 	hook(t, map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Read", "cwd": parent,
 		"tool_input": map[string]any{"file_path": filepath.Join(app, "README.md")}})
 	hook(t, map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Skill", "cwd": app,

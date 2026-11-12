@@ -68,6 +68,7 @@ type Turn struct {
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	Automatic bool       `json:"automatic,omitempty"`
+	Skill     string     `json:"skill,omitempty"`
 	Prompt    string     `json:"prompt,omitempty"`
 	Response  string     `json:"response,omitempty"`
 }
@@ -194,6 +195,9 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 			turn.Response = masks.around(t.Response, redact.Response)
 		}
 		p.Turns = append(p.Turns, turn)
+	}
+	if s.Usage != nil {
+		typedSkills(p.Turns, s.Usage.Skills(), masks)
 	}
 	for _, slug := range slugs {
 		r := Repo{Repo: slug}
@@ -528,12 +532,30 @@ func parseRemote(remote string) (host, path string, ssh bool) {
 // directory-scoped "apps/web:name".
 var skillName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$`)
 
-// skill is the name of a skill as sent: the model chooses it, so anything
-// that doesn't look like a skill's name (a path, a sentence) isn't sent, and
-// what does is redacted and masked like a command.
+// skill is the name of a skill as sent. It's what the model or the developer
+// wrote, so anything that doesn't look like a skill's name (a path, a
+// sentence) isn't sent, and what does is redacted and masked like a command.
 func (m masks) skill(name string) string {
 	if !skillName.MatchString(name) {
 		return ""
 	}
 	return m.apply(redact.Text(name))
+}
+
+// typedSkills marks each skill the developer typed on the turn it started:
+// the last prompt submitted by then. Hook times are whole seconds, the
+// transcript's aren't, hence the second's slack.
+func typedSkills(turns []Turn, skills []usage.Skill, masks masks) {
+	for _, sk := range skills {
+		for i := len(turns) - 1; i >= 0; i-- {
+			t := &turns[i]
+			if t.Automatic || t.StartedAt.After(sk.At.Add(time.Second)) {
+				continue
+			}
+			if t.Skill == "" {
+				t.Skill = masks.skill(sk.Name)
+			}
+			break
+		}
+	}
 }

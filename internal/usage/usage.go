@@ -3,8 +3,10 @@
 // counts; transcripts do.
 //
 // Only usage fields are parsed — never message content — and nothing but the
-// totals is kept. Reading is incremental: each file keeps a byte offset, so a
-// long session's transcript is read once overall, not once per run.
+// totals is kept, with one exception: the names of the skills the developer
+// invoked by typing their command (see Skill). Reading is incremental: each
+// file keeps a byte offset, so a long session's transcript is read once
+// overall, not once per run.
 //
 // Claude Code writes a transcript per session, plus one per subagent under
 // <transcript>/subagents/. Each API response is written once per content
@@ -29,8 +31,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Totals is one bucket of usage: a model at a speed, in the main session or in
@@ -79,6 +83,7 @@ type Tracker struct {
 type fileState struct {
 	Offset int64              `json:"offset"`
 	Totals map[string]*Totals `json:"totals,omitempty"`
+	Skills []Skill            `json:"skills,omitempty"`
 	claudeState
 	codexState
 }
@@ -87,6 +92,16 @@ type fileState struct {
 // repeat its usage.
 type claudeState struct {
 	LastKey string `json:"last_key,omitempty"`
+	// Command is the last slash command the transcript recorded, until a
+	// skill's content confirms it was a skill (see claudeSkill).
+	Command string `json:"command,omitempty"`
+}
+
+// Skill is a skill the developer invoked by typing its command (/name), as
+// opposed to one the model loaded with its Skill tool, which hooks report.
+type Skill struct {
+	At   time.Time `json:"at"`
+	Name string    `json:"name"`
 }
 
 // codexState is the model of the current turn, and the last cumulative total
@@ -152,6 +167,16 @@ func (t *Tracker) Totals() []Totals {
 		}
 		return out[a].Speed < out[b].Speed
 	})
+	return out
+}
+
+// Skills returns the skills the developer invoked, in order.
+func (t *Tracker) Skills() []Skill {
+	var out []Skill
+	for _, st := range t.Files {
+		out = append(out, st.Skills...)
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].At.Before(out[b].At) })
 	return out
 }
 
@@ -317,8 +342,84 @@ func (st *fileState) read(path string, format Format, subagent bool) error {
 	return nil
 }
 
-// claudeLine folds in one transcript line if it's an API response's usage.
+// A typed command is recorded as a user message holding
+// <command-name>/name</command-name>. Built-in commands are recorded the same
+// way, so only the skill's content that follows confirms a skill: a meta
+// message starting with skillMarker. When the model loads a skill with its
+// Skill tool, that message names the tool call (sourceToolUseID) instead.
+var (
+	commandMarker = []byte("<command-name>")
+	skillMarker   = []byte("Base directory for this skill:")
+	commandName   = regexp.MustCompile(`<command-name>/?([^<\s]+)</command-name>`)
+)
+
+// skillEntry is the part of a transcript line claudeSkill needs.
+type skillEntry struct {
+	Type            string          `json:"type"`
+	Timestamp       time.Time       `json:"timestamp"`
+	IsMeta          bool            `json:"isMeta"`
+	SourceToolUseID string          `json:"sourceToolUseID"`
+	Message         json.RawMessage `json:"message"`
+}
+
+// claudeSkill notes a typed command, and records it as a skill when the
+// skill's content follows.
+func (st *fileState) claudeSkill(line []byte) {
+	command, skill := bytes.Contains(line, commandMarker), bytes.Contains(line, skillMarker)
+	if !command && !skill {
+		return
+	}
+	var e skillEntry
+	if json.Unmarshal(line, &e) != nil || e.Type != "user" {
+		return
+	}
+	text := messageText(e.Message)
+	switch {
+	case e.IsMeta && strings.HasPrefix(text, string(skillMarker)):
+		if e.SourceToolUseID == "" && st.Command != "" {
+			st.Skills = append(st.Skills, Skill{At: e.Timestamp.UTC(), Name: st.Command})
+		}
+		st.Command = ""
+	case !e.IsMeta:
+		if m := commandName.FindStringSubmatch(text); m != nil {
+			st.Command = m[1]
+		}
+	}
+}
+
+// messageText is a user message's text: its content string, or its text
+// blocks joined.
+func messageText(msg json.RawMessage) string {
+	var m struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(msg, &m) != nil {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(m.Content, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	json.Unmarshal(m.Content, &blocks)
+	var b strings.Builder
+	for _, bl := range blocks {
+		if bl.Type == "text" {
+			b.WriteString(bl.Text)
+		}
+	}
+	return b.String()
+}
+
+// claudeLine folds in one transcript line if it's an API response's usage,
+// and in the main transcript notes typed skills.
 func (st *fileState) claudeLine(line []byte, subagent bool) {
+	if !subagent {
+		st.claudeSkill(line)
+	}
 	if !bytes.Contains(line, usageMarker) {
 		return
 	}
