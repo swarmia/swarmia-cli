@@ -67,8 +67,9 @@ func (t *Totals) add(o Totals) {
 type Format int
 
 const (
-	ClaudeTranscript Format = iota // Claude Code's session transcript
-	CodexRollout                   // Codex's session rollout
+	ClaudeTranscript  Format = iota // Claude Code's session transcript
+	CodexRollout                    // Codex's session rollout
+	UnknownTranscript               // usage is not yet supported
 )
 
 // Tracker accumulates usage across a session's transcript files.
@@ -100,6 +101,9 @@ type codexState struct {
 // Claude Code, its subagents' transcripts) since the last call. A file that
 // shrank was rewritten, so it is re-read from the start.
 func (t *Tracker) Update(format Format, transcriptPath string) error {
+	if format == UnknownTranscript {
+		return nil
+	}
 	if !filepath.IsAbs(transcriptPath) || !strings.HasSuffix(transcriptPath, ".jsonl") {
 		return nil // not a transcript path we recognise
 	}

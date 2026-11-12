@@ -81,6 +81,20 @@ var Codex = &Agent{
 	edits:           attribution.CodexEdits,
 }
 
+// Pi transcript usage is not yet supported.
+var Pi = &Agent{
+	Name:            "pi",
+	Title:           "Pi",
+	ConfigDir:       ".pi",
+	hooksFiles:      map[Scope]string{},
+	Transcript:      usage.UnknownTranscript,
+	hooksAtRepoRoot: true,
+	reportsFailures: true,
+	isEditTool:      func(name string) bool { return name == "edit" || name == "write" },
+	isShellTool:     func(name string) bool { return name == "bash" },
+	edits:           attribution.PiEdits,
+}
+
 // claudeInjectedPrompt matches a prompt made only of the blocks Claude Code
 // submits for a background task (<task-notification>) or a subagent reporting
 // back (<agent-message>).
@@ -113,7 +127,7 @@ func claudeConfigDir() (string, error) {
 }
 
 // All lists the supported agents.
-var All = []*Agent{ClaudeCode, Codex}
+var All = []*Agent{ClaudeCode, Codex, Pi}
 
 // Lookup returns the agent with the given name, or nil.
 func Lookup(name string) *Agent {
