@@ -163,6 +163,10 @@ type Tool struct {
 	File string
 	// Command is the shell command it runs, if any.
 	Command string
+	// Skill is the skill a skill tool call loads (Claude Code's Skill tool),
+	// e.g. "db-migration" or "plugin:name". Its arguments aren't kept: they
+	// are free text, like a prompt.
+	Skill string
 	// Edits is set for the agent's file-editing tools, whose payloads carry
 	// the edits (see Agent.Edits).
 	Edits bool
@@ -177,6 +181,9 @@ type Tool struct {
 	// nonzero exits (grep finding nothing) as success.
 	ExitCode *int
 }
+
+// skillTool is Claude Code's tool for loading a skill.
+const skillTool = "Skill"
 
 // Tool call statuses.
 const (
@@ -204,6 +211,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		ToolInput      struct {
 			FilePath string     `json:"file_path"`
 			Command  textOrNone `json:"command"`
+			Skill    textOrNone `json:"skill"`
 		} `json:"tool_input"`
 		ToolResponse json.RawMessage `json:"tool_response"`
 		Error        string          `json:"error"`
@@ -223,6 +231,9 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 			Edits: a.isEditTool(p.ToolName), Shell: a.isShellTool(p.ToolName)}
 		if !ev.Tool.Edits { // an edit tool's command, if any, is its patch
 			ev.Tool.Command = string(p.ToolInput.Command)
+		}
+		if p.ToolName == skillTool {
+			ev.Tool.Skill = string(p.ToolInput.Skill)
 		}
 		if a.reportsFailures {
 			ev.Tool.Status, ev.Tool.ExitCode = toolStatus(p.HookEventName, p.ToolResponse, p.Error, p.IsInterrupt, ev.Tool.Shell)

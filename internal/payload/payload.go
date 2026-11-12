@@ -74,6 +74,7 @@ type Tool struct {
 	Repo     string    `json:"repo,omitempty"`
 	File     string    `json:"file,omitempty"`
 	Command  string    `json:"command,omitempty"`
+	Skill    string    `json:"skill,omitempty"`
 	Status   string    `json:"status,omitempty"`
 	ExitCode *int      `json:"exit_code,omitempty"`
 }
@@ -198,7 +199,7 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		p.Repos = append(p.Repos, r)
 	}
 	for _, tl := range s.Tools {
-		tool := Tool{At: tl.At, Name: tl.Name, Status: tl.Status, ExitCode: tl.ExitCode}
+		tool := Tool{At: tl.At, Name: tl.Name, Skill: tl.Skill, Status: tl.Status, ExitCode: tl.ExitCode}
 		if tool.Repo = slugOf(tl.Root); tool.Repo != "" {
 			tool.File = relativePath(tl.Root, tl.File)
 		}
