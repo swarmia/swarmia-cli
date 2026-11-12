@@ -137,6 +137,7 @@ func TestBuildSendsToolStatus(t *testing.T) {
 	s.Tools = []report.Tool{
 		{At: at, Name: "Bash", Root: "/src/app", Command: "go test ./...", Status: "failed", ExitCode: &code},
 		{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/x.go", Status: "ok"},
+		{At: at, Name: "Skill", Root: "/src/app", Skill: "db-migration", Status: "ok"},
 		{At: at, Name: "apply_patch"}, // an agent that doesn't say
 	}
 	data, err := json.Marshal(only(t, s, contextFor(map[string]RepoInfo{"/src/app": app})).Tools)
@@ -145,6 +146,7 @@ func TestBuildSendsToolStatus(t *testing.T) {
 	}
 	want := `[{"at":"2026-10-01T12:00:00Z","name":"Bash","repo":"github.com/acme/app","command":"go test ./...","status":"failed","exit_code":1},` +
 		`{"at":"2026-10-01T12:00:00Z","name":"Edit","repo":"github.com/acme/app","file":"x.go","status":"ok"},` +
+		`{"at":"2026-10-01T12:00:00Z","name":"Skill","repo":"github.com/acme/app","skill":"db-migration","status":"ok"},` +
 		`{"at":"2026-10-01T12:00:00Z","name":"apply_patch"}]`
 	if string(data) != want {
 		t.Errorf("tools =\n%s\nwant\n%s", data, want)
