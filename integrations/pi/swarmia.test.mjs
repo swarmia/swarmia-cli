@@ -17,21 +17,24 @@ test("project extension brackets bash calls and ignores other tools", async () =
     await chmod(binary, 0o755);
     const handlers = {};
     (await import(pathToFileURL(extension))).default({ on: (name, fn) => { handlers[name] = fn; } });
-    const ctx = { cwd: root, model: { id: "test-model" }, sessionManager: { getSessionId: () => "session" } };
+    const ctx = { cwd: root, model: { id: "test-model" }, sessionManager: { getSessionId: () => "session", getSessionFile: () => "/tmp/session.jsonl" } };
     await handlers.session_start({}, ctx);
     await handlers.tool_call({ toolName: "read", input: {} }, ctx);
     await handlers.tool_call({ toolName: "bash", toolCallId: "nested/1", input: { command: "echo hi" } }, ctx);
     await handlers.tool_result({ toolName: "bash", toolCallId: "nested/1", input: { command: "echo hi" }, isError: true, content: [{ text: "secret output" }] }, ctx);
-    await handlers.session_shutdown({}, ctx);
+    await handlers.session_shutdown({ reason: "reload" }, ctx);
+    await handlers.session_start({ reason: "reload" }, ctx);
+    await handlers.session_shutdown({ reason: "quit" }, ctx);
     const events = (await readFile(join(root, "events"), "utf8")).trim().split("\n").map(JSON.parse);
-    assert.deepEqual(events.map((e) => e.hook_event_name), ["SessionStart", "PreToolUse", "PostToolUseFailure", "SessionEnd"]);
+    assert.deepEqual(events.map((e) => e.hook_event_name), ["SessionStart", "PreToolUse", "PostToolUseFailure", "SessionFlush", "SessionStart", "SessionEnd"]);
+    assert.equal(events[0].transcript_path, "/tmp/session.jsonl");
     assert.equal(events[1].tool_use_id, "nested/1");
     assert.equal(events[2].tool_input.command, "echo hi");
     assert.ok(!JSON.stringify(events).includes("secret output"));
     assert.equal((await readFile(join(root, "args"), "utf8")).trim().split("\n")[0], "log-hook --agent pi");
     await rm(binary);
     await handlers.tool_call({ toolName: "bash", toolCallId: "missing", input: { command: "true" } }, ctx);
-    assert.equal((await readFile(join(root, "events"), "utf8")).trim().split("\n").length, 4);
+    assert.equal((await readFile(join(root, "events"), "utf8")).trim().split("\n").length, 6);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

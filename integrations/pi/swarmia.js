@@ -63,6 +63,7 @@ async function logHook(ctx, event) {
     if (!binary) return;
     const payload = JSON.stringify({
       session_id: ctx.sessionManager.getSessionId(),
+      transcript_path: ctx.sessionManager.getSessionFile?.(),
       cwd: ctx.cwd,
       model: ctx.model?.id,
       ...event,
@@ -85,11 +86,32 @@ async function logHook(ctx, event) {
   }
 }
 
+// Only text blocks belong in the event log: images, reasoning, tool calls,
+// and tool results must never be copied into a prompt or response.
+function messageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text).join("\n");
+}
+
 export default function (pi) {
   const pending = new Map();
   pi.on("session_start", async (_event, ctx) => {
     pending.clear();
     await logHook(ctx, { hook_event_name: "SessionStart" });
+  });
+  pi.on("message_end", async (event, ctx) => {
+    const message = event.message;
+    if (message?.role === "user") {
+      // message_end also fires for queued steering and follow-up messages,
+      // unlike before_agent_start which only sees the run's initial prompt.
+      await logHook(ctx, { hook_event_name: "UserPromptSubmit", prompt: messageText(message.content) });
+    } else if (message?.role === "assistant" && message.stopReason === "stop") {
+      // Do not record intermediate tool-call narration, failed retries,
+      // reasoning blocks, or partial responses from aborted runs.
+      await logHook(ctx, { hook_event_name: "Stop", last_assistant_message: messageText(message.content) });
+    }
   });
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "bash") {
@@ -156,7 +178,9 @@ export default function (pi) {
       pending.delete(event.toolCallId);
     }
   });
-  pi.on("session_shutdown", async (_event, ctx) => {
-    await logHook(ctx, { hook_event_name: "SessionEnd" });
+  pi.on("session_shutdown", async (event, ctx) => {
+    // A reload replaces the extension runtime, not the session. Flush pending
+    // events without marking it ended; quit and session replacement do end it.
+    await logHook(ctx, { hook_event_name: event.reason === "reload" ? "SessionFlush" : "SessionEnd" });
   });
 }

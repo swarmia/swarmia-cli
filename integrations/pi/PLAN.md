@@ -43,14 +43,22 @@ remain a release-readiness task below.
 
 ### Session metadata and privacy
 
-- [ ] Capture user prompts and assistant responses, including queued messages,
-  retries, session resume and forks; respect `SWARMIA_PROMPTS=0`.
-- [ ] Read Pi transcript usage incrementally without double-counting; handle
-  model switches and sessions without a transcript.
-- [ ] Verify lifecycle semantics for shutdown, reload, session replacement,
-  crash recovery and long-running sessions.
-- [ ] Check that no tool output or source code is delivered and that local
-  captures and temporary state follow existing privacy and retention rules.
+- [x] Capture user prompts and final assistant responses, including queued
+  messages; ignore failed retries and honor `SWARMIA_PROMPTS=0` during delivery.
+  Unit tests cover retries; real Pi runs covered a queued message, resume,
+  fork and an opt-out payload.
+- [x] Read assistant-message usage incrementally, group by model, and handle
+  missing transcripts and copied fork history without double-counting. Validated
+  real resumed and forked Pi sessions against their transcript totals.
+- [x] Investigate tool and compaction usage: count separately recorded Pi cache
+  warming; omit aggregated tool, compaction and branch-summary usage because
+  their model and request counts are not reliably recorded. Document the gap.
+- [x] Verify shutdown, reload, session replacement, crash and long-running
+  behavior. Reload flushes without ending the session; a hard crash cannot emit
+  an end event, and pending events are folded on a later processing run.
+- [x] Verify tool output and captured file contents are excluded from payloads,
+  prompt opt-out applies, and local logs and session files are private. Existing
+  retention and free-text privacy limitations remain documented.
 
 ### Installation and distribution
 
@@ -64,6 +72,12 @@ remain a release-readiness task below.
   if multiple extension copies are loaded.
 - [ ] Document setup, supported scopes, limitations and troubleshooting.
 
+### Attribution accuracy
+
+- [ ] Resolve the pre-image race for concurrent external writers and later
+  input-mutating extensions, or explicitly accept and document its accuracy
+  impact before production use.
+
 ### Validation and release readiness
 
 - [x] Run Go unit tests and prototype extension tests.
@@ -71,9 +85,6 @@ remain a release-readiness task below.
   calls, nested tools, multiple repositories and installation.
 - [ ] Add a real-Pi end-to-end scenario covering capture, commit attribution,
   processing and privacy-preserving payloads.
-- [ ] Resolve the pre-image race for concurrent external writers and later
-  input-mutating extensions, or explicitly accept and document its accuracy
-  impact before production use.
 - [ ] Measure hook latency and verify missing binaries, timeouts and failures do
   not block Pi or leak tool output.
 - [ ] Review the external agent identifier and payload compatibility before

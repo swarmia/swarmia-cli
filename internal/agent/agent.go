@@ -81,13 +81,12 @@ var Codex = &Agent{
 	edits:           attribution.CodexEdits,
 }
 
-// Pi transcript usage is not yet supported.
 var Pi = &Agent{
 	Name:            "pi",
 	Title:           "Pi",
 	ConfigDir:       ".pi",
 	hooksFiles:      map[Scope]string{},
-	Transcript:      usage.UnknownTranscript,
+	Transcript:      usage.PiTranscript,
 	hooksAtRepoRoot: true,
 	reportsFailures: true,
 	isEditTool:      func(name string) bool { return name == "edit" || name == "write" },

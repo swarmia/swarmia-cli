@@ -19,6 +19,10 @@
 // and reasoning within output tokens; Totals follows Claude's convention, input
 // tokens excluding cache reads.
 //
+// Pi writes one assistant message per model response. Forks copy entries from
+// their parent transcript, so copied entries are excluded from the fork's
+// usage; new responses are counted in their own session.
+//
 // Cost isn't computed here: prices change and depend on contracts, so the
 // server derives cost from these counts.
 package usage
@@ -70,6 +74,7 @@ const (
 	ClaudeTranscript  Format = iota // Claude Code's session transcript
 	CodexRollout                    // Codex's session rollout
 	UnknownTranscript               // usage is not yet supported
+	PiTranscript                    // Pi's session transcript
 )
 
 // Tracker accumulates usage across a session's transcript files.
@@ -310,10 +315,21 @@ func (st *fileState) read(path string, format Format, subagent bool) error {
 	if st.Totals == nil {
 		st.Totals = map[string]*Totals{}
 	}
+	var inherited map[string]bool
+	if format == PiTranscript && st.Offset == 0 {
+		var err error
+		inherited, err = piInheritedEntries(path)
+		if err != nil {
+			return err // do not attribute inherited usage when the parent is unavailable
+		}
+	}
 	for _, line := range bytes.Split(data[:end], []byte("\n")) {
-		if format == CodexRollout {
+		switch format {
+		case CodexRollout:
 			st.codexLine(line)
-		} else {
+		case PiTranscript:
+			st.piLine(line, inherited)
+		case ClaudeTranscript:
 			st.claudeLine(line, subagent)
 		}
 	}
