@@ -38,7 +38,7 @@ async function readText(path, missingIsEmpty = false) {
         afterStat.mtimeMs !== stat.mtimeMs || afterStat.ctimeMs !== stat.ctimeMs) return;
     const bytes = buffer.subarray(0, bytesRead);
     if (bytes.includes(0)) return;
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch (err) {
     if (err.code === "ENOENT" && missingIsEmpty) return "";
   } finally {

@@ -73,6 +73,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Test Pi extension
+        run: node --test integrations/pi/*.test.mjs
+
       - run: npm install -g pnpm@10.33.2
 
       - name: Build and smoke-test the npm packages

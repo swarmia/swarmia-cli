@@ -72,5 +72,13 @@ test("captures pre-images for edits and writes and skips overlapping calls", asy
     await handlers.tool_result({ ...afterReload, isError: false }, ctx);
     const reloaded = (await readFile(join(root, "events"), "utf8")).trim().split("\n").map(JSON.parse).at(-1);
     assert.equal(reloaded.after_file, "reloaded");
+    const bom = { toolName: "write", toolCallId: "bom", input: { path: "file", content: "\ufeffnew\n" } };
+    await writeFile(target, "\ufeffold\n");
+    await handlers.tool_call(bom, ctx);
+    await writeFile(target, bom.input.content);
+    await handlers.tool_result({ ...bom, isError: false }, ctx);
+    const bomEvent = (await readFile(join(root, "events"), "utf8")).trim().split("\n").map(JSON.parse).at(-1);
+    assert.equal(bomEvent.original_file, "\ufeffold\n");
+    assert.equal(bomEvent.after_file, "\ufeffnew\n");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
