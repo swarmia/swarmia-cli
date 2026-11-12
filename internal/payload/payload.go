@@ -39,6 +39,10 @@ type Payload struct {
 	StartedAt      time.Time `json:"started_at"`
 	EndedAt        time.Time `json:"ended_at"`
 	Ended          bool      `json:"ended"`
+	// LastActivityAt is the session's last prompt, reply or tool call: unlike
+	// EndedAt, not its start or end, which can come long after (a resumed
+	// session, a terminal closed days later). Nil if it had none.
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 	// Turns are always sent; their prompts and replies only if
 	// PromptsWithheld isn't set.
 	Turns           []Turn   `json:"turns"`
@@ -173,6 +177,7 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 	if s.Usage != nil {
 		p.Usage = s.Usage.Totals()
 	}
+	p.LastActivityAt = lastActivity(s)
 	if p.Model == "" {
 		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start
 	}
@@ -235,6 +240,30 @@ func isEmpty(s *report.Session) bool {
 		}
 	}
 	return true
+}
+
+// lastActivity is the time of s's last prompt, reply or tool call, nil if it
+// had none.
+func lastActivity(s *report.Session) *time.Time {
+	var last time.Time
+	later := func(at time.Time) {
+		if at.After(last) {
+			last = at
+		}
+	}
+	for _, t := range s.Turns {
+		later(t.At)
+		if t.EndedAt != nil {
+			later(*t.EndedAt)
+		}
+	}
+	for _, t := range s.Tools {
+		later(t.At)
+	}
+	if last.IsZero() {
+		return nil
+	}
+	return &last
 }
 
 // masks is the replacements that hide where things live on this machine, in
