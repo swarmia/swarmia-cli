@@ -290,9 +290,9 @@ func snapshotMarker(err error) string {
 }
 
 // shouldProcess decides when to fold the log in the background: when a session
-// ends, and whenever the log has grown large (long-running sessions).
+// ends or asks to flush, and whenever the log has grown large (long-running sessions).
 func shouldProcess(ev agent.Event, logPath string) bool {
-	if ev.Name == "SessionEnd" {
+	if ev.Name == "SessionEnd" || ev.Name == "SessionFlush" {
 		return true
 	}
 	fi, err := os.Stat(logPath)

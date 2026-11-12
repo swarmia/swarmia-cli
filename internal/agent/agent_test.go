@@ -22,6 +22,9 @@ func TestParse(t *testing.T) {
 		payload string
 		want    Event
 	}{
+		{"pi shell failure", Pi,
+			`{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"bash","tool_use_id":"nested/1","tool_input":{"command":"make"}}`,
+			Event{Name: "PostToolUseFailure", SessionID: "s", Tool: Tool{Name: "bash", UseID: "nested/1", Command: "make", Shell: true, Status: StatusFailed}}},
 		{"claude prompt", ClaudeCode,
 			`{"hook_event_name":"UserPromptSubmit","session_id":"s","transcript_path":"/t.jsonl","prompt":"hi"}`,
 			Event{Name: "UserPromptSubmit", SessionID: "s", TranscriptPath: "/t.jsonl", Prompt: "hi"}},

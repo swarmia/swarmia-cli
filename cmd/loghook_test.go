@@ -260,13 +260,13 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
 
-	for _, ev := range []string{"Stop", "PreToolUse", "SessionEnd"} {
+	for _, ev := range []string{"Stop", "PreToolUse", "SessionEnd", "SessionFlush"} {
 		if err := runLogHook(strings.NewReader(`{"hook_event_name":"` + ev + `","session_id":"s"}`)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(started) != 1 || started[0] != path {
-		t.Fatalf("started = %v, want one run for SessionEnd", started)
+	if len(started) != 2 || started[0] != path || started[1] != path {
+		t.Fatalf("started = %v, want a run for SessionEnd and SessionFlush", started)
 	}
 
 	if err := os.Truncate(path, backgroundLogSize); err != nil {
@@ -275,7 +275,7 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop","session_id":"s"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(started) != 2 {
+	if len(started) != 3 {
 		t.Errorf("a large log didn't start a run: %v", started)
 	}
 }
