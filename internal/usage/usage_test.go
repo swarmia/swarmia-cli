@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // assistant renders a transcript line for one content block of a response.
@@ -203,5 +204,61 @@ func TestCodexRolloutCountsEachResponseOwnUsage(t *testing.T) {
 		OutputTokens: 1200, ReasoningOutputTokens: 250}}
 	if got := tr.Totals(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("totals = %+v\nwant %+v", got, want)
+	}
+}
+
+// Transcript lines as Claude Code writes them around slash commands.
+func command(at, name, args string) string {
+	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"<command-message>%s</command-message>\n<command-name>/%s</command-name>\n<command-args>%s</command-args>"}}`, at, name, name, args)
+}
+
+func localCaveat(at string) string {
+	return fmt.Sprintf(`{"type":"user","timestamp":%q,"isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code.</local-command-caveat>"}}`, at)
+}
+
+func skillContent(at, toolUseID string) string {
+	source := ""
+	if toolUseID != "" {
+		source = fmt.Sprintf(`"sourceToolUseID":%q,`, toolUseID)
+	}
+	return fmt.Sprintf(`{"type":"user","timestamp":%q,"isMeta":true,%s"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /r/.claude/skills/x\n\nDo the thing."}]}}`, at, source)
+}
+
+func prompt(at, text string) string {
+	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":%q}}`, at, text)
+}
+
+func TestSkillsTypedByTheDeveloper(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "s.jsonl")
+	write(t, main,
+		prompt("2026-11-12T10:00:00.000Z", "/tmp is full, why?"), // not a command
+		prompt("2026-11-12T10:01:00.000Z", "/nonexistent hi"),    // no such command
+		localCaveat("2026-11-12T10:02:00.000Z"),                  // a built-in...
+		command("2026-11-12T10:02:00.000Z", "context", ""),       // ...has no skill content
+		command("2026-11-12T10:03:00.000Z", "greet", "world"),    // a typed skill
+		skillContent("2026-11-12T10:03:00.100Z", ""),
+		prompt("2026-11-12T10:04:00.000Z", "greet Bob with the skill"), // the model loads it:
+		skillContent("2026-11-12T10:04:05.000Z", "toolu_1"),            // hooks report that one
+	)
+	// A subagent's transcript holds no typed commands of the developer's.
+	write(t, filepath.Join(dir, "s", "subagents", "a.jsonl"),
+		command("2026-11-12T10:05:00.000Z", "greet", ""), skillContent("2026-11-12T10:05:00.100Z", ""))
+	var tr Tracker
+	if err := tr.Update(ClaudeTranscript, main); err != nil {
+		t.Fatal(err)
+	}
+	want := []Skill{{At: time.Date(2026, 11, 12, 10, 3, 0, 1e8, time.UTC), Name: "greet"}}
+	if got := tr.Skills(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Skills() = %+v, want %+v", got, want)
+	}
+
+	// The command and its content can land in separate reads.
+	appendTo(t, main, command("2026-11-12T10:06:00.000Z", "plugin:review", "")+"\n")
+	tr.Update(ClaudeTranscript, main)
+	appendTo(t, main, skillContent("2026-11-12T10:06:00.100Z", "")+"\n")
+	tr.Update(ClaudeTranscript, main)
+	if got := tr.Skills(); len(got) != 2 || got[1].Name != "plugin:review" {
+		t.Errorf("Skills() across reads = %+v", got)
 	}
 }

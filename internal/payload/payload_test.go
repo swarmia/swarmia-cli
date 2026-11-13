@@ -234,6 +234,37 @@ func TestBuildSendsTurns(t *testing.T) {
 	}
 }
 
+// A skill the developer typed is sent on the turn it started, also when
+// prompts are withheld; the ones the model loads are tool calls instead.
+func TestBuildSendsTypedSkills(t *testing.T) {
+	transcript := filepath.Join(t.TempDir(), "s.jsonl")
+	ts := func(d time.Duration) string { return at.Add(d).Format(time.RFC3339Nano) }
+	lines := []string{
+		`{"type":"user","timestamp":"` + ts(400*time.Millisecond) + `","message":{"content":"<command-message>db-migration</command-message>\n<command-name>/db-migration</command-name>\n<command-args>add a column</command-args>"}}`,
+		`{"type":"user","timestamp":"` + ts(500*time.Millisecond) + `","isMeta":true,"message":{"content":"Base directory for this skill: /src/app/.claude/skills/db-migration"}}`,
+		`{"type":"user","timestamp":"` + ts(2*time.Minute) + `","isMeta":true,"sourceToolUseID":"toolu_1","message":{"content":"Base directory for this skill: /src/app/.claude/skills/db-migration"}}`,
+	}
+	if err := os.WriteFile(transcript, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := session()
+	s.Turns = []report.Turn{
+		{At: at, Text: "/db-migration add a column"}, // hook times are whole seconds
+		{At: at.Add(time.Minute), Text: "now run it"},
+	}
+	s.Usage = &usage.Tracker{}
+	if err := s.Usage.Update(usage.ClaudeTranscript, transcript); err != nil {
+		t.Fatal(err)
+	}
+	withheld := app
+	withheld.Prompts = false
+	p := only(t, s, contextFor(map[string]RepoInfo{"/src/app": withheld}))
+	want := []Turn{{StartedAt: at, Skill: "db-migration"}, {StartedAt: at.Add(time.Minute)}}
+	if !reflect.DeepEqual(p.Turns, want) {
+		t.Errorf("turns = %+v\nwant %+v", p.Turns, want)
+	}
+}
+
 // Turns stored with the system reminders an agent added to the prompt are
 // sent without them; one with nothing else is the agent's, not the person's.
 func TestBuildCutsSystemRemindersFromStoredPrompts(t *testing.T) {
