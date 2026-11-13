@@ -262,3 +262,26 @@ func TestSkillsTypedByTheDeveloper(t *testing.T) {
 		t.Errorf("Skills() across reads = %+v", got)
 	}
 }
+
+// Codex adds a skill the developer typed ($greet) as a message of its own;
+// the model loading one itself just reads its SKILL.md.
+func TestCodexSkillsTypedByTheDeveloper(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-11-12T13-56-58-abc.jsonl")
+	userMessage := func(at, text string) string {
+		return fmt.Sprintf(`{"timestamp":%q,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}}`, at, text)
+	}
+	write(t, path,
+		userMessage("2026-11-12T18:57:00.300Z", "$greet world"),
+		userMessage("2026-11-12T18:57:00.308Z", "<skill>\n<name>greet</name>\n<path>/r/.agents/skills/greet/SKILL.md</path>\n---\nname: greet\n---\nSay hello.\n</skill>"),
+		userMessage("2026-11-12T18:58:00.000Z", "what does <skill>\n<name>x</name> mean?"), // the developer's own text
+		`{"timestamp":"2026-11-12T18:59:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"tools.exec_command({cmd:\"cat .agents/skills/greet/SKILL.md\"})"}}`,
+	)
+	var tr Tracker
+	if err := tr.Update(CodexRollout, path); err != nil {
+		t.Fatal(err)
+	}
+	want := []Skill{{At: time.Date(2026, 11, 12, 18, 57, 0, 308e6, time.UTC), Name: "greet"}}
+	if got := tr.Skills(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Skills() = %+v, want %+v", got, want)
+	}
+}
