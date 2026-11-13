@@ -151,6 +151,7 @@ cap the decompressed size, see Limits).
     { "at": "2026-10-06T20:45:30Z", "name": "Edit", "repo": "github.com/acme/app", "file": "src/webhooks/sender.ts", "status": "ok" },
     { "at": "2026-10-06T20:46:10Z", "name": "Bash", "repo": "github.com/acme/app", "command": "cat > src/webhooks/retry.ts <<'EOF'\n[24 lines omitted]\nEOF", "status": "ok" },
     { "at": "2026-10-06T20:46:55Z", "name": "Bash", "repo": "github.com/acme/app", "command": "pnpm test src/webhooks", "status": "failed", "exit_code": 1 },
+    { "at": "2026-10-06T20:47:20Z", "name": "Skill", "repo": "github.com/acme/app", "skill": "db-migration", "status": "ok" },
     { "at": "2026-10-06T20:48:02Z", "name": "Edit", "repo": "github.com/acme/common", "file": "lib/http.ts", "status": "ok" }
   ],
   "commits": [
@@ -266,6 +267,7 @@ next turn starts is the agent waiting on the developer (or idle).
 | `repo` | string, optional | The repository the call worked in, as listed in `repos`: the one holding `file`, or for a call without one (a shell command, a search) the one its working directory is in. Omitted if that isn't one of `repos`. |
 | `file` | string, optional | The file the tool acted on, relative to the root of `repo`, `/`-separated (for Codex's `apply_patch`, which can change several, the first). Omitted if the tool has no file or it lies outside every repository in `repos`. |
 | `command` | string, optional | For shell tools: the command, with heredoc bodies replaced by `[N lines omitted]`, inline interpreter scripts (`python -c`, `node -e`, …) by `'[script omitted]'`, quoted strings over 120 characters by `'[N chars omitted]'`, secrets redacted, local paths masked, and capped at ~1000 characters (truncation ends with `…`). |
+| `skill` | string, optional | For skill tools (Claude Code's `Skill`): the skill the agent loaded, e.g. `db-migration`, or `<plugin>:<skill>` for a plugin's. Its arguments are never sent. |
 | `status` | string, optional | How the call ended: `ok`, `failed` (the agent reported an error) or `interrupted` (the developer stopped it). Accept other values. Absent when unknown: Codex reports failed calls like successful ones, so its calls have none for now, and neither do calls recorded by older clients. A shell command that exits nonzero may still be `ok`: the agent decides, and Claude Code counts e.g. `grep` finding nothing as success. |
 | `exit_code` | integer, optional | For shell tools whose call failed or was interrupted: the command's exit status, when the agent reports it (e.g. `1`, `2`, `127` for a missing command, `130` for an interrupt). Never present on `ok` calls, whose exit status agents don't report. The error message itself is never sent. |
 

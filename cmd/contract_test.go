@@ -59,6 +59,8 @@ func TestReportJSONFollowsTheContract(t *testing.T) {
 	hook(t, map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "add the helper, the key is ghp_" + strings.Repeat("a1B2", 9), "cwd": parent})
 	hook(t, map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Read", "cwd": parent,
 		"tool_input": map[string]any{"file_path": filepath.Join(app, "README.md")}})
+	hook(t, map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Skill", "cwd": app,
+		"tool_input": map[string]any{"skill": "db-migration"}, "tool_response": map[string]any{"success": true}})
 	agentWritesAndCommits(t, app, filepath.Join(app, "helper.go"), "package app\n\nfunc Helper() string { return \"from the agent\" }\n")
 	shellCommand(t, parent, "cd lib && ./gen.sh > gen.go", func() {
 		writeFile(t, filepath.Join(lib, "gen.go"), "package lib\n\nfunc Generated() string { return \"from the generator\" }\n")
