@@ -169,6 +169,84 @@ func TestReportOfSessionEditingSibling(t *testing.T) {
 	}
 }
 
+// A session started in a workspace and resumed inside one of its
+// repositories, or the other way round, stays in the state directory that
+// logged it first, so it's reported (and sent) whole from one place.
+func TestResumedSessionStaysWithItsOwner(t *testing.T) {
+	for _, tc := range []struct{ name, start, resume string }{
+		{"into a repository", "", "app"},
+		{"out of a repository", "app", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := tempDir(t)
+			app := newRepoAt(t, filepath.Join(parent, "app"))
+			start, resume := filepath.Join(parent, tc.start), filepath.Join(parent, tc.resume)
+			projectIn(t, start)
+			agentWritesAndCommits(t, app, filepath.Join(app, "greet.go"), "var greet = \"from the agent\"\n")
+			t.Setenv("CLAUDE_PROJECT_DIR", resume)
+			agentWritesAndCommits(t, app, filepath.Join(app, "farewell.go"), "var farewell = \"from the agent\"\n")
+			pushed(t, app)
+
+			resumed, _ := repoStateDir(resume)
+			if _, err := os.Stat(filepath.Join(resumed, "events.jsonl")); !os.IsNotExist(err) {
+				t.Errorf("the resumed half was logged where it resumed: %v", err)
+			}
+			t.Setenv("CLAUDE_PROJECT_DIR", start)
+			payloads := reportPayloads(t)
+			if len(payloads) != 1 {
+				t.Fatalf("payloads = %+v, want one", payloads)
+			}
+			var files []string
+			for _, tl := range payloads[0].Tools {
+				files = append(files, tl.File)
+			}
+			if want := []string{"greet.go", "farewell.go"}; !reflect.DeepEqual(files, want) {
+				t.Errorf("tools = %q, want %q", files, want)
+			}
+		})
+	}
+}
+
+// Each session has its own owner, and one whose state directory is gone is
+// claimed anew.
+func TestSessionOwners(t *testing.T) {
+	a, b := initRepo(t), initRepo(t)
+	t.Setenv("SWARMIA_STATE_DIR", t.TempDir())
+	t.Setenv("SWARMIA_LOG_FILE", "")
+	logs := func(dir, session string) string {
+		t.Helper()
+		t.Setenv("CLAUDE_PROJECT_DIR", dir)
+		path, err := sessionEventsPath("", session, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Dir(path)
+	}
+	stateA, _ := repoStateDir(a)
+	stateB, _ := repoStateDir(b)
+	if got := logs(a, "s1"); got != stateA {
+		t.Fatalf("s1 first logged in %s, want a's %s", got, stateA)
+	}
+	if got := logs(b, "s1"); got != stateA {
+		t.Errorf("s1 resumed in b logged in %s, want its owner %s", got, stateA)
+	}
+	if got := logs(b, "s2"); got != stateB {
+		t.Errorf("s2 logged in %s, want b's %s", got, stateB)
+	}
+	if got := logs(b, ""); got != stateB {
+		t.Errorf("an event without a session logged in %s, want b's %s", got, stateB)
+	}
+	if err := os.RemoveAll(stateA); err != nil {
+		t.Fatal(err)
+	}
+	if got := logs(b, "s1"); got != stateB {
+		t.Errorf("s1 logged in %s after its owner was removed, want b's %s", got, stateB)
+	}
+	if got := logs(a, "s1"); got != stateB {
+		t.Errorf("s1 logged in %s, want its new owner %s", got, stateB)
+	}
+}
+
 // ingest is a fake ingest endpoint that records each request's token and the
 // repositories of the sessions in it.
 type ingest struct {

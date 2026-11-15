@@ -58,6 +58,7 @@ var processCmd = &cobra.Command{
 		if err != nil {
 			return quietIf(processBackground, err)
 		}
+		pruneOwners(opts.Now)
 		if !processBackground {
 			fmt.Fprintf(cmd.OutOrStdout(), "folded %d event(s); %d session(s) stored; %d pruned\n",
 				res.Folded, len(res.Sessions), res.Pruned)
