@@ -12,12 +12,15 @@ import (
 )
 
 // projectDir is the directory the CLI operates against: $CLAUDE_PROJECT_DIR when
-// set (Claude Code exports it to hook commands), otherwise the current working
+// set (Claude Code exports it to hook commands, and so does GitHub Copilot),
+// else $COPILOT_PROJECT_DIR (Copilot's own), otherwise the current working
 // directory (where Codex runs hooks: the session's, maybe below the repository
 // root).
 func projectDir() string {
-	if base := os.Getenv("CLAUDE_PROJECT_DIR"); base != "" {
-		return base
+	for _, v := range []string{"CLAUDE_PROJECT_DIR", "COPILOT_PROJECT_DIR"} {
+		if base := os.Getenv(v); base != "" {
+			return base
+		}
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		return cwd

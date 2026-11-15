@@ -11,11 +11,11 @@ This is a public, open-source repository. Never include customer names, customer
 - `make build` — build `./swarmia-cli`
 - `make test` — run unit tests (`go test ./...`); single test: `go test ./internal/attribution -run TestName`
 - `make vet` — `go vet`, including the `e2e`-tagged package
-- `make e2e` — end-to-end suite against a real coding agent (slow; see `docs/e2e.md`)
+- `make e2e` — end-to-end suite against a real coding agent (slow; see `docs/e2e.md`); `E2E_AGENT=codex` or `copilot` for the others
 
 ## Architecture
 
-A Go CLI that hooks into coding agents (Claude Code, Codex), records what the agent writes, works out locally which committed lines came from which session, and — only if a token is configured — sends line ranges and session metadata to Swarmia. No source code leaves the machine.
+A Go CLI that hooks into coding agents (Claude Code, Codex, GitHub Copilot), records what the agent writes, works out locally which committed lines came from which session, and — only if a token is configured — sends line ranges and session metadata to Swarmia. No source code leaves the machine.
 
 The pipeline is **capture → attribute → deliver**:
 

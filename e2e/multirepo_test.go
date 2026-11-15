@@ -20,6 +20,10 @@ func TestClaudeCodeMultiRepo(t *testing.T) { runMultiRepoScenario(t, claudeCode{
 // against Codex.
 func TestCodexMultiRepo(t *testing.T) { runMultiRepoScenario(t, codex{}) }
 
+// TestCopilotMultiRepo runs the multi-repository scenario against GitHub
+// Copilot CLI.
+func TestCopilotMultiRepo(t *testing.T) { runMultiRepoScenario(t, copilot{}) }
+
 // newRepo creates the repository workspace/<name> with files in one commit,
 // published as acme/<name>.
 func (e *env) newRepo(name string, files map[string]string) string {
@@ -106,7 +110,7 @@ func runMultiRepoScenario(t *testing.T, ag agent) {
 	}
 	p := parts[0]
 
-	m := metrics{Agent: ag.name(), AgentVersion: e.version, Model: envOr("E2E_MODEL", envOr("E2E_CODEX_MODEL", "")),
+	m := metrics{Agent: ag.name(), AgentVersion: e.version, Model: e.agent.model(),
 		CostUSD: run.CostUSD, AgentToolCalls: len(run.ToolUses), CapturedToolCalls: len(p.Tools),
 		Sessions: map[string]sessionMetrics{}}
 	defer func() { writeMetrics(e, m) }()

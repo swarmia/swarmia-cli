@@ -60,7 +60,7 @@ func init() {
 	logHookCmd.Flags().StringVar(&logFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
 	logHookCmd.Flags().BoolVar(&logSkipIfProjectHooks, strings.TrimPrefix(skipIfProjectHooksFlag, "--"), false,
 		"do nothing if the project's own agent settings run swarmia-cli log-hook (set by user-scope installs)")
-	logHookCmd.Flags().StringVar(&logAgent, "agent", agent.ClaudeCode.Name, "the agent sending the payloads: claude-code or codex")
+	logHookCmd.Flags().StringVar(&logAgent, "agent", agent.ClaudeCode.Name, "the agent sending the payloads: claude-code, codex or copilot")
 	logHookCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		fmt.Fprintf(os.Stderr, "swarmia-cli log-hook: %v\n", err)
 		return nil
@@ -86,6 +86,15 @@ func runLogHook(stdin io.Reader) error {
 	if len(payload) == 0 {
 		// Nothing to log; don't write a blank line.
 		return nil
+	}
+	if ag == agent.ClaudeCode && agent.IsCopilotPayload(payload) {
+		// GitHub Copilot runs the repository's Claude Code hooks too. Its
+		// own hooks log the event, if it has them here; else this one does,
+		// as Copilot's.
+		if copilotHasLogHook(dir, repo.Root) {
+			return nil
+		}
+		ag = agent.Copilot
 	}
 
 	// Preserve the payload verbatim when it is valid JSON. If it isn't (defensive
@@ -120,6 +129,9 @@ func runLogHook(stdin io.Reader) error {
 	}
 	touchWorkingSet(store, ev)
 	snapshotShellCommand(store, ev, &rec)
+	if ev.Name == "Stop" && ev.Response == "" {
+		rec.Response = ag.TurnResponse(ev.TranscriptPath)
+	}
 	rec.Format = events.FormatOf(rec)
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -177,10 +189,33 @@ func projectHasLogHook(ag *agent.Agent, projectDir, repoRoot string) bool {
 	return false
 }
 
+// copilotHasLogHook reports whether GitHub Copilot's own hooks run swarmia-cli
+// log-hook in the project: its project or local hooks, or its user hooks
+// (which, with their skip flag, stand down only for its own project hooks).
+func copilotHasLogHook(projectDir, repoRoot string) bool {
+	files := agent.Copilot.ProjectHooksFiles(projectDir, repoRoot)
+	if user, err := agent.Copilot.HooksFile("", agent.ScopeUser); err == nil {
+		files = append(files, user)
+	}
+	for _, path := range files {
+		if hooksFileHasLogHook(path, true) {
+			return true
+		}
+	}
+	return false
+}
+
 // hooksFileRunsLogHook reports whether an agent's settings or hooks file runs
 // swarmia-cli log-hook unconditionally (not as a user-scope hook that stands
 // down for project hooks).
 func hooksFileRunsLogHook(path string) bool {
+	return hooksFileHasLogHook(path, false)
+}
+
+// hooksFileHasLogHook reports whether an agent's settings or hooks file runs
+// swarmia-cli log-hook, counting user-scope hooks only if asked. Hooks are
+// in matcher groups (Claude Code, Codex) or listed directly (Copilot).
+func hooksFileHasLogHook(path string, userScope bool) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -190,12 +225,12 @@ func hooksFileRunsLogHook(path string) bool {
 		return false
 	}
 	hooks, _ := doc["hooks"].(map[string]any)
-	for _, groups := range hooks {
-		gs, _ := groups.([]any)
-		for _, g := range gs {
-			gm, _ := g.(map[string]any)
-			for _, h := range asSlice(gm, "hooks") {
-				if cmd := hookCommand(h); runsSwarmia(cmd, "log-hook") && !strings.Contains(cmd, skipIfProjectHooksFlag) {
+	for _, entries := range hooks {
+		es, _ := entries.([]any)
+		for _, e := range es {
+			em, _ := e.(map[string]any)
+			for _, h := range append([]any{em}, asSlice(em, "hooks")...) {
+				if cmd := hookCommand(h); runsSwarmia(cmd, "log-hook") && (userScope || !strings.Contains(cmd, skipIfProjectHooksFlag)) {
 					return true
 				}
 			}
@@ -230,8 +265,30 @@ func touchWorkingSet(store snapshot.Store, ev agent.Event) {
 // are in their payloads already, so only shell calls need this, and not
 // read-only ones. Errors just mean changes go unrecorded in that worktree —
 // logging the event matters more — and rec.Snapshot says so.
+//
+// A background shell command (see agent.Tool.Background) is still running when
+// its call ends: its snapshot is set aside then, and its changes recorded on
+// the call that finds it finished (agent.Tool.Awaited).
 func snapshotShellCommand(store snapshot.Store, ev agent.Event, rec *events.Record) {
+	if ev.Tool.Awaited != "" && ev.Name == "PostToolUse" {
+		id := backgroundID(ev.SessionID, ev.Tool.Awaited)
+		if at, ok := store.SavedAt(id); ok && time.Since(at) > backgroundShellLimit {
+			store.Load(id) // drop it
+			rec.Snapshot = events.SnapshotOverBudget
+			return
+		}
+		recordShellChanges(store, ev, rec, id)
+		return
+	}
 	if !ev.Tool.Shell || ev.Tool.UseID == "" {
+		return
+	}
+	if ev.Tool.Background != "" && ev.Name == "PostToolUse" && ev.Tool.Status == "" {
+		if pre, ok := store.Load(ev.Tool.UseID); ok {
+			if err := store.Save(backgroundID(ev.SessionID, ev.Tool.Background), pre); err != nil {
+				rec.Snapshot = events.SnapshotFailed
+			}
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), snapshot.Budget)
@@ -252,32 +309,52 @@ func snapshotShellCommand(store snapshot.Store, ev agent.Event, rec *events.Reco
 		}
 		rec.Snapshot, rec.Snapshotted = snapshotMarker(err), slices.Sorted(maps.Keys(pre))
 	case "PostToolUse", "PostToolUseFailure":
-		pre, ok := store.Load(ev.Tool.UseID)
-		if !ok {
-			return // read-only, or its start already says what went wrong
-		}
-		changes, err := store.After(ctx, pre)
-		rec.Snapshot, rec.Snapshotted = snapshotMarker(err), slices.Sorted(maps.Keys(pre))
-		own := ""
-		if rec.Git != nil {
-			own = rec.Git.Root
-		}
-		var changed []string
-		for _, root := range slices.Sorted(maps.Keys(changes)) {
-			changed = append(changed, root)
-			for _, c := range changes[root] {
-				fc := events.FileChange{Path: c.Path}
-				if root != own {
-					fc.Root = root
-				}
-				for _, h := range c.Hunks {
-					fc.Hunks = append(fc.Hunks, h.Encode())
-				}
-				rec.Changes = append(rec.Changes, fc)
-			}
-		}
-		store.Touch(ev.SessionID, changed...)
+		recordShellChanges(store, ev, rec, ev.Tool.UseID)
 	}
+}
+
+// backgroundShellLimit is how long a background shell command may run and
+// still have its changes recorded. Everything that changed in the worktree
+// while it ran is taken as its work, and the longer it runs, the likelier
+// that includes the developer's own edits.
+const backgroundShellLimit = 10 * time.Minute
+
+// backgroundID is the id a background shell command's snapshot is kept under
+// while it runs: its shell's id is only unique within the session.
+func backgroundID(session, shell string) string {
+	return "bg-" + session + "-" + shell
+}
+
+// recordShellChanges records on rec what the shell command whose snapshot was
+// saved under id authored since.
+func recordShellChanges(store snapshot.Store, ev agent.Event, rec *events.Record, id string) {
+	pre, ok := store.Load(id)
+	if !ok {
+		return // read-only, or its start already says what went wrong
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), snapshot.Budget)
+	defer cancel()
+	changes, err := store.After(ctx, pre)
+	rec.Snapshot, rec.Snapshotted = snapshotMarker(err), slices.Sorted(maps.Keys(pre))
+	own := ""
+	if rec.Git != nil {
+		own = rec.Git.Root
+	}
+	var changed []string
+	for _, root := range slices.Sorted(maps.Keys(changes)) {
+		changed = append(changed, root)
+		for _, c := range changes[root] {
+			fc := events.FileChange{Path: c.Path}
+			if root != own {
+				fc.Root = root
+			}
+			for _, h := range c.Hunks {
+				fc.Hunks = append(fc.Hunks, h.Encode())
+			}
+			rec.Changes = append(rec.Changes, fc)
+		}
+	}
+	store.Touch(ev.SessionID, changed...)
 }
 
 func snapshotMarker(err error) string {

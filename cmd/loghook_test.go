@@ -333,3 +333,122 @@ func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 		t.Errorf("waits = %v, want turn-end runs to skip when one is in progress", waits)
 	}
 }
+
+// GitHub Copilot runs a repository's Claude Code hooks too: their log-hook
+// logs its events as Copilot's, unless Copilot's own hooks (any scope) do.
+func TestLogHookCopilotThroughClaudeHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+	repo := initRepo(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", repo)
+	copilotPayload := `{"hook_event_name":"UserPromptSubmit","session_id":"s","timestamp":"2026-11-15T19:26:27.957Z","cwd":"` + repo + `","prompt":"hi"}`
+
+	agents := func() []string {
+		t.Helper()
+		recs, err := events.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range recs {
+			out = append(out, r.Agent)
+		}
+		return out
+	}
+	for _, p := range []string{copilotPayload, `{"hook_event_name":"UserPromptSubmit","session_id":"c","prompt":"hi"}`} {
+		if err := runLogHook(strings.NewReader(p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := agents(); !reflect.DeepEqual(got, []string{"copilot", "claude-code"}) {
+		t.Errorf("agents = %v", got)
+	}
+
+	for _, h := range []struct{ file, command string }{
+		{filepath.Join(repo, ".github", "hooks", "swarmia.json"), "swarmia-cli log-hook --agent copilot"},
+		{filepath.Join(os.Getenv("COPILOT_HOME"), "hooks", "swarmia.json"), "swarmia-cli log-hook --agent copilot " + skipIfProjectHooksFlag},
+	} {
+		hooks, _ := json.Marshal(map[string]any{"version": 1, "hooks": map[string]any{
+			"UserPromptSubmit": []any{map[string]any{"type": "command", "bash": h.command}},
+		}})
+		if err := os.MkdirAll(filepath.Dir(h.file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.file, hooks, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := runLogHook(strings.NewReader(copilotPayload))
+		os.Remove(h.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := agents(); len(got) != 2 {
+			t.Errorf("with %s, the Claude Code hook logged Copilot's event too: %v", h.file, got)
+		}
+	}
+}
+
+// A Copilot background shell's changes are recorded when read_bash finds it
+// finished, not when its call returns.
+func TestLogHookRecordsBackgroundShellChanges(t *testing.T) {
+	logAgent = agent.Copilot.Name
+	t.Cleanup(func() { logAgent = agent.ClaudeCode.Name })
+	repo := initRepo(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", repo)
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+
+	start := `"session_id":"s","timestamp":"t","tool_use_id":"toolu_1","tool_name":"Bash","tool_input":{"command":"sleep 2; ./gen.sh","mode":"async","shellId":"bg1"}`
+	for _, p := range []string{
+		`{"hook_event_name":"PreToolUse",` + start + `}`,
+		`{"hook_event_name":"PostToolUse",` + start + `,"tool_result":{"result_type":"success","text_result_for_llm":"<command started in background with shellId: bg1>"}}`,
+	} {
+		if err := runLogHook(strings.NewReader(p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "gen.go"), []byte("package gen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := `{"hook_event_name":"PostToolUse","session_id":"s","timestamp":"t","tool_use_id":"toolu_2","tool_name":"read_bash","tool_input":{"shellId":"bg1"},"tool_result":{"result_type":"success","text_result_for_llm":"\n<shellId: bg1 completed with exit code 0>"}}`
+	if err := runLogHook(strings.NewReader(read)); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := events.ReadFile(path)
+	if err != nil || len(recs) != 3 {
+		t.Fatalf("got %d records, %v", len(recs), err)
+	}
+	if recs[1].Changes != nil {
+		t.Errorf("the call starting it has changes: %+v", recs[1].Changes)
+	}
+	want := []events.FileChange{{Path: "gen.go", Hunks: [][]string{{"+package gen"}}}}
+	if !reflect.DeepEqual(recs[2].Changes, want) {
+		t.Errorf("read_bash's changes = %+v, want %+v", recs[2].Changes, want)
+	}
+}
+
+// Copilot's Stop payload lacks the turn's reply; log-hook reads it from the
+// session's events.
+func TestLogHookReadsCopilotReply(t *testing.T) {
+	logAgent = agent.Copilot.Name
+	t.Cleanup(func() { logAgent = agent.ClaudeCode.Name })
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+	transcript := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(transcript, []byte(strings.Join([]string{
+		`{"type":"user.message","data":{"content":"fix it"}}`,
+		`{"type":"assistant.message","data":{"content":"Fixed."}}`,
+		`{"type":"hook.start","data":{"hookType":"agentStop"}}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := `{"hook_event_name":"Stop","session_id":"s","timestamp":"t","transcript_path":"` + transcript + `","stop_reason":"end_turn"}`
+	if err := runLogHook(strings.NewReader(stop)); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := events.ReadFile(path)
+	if err != nil || len(recs) != 1 || recs[0].Response != "Fixed." {
+		t.Fatalf("records = %+v, %v", recs, err)
+	}
+}

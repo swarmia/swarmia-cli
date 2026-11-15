@@ -3,13 +3,13 @@
 The Swarmia Agent CLI answers a question coding-agent analytics can't: **which
 lines of which commits came from an AI coding agent, and from which session?**
 
-It hooks into your coding agent (Claude Code or Codex), records what the agent
+It hooks into your coding agent (Claude Code, Codex or GitHub Copilot), records what the agent
 writes, works out on your machine which committed lines those edits became,
 and — once configured — sends Swarmia line numbers and session metadata.
 Never your source code.
 
-> **Status:** early, but end-to-end tested against real Claude Code and Codex
-> releases. Cursor, Copilot CLI and Gemini CLI are planned. Without a token
+> **Status:** early, but end-to-end tested against real Claude Code, Codex and
+> Copilot CLI releases. Cursor and Gemini CLI are planned. Without a token
 > configured, nothing leaves your machine.
 
 ## How it works
@@ -111,7 +111,7 @@ size of the repository's working tree.
   git repositories (partial commits, amends, squashes, rebases onto a
   teammate's commits). CI enforces minimum precision and recall.
 - **An end-to-end suite** ([docs/e2e.md](docs/e2e.md)) that runs real Claude
-  Code and Codex releases (each on two release channels) nightly on an
+  Code, Codex and Copilot CLI releases (each on two release channels) nightly on an
   open-source TypeScript repository: the agent
   writes code, a script formats, tweaks, commits, rebases, squashes and
   pushes, and the suite checks capture, attribution, token usage and payload
@@ -145,14 +145,15 @@ devDependency, or as `swarmia-cli`.
 ### 2. Install the hooks
 
 `swarmia-cli install` adds its hooks to the coding agents configured in a
-repository (Claude Code: a `.claude` directory; Codex: a `.codex` directory).
-Pick a **scope**:
+repository (Claude Code: a `.claude` directory; Codex: a `.codex` directory;
+GitHub Copilot: `.github/hooks`, `.github/copilot` or
+`.github/copilot-instructions.md`). Pick a **scope**:
 
-| Scope | Claude Code | Codex | Use it when |
-|---|---|---|---|
-| `project` (default) | `.claude/settings.json` (committed) | `.codex/hooks.json` (committed) | the whole team should be tracked in this repository |
-| `local` | `.claude/settings.local.json` (gitignored) | — (Codex has no such file) | you want it for yourself in one repository |
-| `user` | `~/.claude/settings.json` | `~/.codex/hooks.json` | you want it in every repository on this machine |
+| Scope | Claude Code | Codex | GitHub Copilot | Use it when |
+|---|---|---|---|---|
+| `project` (default) | `.claude/settings.json` (committed) | `.codex/hooks.json` (committed) | `.github/hooks/swarmia.json` (committed) | the whole team should be tracked in this repository |
+| `local` | `.claude/settings.local.json` (gitignored) | — (Codex has no such file) | `.github/copilot/settings.local.json` (gitignore it) | you want it for yourself in one repository |
+| `user` | `~/.claude/settings.json` | `~/.codex/hooks.json` | `~/.copilot/hooks/swarmia.json` | you want it in every repository on this machine |
 
 ```sh
 swarmia-cli install                              # project scope, in the current repository
@@ -197,6 +198,12 @@ Then activate them:
   which it asks about the first time. `swarmia-cli config` warns about hooks
   Codex won't run. Changing a hook's command (say, reinstalling with another
   binary) needs trusting again.
+- **GitHub Copilot** (Copilot CLI, and VS Code and the GitHub Copilot app,
+  which run the same agent and hooks) runs a repository's hooks once you've
+  trusted its folder; start a new session. Copilot also runs a repository's
+  Claude Code hooks, so a repository with only those already captures Copilot
+  sessions, as Copilot's; with both installed, events are logged once. See
+  [docs/copilot.md](docs/copilot.md) for what is and isn't covered.
 
 ### 3. See what it captured
 
@@ -289,6 +296,13 @@ each patch chunk's lines before and after are diffed like an Edit tool's old
 and new strings. Its `SessionEnd` hook gets at most 3 seconds, which is
 enough: the processing it triggers runs detached.
 
+Copilot's hooks call `log-hook --agent copilot`. Configured under Claude
+Code's event names, they send Claude-shaped payloads; what differs (edit
+inputs, subagents, background shells, the turn's reply) is in
+[docs/copilot.md](docs/copilot.md). Copilot also runs a repository's Claude
+Code hooks: `log-hook` recognizes its payloads there and logs them as
+Copilot's, unless Copilot's own hooks do.
+
 Around each Bash call, `log-hook` snapshots the worktree's dirty files before
 the command and, when it finishes (`PostToolUse` or `PostToolUseFailure`),
 diffs what changed and stores it as `changes` on that record. Only lines the
@@ -344,6 +358,7 @@ and their records in the log, wait for a newer version to process them.
 - **Usage:** token counts are read incrementally from the agent's transcript
   (usage fields only), counting each API response once. Codex records running
   totals, so each response is the difference between consecutive ones.
+  Copilot records each request's usage in its session's `events.jsonl`.
 - **Attribute:** see below. Results are cached per session and recomputed only
   when its edits or candidate commits change.
 - **Prune:** sessions inactive for 30 days are deleted.
@@ -402,6 +417,7 @@ make vet           # go vet (including the e2e package)
 make fmt           # gofmt -w
 make e2e           # end-to-end with a real Claude Code release (docs/e2e.md)
 make e2e E2E_AGENT=codex   # ... or Codex
+make e2e E2E_AGENT=copilot # ... or Copilot CLI
 make npm-pack VERSION=1.2.3   # build the npm packages into dist/npm
 make npm-smoke-test VERSION=1.2.3   # ... and install them with npm and pnpm
 ```
@@ -432,7 +448,8 @@ internal/
   snapshot/        what shell commands changed in the worktree
   attribution/     matching agent edits to committed files (golden cases in testdata/)
   report/          folding the log into sessions; attributing them to commits
-  usage/           token usage from agent transcripts (Claude Code) and rollouts (Codex)
+  usage/           token usage from agent transcripts (Claude Code), rollouts (Codex) and
+                   session events (Copilot)
   codex/           Codex's hooks files and hook trust
   jsonedit/        rewriting edited settings files without reformatting them
   config/          layered configuration
