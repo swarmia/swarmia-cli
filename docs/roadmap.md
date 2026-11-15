@@ -508,8 +508,9 @@ Done on the branch:
    `apply_patch` chunks become hunks (before/after diffed, so replaced lines
    are kept; paths resolved against `cwd`); edit extraction dispatches by
    agent; payload `agent: "codex"`.
-3. ✅ **Usage:** per-response differences of the rollout's cumulative totals,
-   per model; cached input split out of input, reasoning reported as part of
+3. ✅ **Usage:** each response's own usage (`last_token_usage`), counted when
+   the rollout's cumulative total changes (a rollout can start from a total it
+   inherited, e.g. a subagent's from its parent's), per model; cached input split out of input, reasoning reported as part of
    output (`reasoning_output_tokens`). Subagents later.
 4. ✅ **End-to-end matrix** (nightly, agent × channel), one scenario and oracle
    for both agents:
@@ -525,8 +526,9 @@ Still to verify with the first real Codex runs (CI): `apply_patch`'s payload
 shape and tool name in `PostToolUse`; the shell tool's name (we expect
 `Bash`) and whether shell snapshots work for failing commands (Codex has no
 `PostToolUseFailure`); whether `exec resume` appends to the same rollout (the
-usage tracker assumes so: a new file replaying old totals would double-count,
-and the usage check would catch it).
+usage tracker no longer depends on it: it counts each response's own usage,
+not differences of the cumulative total, so a new file starting from old
+totals doesn't double-count them).
 
 **CI credentials (decided):** an `OPENAI_API_KEY` secret in the `e2e`
 environment, from a dedicated OpenAI project with a spend cap and
