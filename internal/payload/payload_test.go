@@ -567,3 +567,29 @@ func TestBuildSendsOnlySkillNames(t *testing.T) {
 		}
 	}
 }
+
+// A turn has a typed skill only if its prompt typed it: Claude Code as the
+// command, Codex as a mention anywhere.
+func TestTyped(t *testing.T) {
+	cases := []struct {
+		agent, prompt, name string
+		want                bool
+	}{
+		{"claude-code", "/greet world", "greet", true},
+		{"claude-code", "  /greet", "greet", true},
+		{"claude-code", "/greeting", "greet", false},
+		{"claude-code", "please /greet", "greet", false},
+		{"claude-code", "/plugin:review now", "plugin:review", true},
+		{"codex", "$greet world", "greet", true},
+		{"codex", "use $greet.", "greet", true},
+		{"codex", "use $greeting, then $greet", "greet", true},
+		{"codex", "use $greeting", "greet", false},
+		{"codex", "greet world", "greet", false},
+		{"cursor", "/greet", "greet", false},
+	}
+	for _, c := range cases {
+		if got := typed(c.agent, c.prompt, c.name); got != c.want {
+			t.Errorf("typed(%q, %q, %q) = %v, want %v", c.agent, c.prompt, c.name, got, c.want)
+		}
+	}
+}

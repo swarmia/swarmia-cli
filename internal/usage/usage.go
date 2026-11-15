@@ -2,9 +2,9 @@
 // session, read from the agent's own transcript files. Hooks don't carry token
 // counts; transcripts do.
 //
-// Only usage fields are parsed — never message content — and nothing but the
-// totals is kept, with one exception: the names of the skills the developer
-// invoked by typing their command (see Skill). Reading is incremental: each
+// Only usage fields are parsed and nothing but the totals is kept, with one
+// exception: the names of the skills the developer invoked by typing their
+// command (see Skill), for which the messages that name a skill are read. Reading is incremental: each
 // file keeps a byte offset, so a long session's transcript is read once
 // overall, not once per run.
 //
@@ -97,8 +97,9 @@ type claudeState struct {
 	Command string `json:"command,omitempty"`
 }
 
-// Skill is a skill the developer invoked by typing its command (/name), as
-// opposed to one the model loaded with its Skill tool, which hooks report.
+// Skill is a skill the developer invoked by typing its command (/name in
+// Claude Code, $name in Codex), as opposed to one the model loaded itself:
+// Claude Code's Skill tool, which hooks report, or Codex reading SKILL.md.
 type Skill struct {
 	At   time.Time `json:"at"`
 	Name string    `json:"name"`
@@ -242,6 +243,7 @@ type codexLine struct {
 // inherited (a subagent's starts from its parent's), and the counter can
 // restart, and either would book everything before as one response.
 func (st *fileState) codexLine(line []byte) {
+	st.codexSkill(line)
 	if !bytes.Contains(line, tokenCountMarker) && !bytes.Contains(line, turnContextMarker) {
 		return
 	}
@@ -413,6 +415,46 @@ func messageText(msg json.RawMessage) string {
 		}
 	}
 	return b.String()
+}
+
+// Codex adds a typed skill to the conversation as a user message of its own:
+// <skill>\n<name>name</name>\n<path>…/SKILL.md</path>, then the skill. The
+// model loading a skill itself just reads the file.
+var (
+	codexSkillMarker = []byte(`<skill>\n<name>`) // as JSON-encoded
+	codexSkillName   = regexp.MustCompile(`^<skill>\n<name>([^<\s]+)</name>`)
+)
+
+// codexSkillLine is the part of a rollout line codexSkill needs.
+type codexSkillLine struct {
+	Timestamp time.Time `json:"timestamp"`
+	Type      string    `json:"type"`
+	Payload   struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"payload"`
+}
+
+// codexSkill records a skill the developer typed.
+func (st *fileState) codexSkill(line []byte) {
+	if !bytes.Contains(line, codexSkillMarker) {
+		return
+	}
+	var l codexSkillLine
+	if json.Unmarshal(line, &l) != nil || l.Type != "response_item" ||
+		l.Payload.Type != "message" || l.Payload.Role != "user" || len(l.Payload.Content) == 0 {
+		return
+	}
+	for _, c := range l.Payload.Content {
+		if m := codexSkillName.FindStringSubmatch(c.Text); m != nil {
+			st.Skills = append(st.Skills, Skill{At: l.Timestamp.UTC(), Name: m[1]})
+			return
+		}
+	}
 }
 
 // claudeLine folds in one transcript line if it's an API response's usage,

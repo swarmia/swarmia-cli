@@ -544,10 +544,10 @@ func (m masks) skill(name string) string {
 }
 
 // typedSkills marks each skill the developer typed in s on the turn it
-// started (turns are s's): the last prompt submitted by then, which in Claude
-// Code must be the skill's command, so a turn the hooks missed doesn't pass
-// its skill to another. Hook times are whole seconds, the transcript's
-// aren't, hence the second's slack.
+// started (turns are s's): the last prompt submitted by then, which must have
+// typed it, so a turn the hooks missed doesn't pass its skill to another.
+// Hook times are whole seconds, the transcript's aren't, hence the second's
+// slack. A turn keeps the first skill it typed.
 func typedSkills(turns []Turn, s *report.Session, masks masks) {
 	for _, sk := range s.Usage.Skills() {
 		for i := len(turns) - 1; i >= 0; i-- {
@@ -555,7 +555,7 @@ func typedSkills(turns []Turn, s *report.Session, masks masks) {
 			if t.Automatic || t.StartedAt.After(sk.At.Add(time.Second)) {
 				continue
 			}
-			if s.Agent == agent.ClaudeCode.Name && !isCommand(agent.PromptText(s.Turns[i].Text), sk.Name) {
+			if !typed(s.Agent, agent.PromptText(s.Turns[i].Text), sk.Name) {
 				continue
 			}
 			if t.Skill == "" {
@@ -566,8 +566,31 @@ func typedSkills(turns []Turn, s *report.Session, masks masks) {
 	}
 }
 
-// isCommand reports whether prompt invokes the command /name.
-func isCommand(prompt, name string) bool {
-	rest, ok := strings.CutPrefix(strings.TrimSpace(prompt), "/"+name)
-	return ok && (rest == "" || unicode.IsSpace(rune(rest[0])))
+// typed reports whether prompt typed the skill name: in Claude Code, as its
+// command (/name …); in Codex, as a mention anywhere ($name).
+func typed(agentName, prompt, name string) bool {
+	switch agentName {
+	case agent.ClaudeCode.Name:
+		rest, ok := strings.CutPrefix(strings.TrimSpace(prompt), "/"+name)
+		return ok && (rest == "" || unicode.IsSpace(rune(rest[0])))
+	case agent.Codex.Name:
+		for rest := prompt; ; {
+			i := strings.Index(rest, "$"+name)
+			if i < 0 {
+				return false
+			}
+			rest = rest[i+1+len(name):]
+			if rest == "" || !isNameChar(rest[0]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNameChar reports whether c can continue a mentioned skill's name; a
+// period ends it, as at the end of a sentence.
+func isNameChar(c byte) bool {
+	return c == '-' || c == '_' || c == ':' ||
+		'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
 }
