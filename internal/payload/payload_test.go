@@ -506,3 +506,26 @@ func TestRepoSlugSSHAlias(t *testing.T) {
 		}
 	}
 }
+
+// A skill's name is chosen by the model: what doesn't look like one isn't
+// sent, and what does is redacted.
+func TestBuildSendsOnlySkillNames(t *testing.T) {
+	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
+	token := "ghp_" + strings.Repeat("a1B2", 9)
+	cases := map[string]string{
+		"db-migration":                   "db-migration",
+		"plugin:pdf":                     "plugin:pdf",
+		"apps/web:deploy":                "apps/web:deploy",
+		"/Users/me/app/.claude/skills/x": "",
+		"deploy the app to prod":         "",
+		strings.Repeat("x", 101):         "",
+		token:                            "[REDACTED:github-token]",
+	}
+	for in, want := range cases {
+		s := &report.Session{ID: "s1", Agent: "claude-code", Root: "/src/app", StartedAt: at, EndedAt: at,
+			Tools: []report.Tool{{At: at, Name: "Skill", Root: "/src/app", Skill: in}}}
+		if got := only(t, s, ctx).Tools[0].Skill; got != want {
+			t.Errorf("skill %q sent as %q, want %q", in, got, want)
+		}
+	}
+}

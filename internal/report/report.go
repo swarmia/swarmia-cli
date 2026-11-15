@@ -170,7 +170,8 @@ func (s *Session) LastActivity() (time.Time, bool) {
 	return last, !last.IsZero()
 }
 
-// Tool is one tool call. File and Command are set when the tool has them.
+// Tool is one tool call. File, Command and Skill are set when the tool has
+// them.
 // Root is the worktree it worked in: its file's, else its working
 // directory's; "" if neither is in a repository.
 type Tool struct {

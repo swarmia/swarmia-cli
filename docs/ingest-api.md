@@ -34,8 +34,8 @@ soon as it started it, or is quit right away):
   reply (secrets redacted, code blocks stripped from replies; the text is
   withheld if the developer or repository opted out, the timing never is);
 - the **tool calls** the agent made: tool name, the repository and the file path
-  within it,
-  and shell commands with code stripped and secrets redacted;
+  within it, shell commands with code stripped and secrets redacted, and the
+  name of a skill the agent loaded (never its arguments);
 - **line attribution**: for each *pushed* commit that contains lines the agent
   wrote, which line ranges of which files, classified as `exact`, `normalized`
   or `modified`;
@@ -269,7 +269,7 @@ next turn starts is the agent waiting on the developer (or idle).
 | `repo` | string, optional | The repository the call worked in, as listed in `repos`: the one holding `file`, or for a call without one (a shell command, a search) the one its working directory is in. Omitted if that isn't one of `repos`. |
 | `file` | string, optional | The file the tool acted on, relative to the root of `repo`, `/`-separated (for Codex's `apply_patch`, which can change several, the first). Omitted if the tool has no file or it lies outside every repository in `repos`. |
 | `command` | string, optional | For shell tools: the command, with heredoc bodies replaced by `[N lines omitted]`, inline interpreter scripts (`python -c`, `node -e`, …) by `'[script omitted]'`, quoted strings over 120 characters by `'[N chars omitted]'`, secrets redacted, local paths masked, and capped at ~1000 characters (truncation ends with `…`). |
-| `skill` | string, optional | For skill tools (Claude Code's `Skill`): the skill the agent loaded, e.g. `db-migration`, or `<plugin>:<skill>` for a plugin's. Its arguments are never sent. |
+| `skill` | string, optional | For skill tools (Claude Code's `Skill`): the skill the agent loaded, e.g. `db-migration`, or `<plugin>:<skill>` for a plugin's. Its arguments are never sent. The model names the skill, so a value that doesn't look like a skill's name (up to 100 letters, digits and `._:/@-`, not starting with `/`) is left out, and secrets are redacted as in `command`. Sent also when prompts are withheld: like `name`, it identifies the tool, not what the developer wrote. |
 | `status` | string, optional | How the call ended: `ok`, `failed` (the agent reported an error) or `interrupted` (the developer stopped it). Accept other values. Absent when unknown: Codex reports failed calls like successful ones, so its calls have none for now, and neither do calls recorded by older clients. A shell command that exits nonzero may still be `ok`: the agent decides, and Claude Code counts e.g. `grep` finding nothing as success. |
 | `exit_code` | integer, optional | For shell tools whose call failed or was interrupted: the command's exit status, when the agent reports it (e.g. `1`, `2`, `127` for a missing command, `130` for an interrupt). Never present on `ok` calls, whose exit status agents don't report. The error message itself is never sent. |
 

@@ -35,8 +35,9 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
    `normalized` (only a formatter touched it) or `modified` (edited by a human).
 3. **Deliver.** If a Swarmia token is configured, changed sessions are sent:
    your git email, line ranges in *pushed* commits, prompts and the agent's
-   final replies (redacted, replies stripped of code), tool names and commands
-   (stripped of code), and token usage.
+   final replies (redacted, replies stripped of code), tool names, commands
+   (stripped of code) and the names of skills the agent loaded, and token
+   usage.
 
 `swarmia-cli report` shows all of this locally, at any time.
 

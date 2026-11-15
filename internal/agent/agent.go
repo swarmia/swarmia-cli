@@ -46,7 +46,9 @@ type Agent struct {
 	injectedPrompt *regexp.Regexp
 	isEditTool     func(name string) bool
 	isShellTool    func(name string) bool
-	edits          func(payload []byte, locate attribution.Locator) []attribution.Edit
+	// isSkillTool is the agent's tool for loading a skill, if it has one.
+	isSkillTool func(name string) bool
+	edits       func(payload []byte, locate attribution.Locator) []attribution.Edit
 }
 
 var ClaudeCode = &Agent{
@@ -60,6 +62,7 @@ var ClaudeCode = &Agent{
 	injectedPrompt:  claudeInjectedPrompt,
 	isEditTool:      attribution.IsClaudeEditTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
+	isSkillTool:     func(name string) bool { return name == "Skill" },
 	edits: func(payload []byte, locate attribution.Locator) []attribution.Edit {
 		if e, ok := attribution.ClaudeEdit(payload, locate); ok {
 			return []attribution.Edit{e}
@@ -182,9 +185,6 @@ type Tool struct {
 	ExitCode *int
 }
 
-// skillTool is Claude Code's tool for loading a skill.
-const skillTool = "Skill"
-
 // Tool call statuses.
 const (
 	StatusOK          = "ok"
@@ -232,8 +232,14 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		if !ev.Tool.Edits { // an edit tool's command, if any, is its patch
 			ev.Tool.Command = string(p.ToolInput.Command)
 		}
-		if p.ToolName == skillTool {
+		if a.isSkillTool != nil && a.isSkillTool(p.ToolName) {
+			// Earlier versions named the skill in command. Either way,
+			// nothing else of its input is kept: arguments are free text.
 			ev.Tool.Skill = string(p.ToolInput.Skill)
+			if ev.Tool.Skill == "" {
+				ev.Tool.Skill = ev.Tool.Command
+			}
+			ev.Tool.Command = ""
 		}
 		if a.reportsFailures {
 			ev.Tool.Status, ev.Tool.ExitCode = toolStatus(p.HookEventName, p.ToolResponse, p.Error, p.IsInterrupt, ev.Tool.Shell)
