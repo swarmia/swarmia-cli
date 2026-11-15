@@ -394,6 +394,32 @@ func TestBuildSkipsEmptySessions(t *testing.T) {
 	only(t, s, ctx)
 }
 
+// The last activity is the latest prompt, reply or tool call, not the
+// session's end; a session with none has none.
+func TestBuildSendsLastActivity(t *testing.T) {
+	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
+	reply := at.Add(5 * time.Minute)
+	s := &report.Session{ID: "s1", Agent: "claude-code", Root: "/src/app",
+		StartedAt: at, EndedAt: at.Add(72 * time.Hour), Ended: true,
+		Turns: []report.Turn{{At: at, Text: "fix it", EndedAt: &reply}},
+		Tools: []report.Tool{{At: at.Add(4 * time.Minute), Name: "Edit", Root: "/src/app", File: "/src/app/x.go"}},
+	}
+	if p := only(t, s, ctx); p.LastActivityAt == nil || !p.LastActivityAt.Equal(reply) {
+		t.Errorf("last activity = %v, want the reply at %v", p.LastActivityAt, reply)
+	}
+	s.Tools = append(s.Tools, report.Tool{At: at.Add(6 * time.Minute), Name: "Read", Root: "/src/app"})
+	if p := only(t, s, ctx); p.LastActivityAt == nil || !p.LastActivityAt.Equal(at.Add(6*time.Minute)) {
+		t.Errorf("last activity = %v, want the last tool call", p.LastActivityAt)
+	}
+	// A session with only an automatic turn has no activity of the
+	// developer's: it's sent without one.
+	s.Turns = []report.Turn{{At: at, Automatic: true, EndedAt: &reply}}
+	s.Tools = []report.Tool{{At: at.Add(time.Minute), Name: "Read", Root: "/src/app"}}
+	if p := only(t, s, ctx); p.LastActivityAt != nil {
+		t.Errorf("last activity of a session with none = %v, want nil", p.LastActivityAt)
+	}
+}
+
 func TestRepoSlug(t *testing.T) {
 	for in, want := range map[string]string{
 		// GitHub

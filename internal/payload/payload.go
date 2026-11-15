@@ -39,6 +39,9 @@ type Payload struct {
 	StartedAt      time.Time `json:"started_at"`
 	EndedAt        time.Time `json:"ended_at"`
 	Ended          bool      `json:"ended"`
+	// LastActivityAt is when the developer last worked in the session (see
+	// report.Session.LastActivity). Nil if they never did.
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 	// Turns are always sent; their prompts and replies only if
 	// PromptsWithheld isn't set.
 	Turns           []Turn   `json:"turns"`
@@ -172,6 +175,9 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 	}
 	if s.Usage != nil {
 		p.Usage = s.Usage.Totals()
+	}
+	if last, ok := s.LastActivity(); ok {
+		p.LastActivityAt = &last
 	}
 	if p.Model == "" {
 		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start

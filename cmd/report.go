@@ -128,7 +128,19 @@ func writeSessionText(out io.Writer, s *report.Session) {
 	if model == "" {
 		model = s.Agent
 	}
-	fmt.Fprintf(out, "Session %s  %s  %s → %s\n", shortID(s.ID), model, local(s.StartedAt), s.EndedAt.Local().Format("15:04"))
+	// The span shown is the session's activity; its start or end coming much
+	// later (a resume, a terminal closed days after) is noted apart.
+	until := func(t time.Time) string {
+		if y, m, d := t.Local().Date(); y == s.StartedAt.Local().Year() && m == s.StartedAt.Local().Month() && d == s.StartedAt.Local().Day() {
+			return t.Local().Format("15:04")
+		}
+		return local(t)
+	}
+	end, ended := s.EndedAt, ""
+	if last, ok := s.LastActivity(); ok && s.EndedAt.Sub(last) >= time.Hour {
+		end, ended = last, fmt.Sprintf("  (last event %s)", until(s.EndedAt))
+	}
+	fmt.Fprintf(out, "Session %s  %s  %s → %s%s\n", shortID(s.ID), model, local(s.StartedAt), until(end), ended)
 	shell := ""
 	if n := s.ShellEdits(); n > 0 {
 		shell = fmt.Sprintf(" (%d via shell)", n)
