@@ -18,13 +18,13 @@ on:
       agent:
         description: "Agent to test"
         type: choice
-        options: [all, claude-code, codex]
+        options: [all, claude-code, codex, copilot]
         default: all
       version:
         description: "Version or npm dist-tag (empty: each agent's channels)"
         default: ""
       model:
-        description: "Model for the agent (empty: Claude Code sonnet, Codex's default)"
+        description: "Model for the agent (empty: Claude Code sonnet, Codex's and Copilot's defaults)"
         default: ""
 
 permissions:
@@ -38,8 +38,8 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       # Nightly and on merges: each agent's newest release and its other channel (Claude
-      # Code's stable, Codex's alpha), which separates "the agent changed"
-      # from "we broke something". On demand: what was asked for.
+      # Code's stable, Codex's alpha, Copilot CLI's prerelease), which separates
+      # "the agent changed" from "we broke something". On demand: what was asked for.
       - id: plan
         env:
           AGENT: ${{ inputs.agent || 'all' }}
@@ -50,12 +50,13 @@ jobs:
           esac
           entries=""
           add() { entries="$entries{\"agent\":\"$1\",\"version\":\"$2\"},"; }
-          for agent in claude-code codex; do
+          for agent in claude-code codex copilot; do
             [ "$AGENT" = all ] || [ "$AGENT" = "$agent" ] || continue
             if [ -n "$VERSION" ]; then add "$agent" "$VERSION"; continue; fi
             case $agent in
               claude-code) add claude-code latest; add claude-code stable ;;
               codex) add codex latest; add codex alpha ;;
+              copilot) add copilot latest; add copilot prerelease ;;
             esac
           done
           echo "matrix={\"include\":[${entries%,}]}" >> "$GITHUB_OUTPUT"
@@ -93,10 +94,14 @@ jobs:
           E2E_AGENT: ${{ matrix.agent }}
           E2E_CLAUDE_VERSION: ${{ matrix.version }}
           E2E_CODEX_VERSION: ${{ matrix.version }}
+          E2E_COPILOT_VERSION: ${{ matrix.version }}
           E2E_MODEL: ${{ matrix.agent == 'claude-code' && (inputs.model || 'sonnet') || '' }}
           E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && inputs.model || '' }}
+          E2E_COPILOT_MODEL: ${{ matrix.agent == 'copilot' && inputs.model || '' }}
           E2E_ARTIFACTS: ${{ runner.temp }}/e2e-artifacts
-          E2E_REQUIRE_AUTH: "1"
+          # Copilot runs check the setup alone until the environment has a
+          # COPILOT_GITHUB_TOKEN.
+          E2E_REQUIRE_AUTH: ${{ (matrix.agent != 'copilot' || secrets.COPILOT_GITHUB_TOKEN != '') && '1' || '' }}
           ANTHROPIC_FEDERATION_RULE_ID: ${{ matrix.agent == 'claude-code' && vars.ANTHROPIC_FEDERATION_RULE_ID || '' }}
           ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
           ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
@@ -104,6 +109,9 @@ jobs:
           # Only Codex runs get the key, and the suite hands it to the agent
           # process alone.
           OPENAI_API_KEY: ${{ matrix.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
+          # Likewise for Copilot runs: a fine-grained token, with the Copilot
+          # Requests permission, of an account with a Copilot seat.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
         run: make e2e
 
       # Artifacts are public. The suite scrubs every credential it knows of as
@@ -113,14 +121,17 @@ jobs:
         if: always()
         env:
           OPENAI_API_KEY: ${{ matrix.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
           DIR: ${{ runner.temp }}/e2e-artifacts
         run: |
           [ -d "$DIR" ] || exit 0
-          if [ -n "$OPENAI_API_KEY" ] && grep -rqF -- "$OPENAI_API_KEY" "$DIR"; then
-            rm -rf "$DIR"
-            echo "::error::A credential reached the artifacts; they are not uploaded."
-            exit 1
-          fi
+          for key in "$OPENAI_API_KEY" "$COPILOT_GITHUB_TOKEN"; do
+            if [ -n "$key" ] && grep -rqF -- "$key" "$DIR"; then
+              rm -rf "$DIR"
+              echo "::error::A credential reached the artifacts; they are not uploaded."
+              exit 1
+            fi
+          done
 
       - name: Upload artifacts
         if: always()

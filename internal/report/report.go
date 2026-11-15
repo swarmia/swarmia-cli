@@ -409,6 +409,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		if !ok || ev.SessionID == "" {
 			continue
 		}
+		if ev.Response == "" {
+			ev.Response = rec.Response // read from the transcript (see agent.TurnResponse)
+		}
 		at, err := time.Parse(time.RFC3339, rec.LoggedAt)
 		if err != nil {
 			continue

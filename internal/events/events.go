@@ -51,6 +51,10 @@ type Record struct {
 	// SnapshotGitOperation when they went unrecorded (in some worktree, if
 	// it was snapshotted in several). Older binaries ignore it, losing only that.
 	Snapshot string `json:"snapshot,omitempty"`
+	// Response, on a turn's end, is the agent's final reply when its payload
+	// doesn't carry it (see agent.TurnResponse). Older binaries ignore it,
+	// losing only the reply.
+	Response string `json:"response,omitempty"`
 	// Snapshotted, on a shell command's records, lists the worktree roots it
 	// was snapshotted in (see snapshot.Scope): its changes anywhere else went
 	// unrecorded.

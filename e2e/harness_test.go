@@ -165,7 +165,7 @@ func (e *env) keepBytes(name string, data []byte) {
 // uploads those publicly, unmasked, and an agent's transcript or output could
 // echo its environment.
 var secretVars = []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
-	"ACTIONS_ID_TOKEN_REQUEST_TOKEN"}
+	"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"}
 
 func (e *env) addSecret(v string) {
 	if len(v) >= 8 { // shorter is no credential, and would scrub innocent text

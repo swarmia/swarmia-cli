@@ -7,7 +7,7 @@ open-source repository with swarmia-cli's hooks installed, while a script plays
 the developer — formatting, editing, committing, rebasing, pushing. Then the
 suite checks what swarmia-cli captured, attributed and would send.
 
-It runs against Claude Code and Codex. It answers questions the fuzzers can't:
+It runs against Claude Code, Codex and GitHub Copilot CLI. It answers questions the fuzzers can't:
 did a new agent release change its hook payloads or transcripts; do hooks fire and stay quiet; does the
 packaged CLI install and run; does attribution hold up on code an agent
 actually wrote and prettier actually reformatted.
@@ -18,11 +18,13 @@ actually wrote and prettier actually reformatted.
 make e2e                                  # Claude Code "latest"
 make e2e E2E_CLAUDE_VERSION=stable        # or a dist-tag / exact version
 make e2e E2E_AGENT=codex                  # Codex "latest" (E2E_CODEX_VERSION=alpha, …)
+make e2e E2E_AGENT=copilot                # Copilot CLI "latest" (E2E_COPILOT_VERSION=prerelease, …)
 E2E_ARTIFACTS=/tmp/e2e make e2e           # keep logs, transcripts, payloads
 ```
 
 `E2E_MODEL` picks Claude Code's model (default `sonnet`), `E2E_CODEX_MODEL`
-Codex's (default: Codex's own).
+Codex's and `E2E_COPILOT_MODEL` Copilot's (default: the agent's own; e.g.
+`gpt-5.6-sol` has Copilot edit with patches instead of `edit`/`create`).
 
 Claude Code's credentials, first match wins (nothing else from your
 environment leaks in):
@@ -39,6 +41,12 @@ environment leaks in):
 
 Codex's: `OPENAI_API_KEY` (or `CODEX_API_KEY`), given to `codex exec` as
 `CODEX_API_KEY`, the variable it reads.
+
+Copilot's: a GitHub token of an account with a Copilot seat,
+`COPILOT_GITHUB_TOKEN` (or `GH_TOKEN`, `GITHUB_TOKEN`), given to `copilot` as
+`COPILOT_GITHUB_TOKEN`. Locally, `COPILOT_GITHUB_TOKEN=$(gh auth token) make
+e2e E2E_AGENT=copilot`; in CI, a fine-grained token with the Copilot Requests
+permission.
 
 Without credentials the suite still sets everything up (installs, fixture,
 hooks, and for Codex the trust check below) and then skips the agent steps,
@@ -58,8 +66,9 @@ finding one fails the run.
 
 1. Build swarmia-cli from the working tree.
 2. Install the agent from npm into the temporary directory:
-   `@anthropic-ai/claude-code@<version>` (`latest`, `stable`, or exact) or
-   `@openai/codex@<version>` (`latest`, `alpha`, or exact).
+   `@anthropic-ai/claude-code@<version>` (`latest`, `stable`, or exact),
+   `@openai/codex@<version>` (`latest`, `alpha`, or exact) or
+   `@github/copilot@<version>` (`latest`, `prerelease`, or exact).
 3. Fixture: `unjs/ufo` (MIT, TypeScript, prettier, vitest), fetched at a pinned
    commit and published as `ssh://git@e2e.example/acme/ufo.git`; a teammate
    clone pushes to it. Remotes look hosted, so payloads name their
@@ -67,8 +76,9 @@ finding one fails the run.
    disk: a stand-in for ssh (`GIT_SSH_COMMAND`) serves them from local bare
    repositories.
 4. `pnpm install`, then `swarmia-cli install --scope project` (for Codex with
-   `--trust`, into the sandbox's `CODEX_HOME`). `.claude/` or `.codex/` is in
-   `.git/info/exclude`, so the hooks are never committed.
+   `--trust`, into the sandbox's `CODEX_HOME`). `.claude/`, `.codex/` or
+   `.github/hooks/` is in `.git/info/exclude`, so the hooks are never
+   committed.
 5. Codex only: trust the fixture as a project, then ask Codex (`codex
    app-server`, `hooks/list`, no model involved) whether it loads all six
    swarmia-cli hooks and trusts them. Codex skips untrusted hooks silently, so
@@ -90,7 +100,12 @@ Claude Code runs as `claude -p --output-format stream-json --verbose
 project`, with an explicit `--session-id` (and `--resume`) so sessions map
 one-to-one to swarmia-cli's. Codex runs as `codex exec --json
 --dangerously-bypass-approvals-and-sandbox`, which picks the session id itself
-(the stream's `thread.started`), and `codex exec resume <id>`.
+(the stream's `thread.started`), and `codex exec resume <id>`. Copilot runs as
+`copilot -p --output-format json --session-id <id>` (`--resume=<id>` to
+continue) with `COPILOT_ALLOW_ALL=true`, which trusts the fixture's folder (so
+Copilot runs its hooks) and allows every tool. Its own home is the sandbox's
+`~/.copilot`; its session events, `session-state/<id>/events.jsonl`, are the
+transcript, and hook failures come from their `hook.end` records.
 
 ## Multi-repository scenario
 
@@ -121,7 +136,8 @@ snapshots:
    and is marked ended; no hook reported an error.
 2. **Usage**: swarmia-cli's output tokens are non-zero and equal an
    independent count over the session's transcripts (Claude Code: each
-   response once; Codex: the rollout's last running total).
+   response once; Codex: the rollout's last running total; Copilot: the sum of
+   its usage records).
 3. **Attribution**, per session: a session's lines are the union of its
    transcript's edit-tool inputs and the working tree's changes during its runs
    (which covers shell edits). Each line the scenario's pushed commits
@@ -153,15 +169,19 @@ channels, which separates "the agent changed" from "we broke something":
 |---|---|---|
 | Claude Code | `latest` | `stable` |
 | Codex | `alpha` | `latest` |
+| Copilot CLI | `prerelease` | `latest` |
 
 Jobs run in the `e2e` GitHub environment, which only `main` may deploy to and
-which holds the `ANTHROPIC_*` federation variables and the `OPENAI_API_KEY`
-secret (a dedicated OpenAI project with a spend cap). The Anthropic federation
+which holds the `ANTHROPIC_*` federation variables, the `OPENAI_API_KEY`
+secret (a dedicated OpenAI project with a spend cap) and the
+`COPILOT_GITHUB_TOKEN` secret (without it, Copilot jobs check the setup and
+skip the agent steps). The Anthropic federation
 rule accepts only that environment's OIDC subject,
 `repo:swarmia/swarmia-cli:environment:e2e`, so pull requests, forks and other
 branches can't obtain Anthropic credentials. Only Codex jobs get the OpenAI
-key; before uploading artifacts, a workflow step checks them for it once more
-and withholds them if it's there.
+key, and only Copilot jobs the GitHub token; before uploading artifacts, a
+workflow step checks them for both once more and withholds them if one is
+there.
 
 ## Phases
 
@@ -174,4 +194,7 @@ and withholds them if it's there.
    their edit replaced). Now: precision, recall and class agreement 1.000 for
    both sessions, all three classes exercised, ~$0.23 per run.
 3. Codex, on both channels, with the same scenario and oracle. ← in progress
-4. Install through the npm package; delivery to a fake `hook`; macOS.
+4. Copilot CLI, on both channels, with the same scenario and oracle. Its first
+   local run (1.0.112): precision, recall and class agreement 1.000 for both
+   sessions.
+5. Install through the npm package; delivery to a fake `hook`; macOS.

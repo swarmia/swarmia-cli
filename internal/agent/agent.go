@@ -49,6 +49,12 @@ type Agent struct {
 	// isSkillTool is the agent's tool for loading a skill, if it has one.
 	isSkillTool func(name string) bool
 	edits       func(payload []byte, locate attribution.Locator) []attribution.Edit
+	// copilot is set for GitHub Copilot, whose Claude-shaped payloads differ
+	// in the details (see parseCopilot).
+	copilot bool
+	// response reads the agent's final reply in a turn from its transcript,
+	// for agents whose Stop payload doesn't carry it.
+	response func(transcriptPath string) string
 }
 
 var ClaudeCode = &Agent{
@@ -84,6 +90,59 @@ var Codex = &Agent{
 	edits:           attribution.CodexEdits,
 }
 
+// Copilot is GitHub Copilot's agent, in Copilot CLI, VS Code and the GitHub
+// Copilot app, which share its hooks. Configured under Claude Code's event
+// names (PreToolUse, not preToolUse), its hooks send Claude-shaped payloads
+// with Claude tool names (Bash, Edit, Write); the tools' inputs are its own
+// (see attribution.CopilotEdits). It also runs a repository's Claude Code
+// hooks (see IsCopilotPayload).
+var Copilot = &Agent{
+	Name:      "copilot",
+	Title:     "GitHub Copilot",
+	ConfigDir: ".github",
+	hooksFiles: map[Scope]string{ScopeProject: filepath.Join("hooks", CopilotHooksFile),
+		ScopeLocal: filepath.Join("copilot", "settings.local.json"), ScopeUser: filepath.Join("hooks", CopilotHooksFile)},
+	userDir:         copilotHome,
+	Transcript:      usage.CopilotEvents,
+	reportsFailures: true,
+	isEditTool:      attribution.IsCopilotEditTool,
+	isShellTool:     func(name string) bool { return name == "Bash" },
+	edits:           attribution.CopilotEdits,
+	copilot:         true,
+	response:        usage.CopilotResponse,
+}
+
+// CopilotHooksFile is the hooks file swarmia-cli owns among Copilot's
+// .github/hooks/*.json (project scope) and ~/.copilot/hooks/*.json (user).
+const CopilotHooksFile = "swarmia.json"
+
+// copilotHome is Copilot's user configuration directory.
+func copilotHome() (string, error) {
+	if dir := os.Getenv("COPILOT_HOME"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".copilot"), nil
+}
+
+// IsCopilotPayload reports whether a hook payload came from GitHub Copilot.
+// Copilot runs a repository's Claude Code hooks too, sending them its own
+// payloads, which carry a timestamp that Claude Code's lack.
+func IsCopilotPayload(payload []byte) bool {
+	var p struct {
+		HookEventName string `json:"hook_event_name"`
+		Timestamp     any    `json:"timestamp"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.HookEventName == "" {
+		return false
+	}
+	ts, ok := p.Timestamp.(string)
+	return ok && ts != ""
+}
+
 // claudeInjectedPrompt matches a prompt made only of the blocks Claude Code
 // submits for a background task (<task-notification>) or a subagent reporting
 // back (<agent-message>).
@@ -116,7 +175,7 @@ func claudeConfigDir() (string, error) {
 }
 
 // All lists the supported agents.
-var All = []*Agent{ClaudeCode, Codex}
+var All = []*Agent{ClaudeCode, Codex, Copilot}
 
 // Lookup returns the agent with the given name, or nil.
 func Lookup(name string) *Agent {
@@ -176,6 +235,13 @@ type Tool struct {
 	// Shell is set for shell tools, whose changes are found by snapshotting
 	// the worktree around the call.
 	Shell bool
+	// Background is the id of a shell command that runs on after its call
+	// returns (a Copilot async shell): its changes are found when a later
+	// call reports it Awaited.
+	Background string
+	// Awaited is the id of a background shell command this call found
+	// finished.
+	Awaited string
 	// Status is how a finished call ended: StatusOK, StatusFailed or
 	// StatusInterrupted, or empty if the agent doesn't say.
 	Status string
@@ -199,26 +265,28 @@ var exitCodeRE = regexp.MustCompile(`^Exit code (-?\d+)`)
 // Parse reads a hook payload. ok is false if it isn't a JSON object.
 func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 	var p struct {
-		HookEventName  string `json:"hook_event_name"`
-		SessionID      string `json:"session_id"`
-		TranscriptPath string `json:"transcript_path"`
-		Cwd            string `json:"cwd"`
-		Model          string `json:"model"`
-		Prompt         string `json:"prompt"`
-		LastAssistant  string `json:"last_assistant_message"`
-		ToolName       string `json:"tool_name"`
-		ToolUseID      string `json:"tool_use_id"`
-		ToolInput      struct {
-			FilePath string     `json:"file_path"`
-			Command  textOrNone `json:"command"`
-			Skill    textOrNone `json:"skill"`
-		} `json:"tool_input"`
-		ToolResponse json.RawMessage `json:"tool_response"`
-		Error        string          `json:"error"`
-		IsInterrupt  bool            `json:"is_interrupt"`
+		HookEventName  string          `json:"hook_event_name"`
+		SessionID      string          `json:"session_id"`
+		TranscriptPath string          `json:"transcript_path"`
+		Cwd            string          `json:"cwd"`
+		Model          string          `json:"model"`
+		Prompt         string          `json:"prompt"`
+		LastAssistant  string          `json:"last_assistant_message"`
+		ToolName       string          `json:"tool_name"`
+		ToolUseID      string          `json:"tool_use_id"`
+		ToolInput      toolInput       `json:"tool_input"`
+		ToolResponse   json.RawMessage `json:"tool_response"`
+		Error          string          `json:"error"`
+		IsInterrupt    bool            `json:"is_interrupt"`
+		// Copilot's
+		ToolResult    copilotToolResult `json:"tool_result"`
+		ParentAgentID string            `json:"parent_agent_id"`
 	}
 	if json.Unmarshal(payload, &p) != nil {
 		return Event{}, false
+	}
+	if a.copilot && p.ToolInput.FilePath == "" {
+		p.ToolInput.FilePath = p.ToolInput.Path
 	}
 	ev = Event{Name: p.HookEventName, SessionID: p.SessionID, TranscriptPath: p.TranscriptPath,
 		Cwd: p.Cwd, Model: p.Model, Prompt: PromptText(p.Prompt), Response: p.LastAssistant}
@@ -245,7 +313,97 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 			ev.Tool.Status, ev.Tool.ExitCode = toolStatus(p.HookEventName, p.ToolResponse, p.Error, p.IsInterrupt, ev.Tool.Shell)
 		}
 	}
+	if a.copilot {
+		parseCopilot(&ev, p.ToolInput, p.ToolResult, p.ParentAgentID)
+	}
 	return ev, true
+}
+
+// toolInput is the part of a tool call's input Parse reads.
+type toolInput struct {
+	FilePath string     `json:"file_path"`
+	Command  textOrNone `json:"command"`
+	Skill    textOrNone `json:"skill"`
+	// Copilot's
+	Path    string `json:"path"`
+	Mode    string `json:"mode"`    // a shell's: "sync" or "async"
+	ShellID string `json:"shellId"` // an async shell's, or what read_bash reads
+}
+
+// UnmarshalJSON reads a tool input that isn't an object (Copilot sends a
+// patch as a bare string) as empty, instead of failing the payload.
+func (in *toolInput) UnmarshalJSON(data []byte) error {
+	type plain toolInput
+	var p plain
+	if json.Unmarshal(data, &p) == nil {
+		*in = toolInput(p)
+	}
+	return nil
+}
+
+// copilotToolResult is a finished Copilot tool call's result.
+type copilotToolResult struct {
+	ResultType string `json:"result_type"`
+	Text       string `json:"text_result_for_llm"`
+}
+
+// copilotShellDone matches how a Copilot shell's result says the command
+// finished: "<shellId: 3 completed with exit code 1>".
+var copilotShellDone = regexp.MustCompile(`<shellId: (\S+) completed with exit code (-?\d+)>`)
+
+// copilotShellStarted matches an async shell's result: the command is still
+// running.
+var copilotShellStarted = regexp.MustCompile(`<command started in background with shellId: (\S+)>`)
+
+// parseCopilot adapts a Copilot payload, which Parse has read as Claude
+// Code's.
+//
+// A subagent's events carry its own session id, with its parent's as
+// parent_agent_id: they're folded into the parent's session, its prompt as
+// one the agent wrote, and its turn's end as a SubagentStop.
+//
+// A shell command that exits nonzero still succeeds as a tool call; only its
+// result says how it exited. An async shell (mode "async") keeps running
+// after its PostToolUse: its changes are snapshotted when read_bash reports it
+// finished (see Tool.Background, Tool.Awaited).
+func parseCopilot(ev *Event, in toolInput, result copilotToolResult, parent string) {
+	if parent != "" {
+		ev.SessionID = parent
+		switch ev.Name {
+		case "UserPromptSubmit":
+			ev.Injected = true
+		case "Stop", "SessionStart", "SessionEnd":
+			ev.Name = "Subagent" + ev.Name
+		}
+	}
+	t := &ev.Tool
+	switch {
+	case t.Shell && in.Mode == "async":
+		t.Background = in.ShellID
+		if m := copilotShellStarted.FindStringSubmatch(result.Text); m != nil {
+			t.Background = m[1]
+		}
+		if t.Background == "" { // can't be paired with its end: snapshot it as a sync one
+			break
+		}
+		if ev.Name == "PostToolUse" && copilotShellStarted.MatchString(result.Text) {
+			t.Status = "" // still running
+			return
+		}
+		fallthrough
+	case t.Shell:
+		if m := copilotShellDone.FindStringSubmatch(result.Text); m != nil && ev.Name == "PostToolUse" && m[2] != "0" {
+			if n, err := strconv.Atoi(m[2]); err == nil {
+				t.Status, t.ExitCode = StatusFailed, &n
+			}
+		}
+	case t.Name == "read_bash":
+		// Only a command that finished: one stopped with stop_bash is a
+		// server or a watcher, which writes no code.
+		if m := copilotShellDone.FindStringSubmatch(result.Text); m != nil && ev.Name == "PostToolUse" {
+			t.Awaited = m[1]
+		}
+	}
 }
 
 // toolStatus reads how a finished tool call ended from an agent that reports
@@ -285,6 +443,16 @@ func (t *textOrNone) UnmarshalJSON(data []byte) error {
 		*t = textOrNone(s)
 	}
 	return nil
+}
+
+// TurnResponse is the agent's final reply in a turn that just ended, read from
+// its transcript, for agents whose Stop payload doesn't carry it; "" for
+// others, or if it can't be read.
+func (a *Agent) TurnResponse(transcriptPath string) string {
+	if a.response == nil || transcriptPath == "" {
+		return ""
+	}
+	return a.response(transcriptPath)
 }
 
 // Edits extracts the file edits in a PostToolUse payload: the files the

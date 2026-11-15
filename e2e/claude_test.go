@@ -24,6 +24,7 @@ type agent interface {
 	name() string       // as in payloads: claude-code, codex
 	projectDir() string // its project settings directory: .claude, .codex
 	versionVar() string // the variable choosing its version or dist-tag
+	model() string      // the model it runs, if chosen (for metrics)
 	install(e *env, version string)
 	installFlags() []string // extra flags for swarmia-cli install
 	prepare(e *env)         // after install, before the first run
@@ -105,6 +106,7 @@ type claudeCode struct{}
 func (claudeCode) name() string           { return "claude-code" }
 func (claudeCode) projectDir() string     { return ".claude" }
 func (claudeCode) versionVar() string     { return "E2E_CLAUDE_VERSION" }
+func (claudeCode) model() string          { return envOr("E2E_MODEL", "") }
 func (claudeCode) installFlags() []string { return nil }
 func (claudeCode) prepare(*env)           {}
 

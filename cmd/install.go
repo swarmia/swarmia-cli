@@ -34,19 +34,22 @@ var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install Swarmia hooks into supported coding agents found in this repo",
 	Long: "install detects which supported coding agents are configured in this repository\n" +
-		"(Claude Code, via a .claude directory; Codex, via a .codex directory) and adds\n" +
-		"the Swarmia hooks to each one's settings.\n\n" +
+		"(Claude Code, via a .claude directory; Codex, via a .codex directory; GitHub\n" +
+		"Copilot, via .github/hooks, .github/copilot or .github/copilot-instructions.md)\n" +
+		"and adds the Swarmia hooks to each one's settings.\n\n" +
 		"It is idempotent: hooks already present are left alone, and unrelated settings and\n" +
 		"hooks are preserved. Hooks for subcommands that no longer exist (process-logs) are\n" +
 		"removed, and swarmia-cli hooks installed without a name (statusMessage) get one.\n\n" +
 		"--scope picks the settings file:\n" +
-		"  project  .claude/settings.json, .codex/hooks.json — committed, so hooks for\n" +
-		"           everyone (default)\n" +
-		"  local    .claude/settings.local.json — just you, in this checkout (Claude Code\n" +
-		"           only: Codex has no personal per-project hooks file)\n" +
-		"  user     ~/.claude/settings.json, ~/.codex/hooks.json — just you, in every\n" +
-		"           project and worktree; stands down in projects that have their own\n" +
-		"           swarmia-cli hooks\n\n" +
+		"  project  .claude/settings.json, .codex/hooks.json, .github/hooks/swarmia.json —\n" +
+		"           committed, so hooks for everyone (default)\n" +
+		"  local    .claude/settings.local.json, .github/copilot/settings.local.json —\n" +
+		"           just you, in this checkout (Codex has no personal per-project hooks\n" +
+		"           file)\n" +
+		"  user     ~/.claude/settings.json, ~/.codex/hooks.json,\n" +
+		"           ~/.copilot/hooks/swarmia.json — just you, in every project and\n" +
+		"           worktree; stands down in projects that have their own swarmia-cli\n" +
+		"           hooks\n\n" +
 		"For project scope the command used to invoke swarmia-cli is auto-detected: a\n" +
 		"swarmia-cli binary at the repo root (handy for local development), then an npm\n" +
 		"dependency in node_modules, then a swarmia-cli on your $PATH. For local and\n" +
@@ -100,6 +103,12 @@ type agentConfig struct {
 	// differ; install rewrites it to the current one. nil when there's none.
 	legacyInRepo func(rel, args string) string
 	hooks        []hookSpec
+	// install adds the hooks to the agent's settings file, if not as
+	// installHooks does.
+	install func(path, command, legacy string, specs []hookSpec, dryRun bool) (hookChanges, error)
+	// guard makes a hook command that runs a binary outside the repository
+	// do nothing, quietly, if the binary isn't there; nil leaves it as is.
+	guard func(cmd, args string) string
 	// activate tells the user what's left to do once hooks are installed at
 	// path (and does it, where asked and possible).
 	activate func(out io.Writer, path string, opts installOpts) error
@@ -126,7 +135,7 @@ type hookChanges struct {
 // hook runs.
 const hookStatusMessage = "Swarmia: log session activity"
 
-var supportedAgents = []agentConfig{claudeCodeAgent, codexAgent}
+var supportedAgents = []agentConfig{claudeCodeAgent, codexAgent, copilotAgent}
 
 func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 	scope := opts.scope
@@ -159,7 +168,11 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			continue
 		}
 		detected++
-		res, err := installHooks(path, ag.hookCommand(ref, scope), ag.legacyHookCommand(ref, scope), ag.hooks, opts.dryRun)
+		install := installHooks
+		if ag.install != nil {
+			install = ag.install
+		}
+		res, err := install(path, ag.hookCommand(ref, scope), ag.legacyHookCommand(ref, scope), ag.hooks, opts.dryRun)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ag.Title, err)
 		}
@@ -223,6 +236,9 @@ func (ag agentConfig) hookCommand(ref binaryRef, scope agent.Scope) string {
 	args := ag.hookArgs(scope)
 	if ref.rel != "" {
 		return ag.inRepo(ref.rel, args)
+	}
+	if ag.guard != nil {
+		return ag.guard(ref.cmd, args)
 	}
 	return ref.cmd + " " + args
 }
@@ -578,10 +594,14 @@ func runsSwarmia(command, subcmd string) bool {
 	return strings.Contains(command, binaryName) && strings.Contains(command, subcmd)
 }
 
-// hookCommand is a hook entry's command, or "" if it has none.
+// hookCommand is a hook entry's command, or "" if it has none: its command,
+// or Copilot's bash command.
 func hookCommand(h any) string {
 	hm, _ := h.(map[string]any)
-	cmd, _ := hm["command"].(string)
+	if cmd, _ := hm["command"].(string); cmd != "" {
+		return cmd
+	}
+	cmd, _ := hm["bash"].(string)
 	return cmd
 }
 
