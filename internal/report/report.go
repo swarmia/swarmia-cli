@@ -443,11 +443,14 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		case events.SnapshotOverBudget, events.SnapshotFailed, events.SnapshotGitOperation:
 			s.ShellUnrecorded++
 		}
+		// The model the session started with: the first one an event reports
+		// (Claude Code's SessionStart, any of Codex's events). A resumed
+		// session's SessionStart reports the model it's resumed with.
+		if s.Model == "" && ev.Model != "" {
+			s.Model = ev.Model
+		}
 		switch ev.Name {
 		case "SessionStart":
-			if ev.Model != "" {
-				s.Model = ev.Model
-			}
 			s.Ended = false // resumed
 		case "UserPromptSubmit":
 			n := len(s.Turns)
@@ -460,9 +463,6 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 				s.Turns = append(s.Turns, Turn{At: at, Automatic: true})
 			}
 			// ...but arriving mid-turn, it's part of that turn.
-			if s.Model == "" && ev.Model != "" { // Codex sends the model with every event
-				s.Model = ev.Model
-			}
 		case "Stop":
 			// It ends the latest turn. A stop hook can make the agent go on,
 			// and then the turn ends at the next Stop instead.

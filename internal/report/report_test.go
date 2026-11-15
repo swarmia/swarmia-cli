@@ -470,6 +470,23 @@ func TestFoldCountsUnrecordedShellCommands(t *testing.T) {
 	}
 }
 
+// A session keeps the model it started with when it's resumed with another,
+// also when the resume is folded in a later run.
+func TestFoldKeepsTheModelTheSessionStartedWith(t *testing.T) {
+	start := func(at time.Time, model string) events.Record {
+		return events.Record{LoggedAt: at.Format(time.RFC3339),
+			Event: json.RawMessage(`{"hook_event_name":"SessionStart","session_id":"s","model":"` + model + `"}`)}
+	}
+	end := events.Record{LoggedAt: t0.Add(time.Minute).Format(time.RFC3339),
+		Event: json.RawMessage(`{"hook_event_name":"SessionEnd","session_id":"s"}`)}
+	sessions := map[string]*Session{}
+	Fold(sessions, []events.Record{start(t0, "claude-first"), end}, "")
+	Fold(sessions, []events.Record{start(t0.Add(time.Hour), "claude-second")}, "")
+	if s := sessions["s"]; s.Model != "claude-first" || s.Ended {
+		t.Errorf("model %q, ended %v; want claude-first, not ended", s.Model, s.Ended)
+	}
+}
+
 // emailIs is Options.AuthorEmail for a user with the same email everywhere.
 func emailIs(email string) func(string) string {
 	return func(string) string { return email }
