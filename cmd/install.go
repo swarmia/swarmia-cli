@@ -38,7 +38,7 @@ var installCmd = &cobra.Command{
 		"the Swarmia hooks to each one's settings.\n\n" +
 		"It is idempotent: hooks already present are left alone, and unrelated settings and\n" +
 		"hooks are preserved. Hooks for subcommands that no longer exist (process-logs) are\n" +
-		"removed.\n\n" +
+		"removed, and swarmia-cli hooks installed without a name (statusMessage) get one.\n\n" +
 		"--scope picks the settings file:\n" +
 		"  project  .claude/settings.json, .codex/hooks.json — committed, so hooks for\n" +
 		"           everyone (default)\n" +
@@ -117,8 +117,14 @@ type binaryRef struct {
 type hookChanges struct {
 	added   int
 	updated int
+	named   int
 	removed int
 }
+
+// hookStatusMessage names swarmia-cli's hooks: Codex lists hooks by it in
+// /hooks ("Unnamed hook" without one), and Claude Code shows it while the
+// hook runs.
+const hookStatusMessage = "Swarmia: log session activity"
 
 var supportedAgents = []agentConfig{claudeCodeAgent, codexAgent}
 
@@ -162,7 +168,7 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			fmt.Fprintf(out, "Warning: %s already runs swarmia-cli log-hook for this project; with both, every event is logged twice. Remove the hooks from one of them.\n",
 				displayPath(repoDir, dup))
 		}
-		if res.added == 0 && res.updated == 0 && res.removed == 0 {
+		if res.added == 0 && res.updated == 0 && res.named == 0 && res.removed == 0 {
 			fmt.Fprintf(out, "%s (%s): already configured\n", ag.Title, rel)
 		} else {
 			verb := "added"
@@ -172,6 +178,9 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 			msg := fmt.Sprintf("%s %d hook(s)", verb, res.added)
 			if res.updated > 0 {
 				msg += fmt.Sprintf(", updated %d hook(s) to the current command", res.updated)
+			}
+			if res.named > 0 {
+				msg += fmt.Sprintf(", named %d hook(s)", res.named)
 			}
 			if res.removed > 0 {
 				msg += fmt.Sprintf(", removed %d obsolete hook(s)", res.removed)
@@ -391,7 +400,8 @@ func installHooks(path, command, legacy string, specs []hookSpec, dryRun bool) (
 			res.added++
 		}
 	}
-	if (res.added > 0 || res.updated > 0 || res.removed > 0) && !dryRun {
+	res.named = nameHooks(doc)
+	if (res.added > 0 || res.updated > 0 || res.named > 0 || res.removed > 0) && !dryRun {
 		if err := writeJSONObject(path, doc, layout, newKeyOrder(specs)); err != nil {
 			return hookChanges{}, err
 		}
@@ -419,7 +429,7 @@ func ensureHook(doc map[string]any, spec hookSpec, command string) bool {
 		}
 	}
 
-	newHook := map[string]any{"type": "command", "command": command}
+	newHook := map[string]any{"type": "command", "command": command, "statusMessage": hookStatusMessage}
 	if spec.timeout > 0 {
 		newHook["timeout"] = spec.timeout
 	}
@@ -456,6 +466,31 @@ func replaceHookCommand(doc map[string]any, from, to string) int {
 			for _, h := range asSlice(gm, "hooks") {
 				if hm, ok := h.(map[string]any); ok && hookCommand(hm) == from {
 					hm["command"] = to
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+// nameHooks gives swarmia-cli's log-hook hooks that have no statusMessage
+// ours, returning how many it named. Hooks installed by earlier versions had
+// none; a message someone set themselves is left alone.
+func nameHooks(doc map[string]any) int {
+	hooks, _ := doc["hooks"].(map[string]any)
+	n := 0
+	for _, v := range hooks {
+		groups, _ := v.([]any)
+		for _, g := range groups {
+			gm, _ := g.(map[string]any)
+			for _, h := range asSlice(gm, "hooks") {
+				hm, ok := h.(map[string]any)
+				if !ok || !runsSwarmia(hookCommand(hm), "log-hook") {
+					continue
+				}
+				if _, has := hm["statusMessage"]; !has {
+					hm["statusMessage"] = hookStatusMessage
 					n++
 				}
 			}
@@ -606,10 +641,10 @@ func writeJSONObject(path string, doc map[string]any, layout *jsonedit.Layout, k
 }
 
 // newKeyOrder is how keys install adds are ordered: a hook group's matcher
-// before its hooks, a hook's type, command and timeout in that order, and
-// new events in the order of specs.
+// before its hooks, a hook's type, command, timeout and statusMessage in that
+// order, and new events in the order of specs.
 func newKeyOrder(specs []hookSpec) []string {
-	order := []string{"matcher", "hooks", "type", "command", "timeout"}
+	order := []string{"matcher", "hooks", "type", "command", "timeout", "statusMessage"}
 	for _, s := range specs {
 		order = append(order, s.event)
 	}

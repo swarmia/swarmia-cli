@@ -4,7 +4,8 @@
 //   - no source code: line attribution only, commands with heredoc bodies and
 //     inline scripts stripped, the agent's replies with code blocks stripped,
 //     and tool output never included;
-//   - secrets redacted from prompts, replies and commands;
+//   - secrets redacted from prompts, replies and commands, and the
+//     <system-reminder> blocks agents add to prompts cut;
 //   - prompts and the agent's replies withheld entirely when configuration
 //     opts out (their timing is still sent);
 //   - only pushed commits, file paths relative to their repository, and local
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/attribution"
 	"github.com/swarmia/swarmia-cli/internal/redact"
 	"github.com/swarmia/swarmia-cli/internal/report"
@@ -108,7 +110,8 @@ type Context struct {
 // Build makes the payload of s, listing the repositories the session worked
 // in, in the order it first worked in them (the one it was started in first).
 // A worktree that can't be identified is left out; a session that worked in
-// no identifiable repository isn't sent, and Build reports false.
+// no identifiable repository isn't sent, and Build reports false. Nor is an
+// empty one (see isEmpty).
 //
 // The whole session goes where the project's configuration says, whatever
 // the repositories it worked in are configured with: a developer reports to
@@ -116,6 +119,9 @@ type Context struct {
 // that of any repository the session worked in, opts out, and so are the
 // agent's replies with them; the turns' timing is sent either way.
 func Build(s *report.Session, ctx Context) (Payload, bool) {
+	if isEmpty(s) {
+		return Payload{}, false
+	}
 	info := map[string]RepoInfo{}
 	var roots []string // in the order the session worked in them
 	addRoot := func(root string) {
@@ -171,9 +177,12 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		p.Model = mainModel(p.Usage) // headless (-p) sessions don't report it at start
 	}
 	for _, t := range s.Turns {
-		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic}
+		// Turns stored before system reminders were cut from prompts at
+		// parse time have them still.
+		text := agent.PromptText(t.Text)
+		turn := Turn{StartedAt: t.At, EndedAt: t.EndedAt, Automatic: t.Automatic || text == "" && t.Text != ""}
 		if prompts {
-			turn.Prompt = masks.around(t.Text, redact.Text)
+			turn.Prompt = masks.around(text, redact.Prompt)
 			turn.Response = masks.around(t.Response, redact.Response)
 		}
 		p.Turns = append(p.Turns, turn)
@@ -208,6 +217,24 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		}
 	}
 	return p, true
+}
+
+// isEmpty reports whether nothing happened in s: no turn, tool call or model
+// request. That's a session the agent replaced as soon as it started it
+// (/clear, resuming another) or one quit right away. If anything happens in
+// it later, it is sent then.
+func isEmpty(s *report.Session) bool {
+	if len(s.Turns) > 0 || len(s.Tools) > 0 || len(s.Edits) > 0 {
+		return false
+	}
+	if s.Usage != nil {
+		for _, t := range s.Usage.Totals() {
+			if t.Requests > 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // masks is the replacements that hide where things live on this machine, in

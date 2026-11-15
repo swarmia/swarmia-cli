@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/swarmia/swarmia-cli/internal/agent"
+	"github.com/swarmia/swarmia-cli/internal/deliver"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
@@ -129,7 +130,9 @@ func runLogHook(stdin io.Reader) error {
 		return err
 	}
 	if shouldProcess(ev, path) {
-		startBackgroundProcess(path)
+		// Waiting at session end, so a periodic run already in progress can't
+		// leave the session's last events unsent.
+		startBackgroundProcess(path, ev.Name == "SessionEnd")
 	}
 	return nil
 }
@@ -290,11 +293,33 @@ func snapshotMarker(err error) string {
 }
 
 // shouldProcess decides when to fold the log in the background: when a session
-// ends, and whenever the log has grown large (long-running sessions).
+// ends, whenever the log has grown large, and at the end of a turn once a
+// resend interval has passed, so a session that never ends (a remote-control
+// session in a container that is killed) is still delivered while it runs.
 func shouldProcess(ev agent.Event, logPath string) bool {
 	if ev.Name == "SessionEnd" {
 		return true
 	}
-	fi, err := os.Stat(logPath)
-	return err == nil && fi.Size() >= backgroundLogSize
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() >= backgroundLogSize {
+		return true
+	}
+	return ev.Name == "Stop" && periodicProcessDue(filepath.Dir(logPath), time.Now())
+}
+
+// periodicProcessStamp is touched in the state directory whenever a turn end
+// starts a periodic run, so concurrent sessions share one interval.
+const periodicProcessStamp = "periodic-process"
+
+// periodicProcessDue reports whether MinResendInterval has passed since the
+// last periodic run (or there was none), and if so restarts the interval.
+func periodicProcessDue(stateDir string, now time.Time) bool {
+	stamp := filepath.Join(stateDir, periodicProcessStamp)
+	fi, err := os.Stat(stamp)
+	if err == nil && now.Sub(fi.ModTime()) < deliver.MinResendInterval {
+		return false
+	}
+	if err := os.WriteFile(stamp, nil, 0o600); err != nil {
+		return false
+	}
+	return os.Chtimes(stamp, now, now) == nil
 }

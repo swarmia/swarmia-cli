@@ -47,8 +47,8 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
 - **No source code leaves your machine.** Attribution is line numbers in
   pushed commits; where code needs to be shown, Swarmia can read it from your
   Git provider, which it's already connected to. Shell commands are sent with heredoc bodies, inline scripts and
-  long quoted strings removed, and the agent's replies without their code
-  blocks. Tool output is never sent.
+  long quoted strings removed, prompts without the content you pasted into
+  them or their code blocks, and the agent's replies without their code blocks. Tool output is never sent.
 - **Secrets are redacted** from prompts, replies and commands before sending (provider
   tokens, private keys, passwords in URLs and connection strings, secret-looking
   assignments, random-looking strings), each becoming `[REDACTED:<kind>]`.
@@ -64,7 +64,8 @@ coding agent ──hooks──▶ swarmia-cli log-hook ──▶ local event log
 - **Nothing is sent without a token**, and only pushed commits are ever sent.
   Local state lives outside your repositories, readable only by you.
 
-Prompts can still contain code you paste into them; redaction can't tell.
+Prompts can still contain code outside code blocks that the agent doesn't mark
+as pasted; redaction can't tell.
 
 ### Never in the way
 
@@ -76,11 +77,11 @@ as a budget:
 |---|---|
 | Prompts, edits, reads and other tool calls | ~5–7 ms per event: an append to a local file and a read of `.git/HEAD`, with no `git` process |
 | Shell commands (Bash) | read-only ones (`grep`, `cat`, `sed -n`, `git log`, …): like other tool calls; the rest: one `git status` before and after, for the snapshot: ~35 ms per command in a small repository, ~140 ms in a 14k-file one, at most 500 ms per side |
-| Session end | starts the background run and returns immediately |
+| Session end, and a turn end at most every 15 minutes | starts the background run and returns immediately |
 
 - Anything heavier — folding the log, matching edits to commits, delivery —
-  runs in a detached background process after the session ends, never while the
-  agent waits.
+  runs in a detached background process after a turn or the session ends, never
+  while the agent waits.
 - Hooks are passive: they always exit 0 and never print to the agent, so a
   failure can't block or derail a tool call.
 - Concurrent hooks are serialized with file locks; nothing is written into your
@@ -257,6 +258,14 @@ sends right away; `send --dry-run` shows how many would go.
 | `log-hook` | the hook itself; agents call it |
 | `version` | print version and build information |
 
+## Troubleshooting
+
+### Why aren't my sessions being delivered?
+
+Ensure your firewall allows outbound connections to the backend endpoint
+(default: `https://hook.swarmia.com/cli`, TCP `hook.swarmia.com:443`). Run
+`swarmia-cli config` to check your configured endpoint.
+
 ## Internals
 
 ### Capture: `log-hook`
@@ -339,8 +348,12 @@ and their records in the log, wait for a newer version to process them.
 - **Prune:** sessions inactive for 30 days are deleted.
 - **Deliver**, if a token is configured.
 
-It runs detached from `log-hook` at session end (or when the log passes 8 MB),
-and before `report`. A lock keeps it to one run at a time.
+It runs detached from `log-hook` at session end, when the log passes 8 MB, and at
+the end of a turn at most every 15 minutes (so a session that never ends, as in a
+container that is killed, still delivers),
+and before `report`. A lock keeps it to one run at a time: the run at session end
+waits for one in progress, since that one may have read the log before the
+session's last events, and the others skip.
 
 ### Attribution
 

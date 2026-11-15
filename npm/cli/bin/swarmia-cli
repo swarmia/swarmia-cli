@@ -66,6 +66,19 @@ if [ "$count" -gt 1 ]; then
 fi
 
 if [ "$count" -gt 0 ]; then
+  # macOS 27 breaks TLS in a binary started via a symlink then "..", as pnpm
+  # gives $first, so exec its real path. $dir first: ksh93's `cd -P` misreads "../".
+  here=$PWD
+  rel=${first#"$dir"/}
+  if [ . -ef "$here" ] && CDPATH= cd -P -- "$dir" 2>/dev/null; then
+    if CDPATH= cd -P -- "${rel%/*}" 2>/dev/null; then
+      first=$PWD/${first##*/}
+    fi
+    if ! CDPATH= cd -- "$here" 2>/dev/null; then
+      echo "swarmia-cli: can't return to the working directory $here." >&2
+      exit 1
+    fi
+  fi
   exec "$first" "$@"
 fi
 

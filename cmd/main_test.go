@@ -12,7 +12,7 @@ import (
 // test can ever touch the developer's own Claude Code or Codex setup. Tests
 // that need one of these set their own with t.Setenv.
 func TestMain(m *testing.M) {
-	startBackgroundProcess = func(string) {}
+	startBackgroundProcess = func(string, bool) {}
 	home, err := os.MkdirTemp("", "swarmia-cli-test-home-")
 	if err != nil {
 		panic(err)
