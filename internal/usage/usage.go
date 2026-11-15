@@ -2,9 +2,9 @@
 // session, read from the agent's own transcript files. Hooks don't carry token
 // counts; transcripts do.
 //
-// Only usage fields are parsed — never message content — and nothing but the
-// totals is kept, with one exception: the names of the skills the developer
-// invoked by typing their command (see Skill). Reading is incremental: each
+// Only usage fields are parsed and nothing but the totals is kept, with one
+// exception: the names of the skills the developer invoked by typing their
+// command (see Skill), for which the messages that name a skill are read. Reading is incremental: each
 // file keeps a byte offset, so a long session's transcript is read once
 // overall, not once per run.
 //
@@ -449,8 +449,11 @@ func (st *fileState) codexSkill(line []byte) {
 		l.Payload.Type != "message" || l.Payload.Role != "user" || len(l.Payload.Content) == 0 {
 		return
 	}
-	if m := codexSkillName.FindStringSubmatch(l.Payload.Content[0].Text); m != nil {
-		st.Skills = append(st.Skills, Skill{At: l.Timestamp.UTC(), Name: m[1]})
+	for _, c := range l.Payload.Content {
+		if m := codexSkillName.FindStringSubmatch(c.Text); m != nil {
+			st.Skills = append(st.Skills, Skill{At: l.Timestamp.UTC(), Name: m[1]})
+			return
+		}
 	}
 }
 
