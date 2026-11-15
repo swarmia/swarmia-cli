@@ -137,6 +137,7 @@ func TestBuildSendsToolStatus(t *testing.T) {
 	s.Tools = []report.Tool{
 		{At: at, Name: "Bash", Root: "/src/app", Command: "go test ./...", Status: "failed", ExitCode: &code},
 		{At: at, Name: "Edit", Root: "/src/app", File: "/src/app/x.go", Status: "ok"},
+		{At: at, Name: "Skill", Root: "/src/app", Skill: "db-migration", Status: "ok"},
 		{At: at, Name: "apply_patch"}, // an agent that doesn't say
 	}
 	data, err := json.Marshal(only(t, s, contextFor(map[string]RepoInfo{"/src/app": app})).Tools)
@@ -145,6 +146,7 @@ func TestBuildSendsToolStatus(t *testing.T) {
 	}
 	want := `[{"at":"2026-10-01T12:00:00Z","name":"Bash","repo":"github.com/acme/app","command":"go test ./...","status":"failed","exit_code":1},` +
 		`{"at":"2026-10-01T12:00:00Z","name":"Edit","repo":"github.com/acme/app","file":"x.go","status":"ok"},` +
+		`{"at":"2026-10-01T12:00:00Z","name":"Skill","repo":"github.com/acme/app","skill":"db-migration","status":"ok"},` +
 		`{"at":"2026-10-01T12:00:00Z","name":"apply_patch"}]`
 	if string(data) != want {
 		t.Errorf("tools =\n%s\nwant\n%s", data, want)
@@ -501,6 +503,29 @@ func TestRepoSlugSSHAlias(t *testing.T) {
 	} {
 		if got := RepoSlug(in, resolve); got != want {
 			t.Errorf("RepoSlug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A skill's name is chosen by the model: what doesn't look like one isn't
+// sent, and what does is redacted.
+func TestBuildSendsOnlySkillNames(t *testing.T) {
+	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
+	token := "ghp_" + strings.Repeat("a1B2", 9)
+	cases := map[string]string{
+		"db-migration":                   "db-migration",
+		"plugin:pdf":                     "plugin:pdf",
+		"apps/web:deploy":                "apps/web:deploy",
+		"/Users/me/app/.claude/skills/x": "",
+		"deploy the app to prod":         "",
+		strings.Repeat("x", 101):         "",
+		token:                            "[REDACTED:github-token]",
+	}
+	for in, want := range cases {
+		s := &report.Session{ID: "s1", Agent: "claude-code", Root: "/src/app", StartedAt: at, EndedAt: at,
+			Tools: []report.Tool{{At: at, Name: "Skill", Root: "/src/app", Skill: in}}}
+		if got := only(t, s, ctx).Tools[0].Skill; got != want {
+			t.Errorf("skill %q sent as %q, want %q", in, got, want)
 		}
 	}
 }

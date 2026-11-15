@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -77,6 +78,7 @@ type Tool struct {
 	Repo     string    `json:"repo,omitempty"`
 	File     string    `json:"file,omitempty"`
 	Command  string    `json:"command,omitempty"`
+	Skill    string    `json:"skill,omitempty"`
 	Status   string    `json:"status,omitempty"`
 	ExitCode *int      `json:"exit_code,omitempty"`
 }
@@ -204,7 +206,7 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		p.Repos = append(p.Repos, r)
 	}
 	for _, tl := range s.Tools {
-		tool := Tool{At: tl.At, Name: tl.Name, Status: tl.Status, ExitCode: tl.ExitCode}
+		tool := Tool{At: tl.At, Name: tl.Name, Skill: masks.skill(tl.Skill), Status: tl.Status, ExitCode: tl.ExitCode}
 		if tool.Repo = slugOf(tl.Root); tool.Repo != "" {
 			tool.File = relativePath(tl.Root, tl.File)
 		}
@@ -520,4 +522,18 @@ func parseRemote(remote string) (host, path string, ssh bool) {
 		path = p // as url.Parse gives it for URLs: My%20Project → My Project
 	}
 	return host, path, true
+}
+
+// skillName is what a skill's name looks like: "name", "plugin:name", or a
+// directory-scoped "apps/web:name".
+var skillName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$`)
+
+// skill is the name of a skill as sent: the model chooses it, so anything
+// that doesn't look like a skill's name (a path, a sentence) isn't sent, and
+// what does is redacted and masked like a command.
+func (m masks) skill(name string) string {
+	if !skillName.MatchString(name) {
+		return ""
+	}
+	return m.apply(redact.Text(name))
 }

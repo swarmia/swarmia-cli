@@ -170,7 +170,8 @@ func (s *Session) LastActivity() (time.Time, bool) {
 	return last, !last.IsZero()
 }
 
-// Tool is one tool call. File and Command are set when the tool has them.
+// Tool is one tool call. File, Command and Skill are set when the tool has
+// them.
 // Root is the worktree it worked in: its file's, else its working
 // directory's; "" if neither is in a repository.
 type Tool struct {
@@ -179,6 +180,8 @@ type Tool struct {
 	Root    string    `json:"root,omitempty"`
 	File    string    `json:"file,omitempty"`
 	Command string    `json:"command,omitempty"`
+	// Skill is as in agent.Tool.
+	Skill string `json:"skill,omitempty"`
 	// Status and ExitCode are as in agent.Tool.
 	Status   string `json:"status,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
@@ -478,7 +481,7 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		case "PostToolUse", "PostToolUseFailure":
 			edits := ag.Edits(rec.Event, loc.locate)
 			tool := Tool{At: at, Name: ev.Tool.Name, File: ev.Tool.File, Command: ev.Tool.Command,
-				Status: ev.Tool.Status, ExitCode: ev.Tool.ExitCode}
+				Skill: ev.Tool.Skill, Status: ev.Tool.Status, ExitCode: ev.Tool.ExitCode}
 			if tool.File == "" && len(edits) > 0 { // e.g. a patch, which names its files inside
 				tool.File = filepath.Join(edits[0].Root, filepath.FromSlash(edits[0].Path))
 			}

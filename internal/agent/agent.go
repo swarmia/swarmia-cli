@@ -46,7 +46,9 @@ type Agent struct {
 	injectedPrompt *regexp.Regexp
 	isEditTool     func(name string) bool
 	isShellTool    func(name string) bool
-	edits          func(payload []byte, locate attribution.Locator) []attribution.Edit
+	// isSkillTool is the agent's tool for loading a skill, if it has one.
+	isSkillTool func(name string) bool
+	edits       func(payload []byte, locate attribution.Locator) []attribution.Edit
 }
 
 var ClaudeCode = &Agent{
@@ -60,6 +62,7 @@ var ClaudeCode = &Agent{
 	injectedPrompt:  claudeInjectedPrompt,
 	isEditTool:      attribution.IsClaudeEditTool,
 	isShellTool:     func(name string) bool { return name == "Bash" },
+	isSkillTool:     func(name string) bool { return name == "Skill" },
 	edits: func(payload []byte, locate attribution.Locator) []attribution.Edit {
 		if e, ok := attribution.ClaudeEdit(payload, locate); ok {
 			return []attribution.Edit{e}
@@ -163,6 +166,10 @@ type Tool struct {
 	File string
 	// Command is the shell command it runs, if any.
 	Command string
+	// Skill is the skill a skill tool call loads (Claude Code's Skill tool),
+	// e.g. "db-migration" or "plugin:name". Its arguments aren't kept: they
+	// are free text, like a prompt.
+	Skill string
 	// Edits is set for the agent's file-editing tools, whose payloads carry
 	// the edits (see Agent.Edits).
 	Edits bool
@@ -204,6 +211,7 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 		ToolInput      struct {
 			FilePath string     `json:"file_path"`
 			Command  textOrNone `json:"command"`
+			Skill    textOrNone `json:"skill"`
 		} `json:"tool_input"`
 		ToolResponse json.RawMessage `json:"tool_response"`
 		Error        string          `json:"error"`
@@ -223,6 +231,15 @@ func (a *Agent) Parse(payload []byte) (ev Event, ok bool) {
 			Edits: a.isEditTool(p.ToolName), Shell: a.isShellTool(p.ToolName)}
 		if !ev.Tool.Edits { // an edit tool's command, if any, is its patch
 			ev.Tool.Command = string(p.ToolInput.Command)
+		}
+		if a.isSkillTool != nil && a.isSkillTool(p.ToolName) {
+			// Earlier versions named the skill in command. Either way,
+			// nothing else of its input is kept: arguments are free text.
+			ev.Tool.Skill = string(p.ToolInput.Skill)
+			if ev.Tool.Skill == "" {
+				ev.Tool.Skill = ev.Tool.Command
+			}
+			ev.Tool.Command = ""
 		}
 		if a.reportsFailures {
 			ev.Tool.Status, ev.Tool.ExitCode = toolStatus(p.HookEventName, p.ToolResponse, p.Error, p.IsInterrupt, ev.Tool.Shell)
