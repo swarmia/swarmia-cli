@@ -263,6 +263,13 @@ func TestBuildSendsTypedSkills(t *testing.T) {
 	if !reflect.DeepEqual(p.Turns, want) {
 		t.Errorf("turns = %+v\nwant %+v", p.Turns, want)
 	}
+
+	// If the hooks missed the command's turn, no other turn gets its skill.
+	s.Turns = []report.Turn{{At: at.Add(-time.Minute), Text: "fix the tests"}}
+	p = only(t, s, contextFor(map[string]RepoInfo{"/src/app": withheld}))
+	if p.Turns[0].Skill != "" {
+		t.Errorf("skill %q on a turn that isn't its command", p.Turns[0].Skill)
+	}
 }
 
 // Turns stored with the system reminders an agent added to the prompt are

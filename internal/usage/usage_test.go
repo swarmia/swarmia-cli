@@ -240,6 +240,9 @@ func TestSkillsTypedByTheDeveloper(t *testing.T) {
 		skillContent("2026-11-12T10:03:00.100Z", ""),
 		prompt("2026-11-12T10:04:00.000Z", "greet Bob with the skill"), // the model loads it:
 		skillContent("2026-11-12T10:04:05.000Z", "toolu_1"),            // hooks report that one
+		// A prompt quoting a command's tags isn't the command.
+		prompt("2026-11-12T10:04:30.000Z", "why is <command-name>/deploy</command-name> logged?"),
+		skillContent("2026-11-12T10:04:31.000Z", ""),
 	)
 	// A subagent's transcript holds no typed commands of the developer's.
 	write(t, filepath.Join(dir, "s", "subagents", "a.jsonl"),

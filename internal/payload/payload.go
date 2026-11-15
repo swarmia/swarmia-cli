@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/attribution"
@@ -197,7 +198,7 @@ func Build(s *report.Session, ctx Context) (Payload, bool) {
 		p.Turns = append(p.Turns, turn)
 	}
 	if s.Usage != nil {
-		typedSkills(p.Turns, s.Usage.Skills(), masks)
+		typedSkills(p.Turns, s, masks)
 	}
 	for _, slug := range slugs {
 		r := Repo{Repo: slug}
@@ -542,14 +543,19 @@ func (m masks) skill(name string) string {
 	return m.apply(redact.Text(name))
 }
 
-// typedSkills marks each skill the developer typed on the turn it started:
-// the last prompt submitted by then. Hook times are whole seconds, the
-// transcript's aren't, hence the second's slack.
-func typedSkills(turns []Turn, skills []usage.Skill, masks masks) {
-	for _, sk := range skills {
+// typedSkills marks each skill the developer typed in s on the turn it
+// started (turns are s's): the last prompt submitted by then, which in Claude
+// Code must be the skill's command, so a turn the hooks missed doesn't pass
+// its skill to another. Hook times are whole seconds, the transcript's
+// aren't, hence the second's slack.
+func typedSkills(turns []Turn, s *report.Session, masks masks) {
+	for _, sk := range s.Usage.Skills() {
 		for i := len(turns) - 1; i >= 0; i-- {
 			t := &turns[i]
 			if t.Automatic || t.StartedAt.After(sk.At.Add(time.Second)) {
+				continue
+			}
+			if s.Agent == agent.ClaudeCode.Name && !isCommand(agent.PromptText(s.Turns[i].Text), sk.Name) {
 				continue
 			}
 			if t.Skill == "" {
@@ -558,4 +564,10 @@ func typedSkills(turns []Turn, skills []usage.Skill, masks masks) {
 			break
 		}
 	}
+}
+
+// isCommand reports whether prompt invokes the command /name.
+func isCommand(prompt, name string) bool {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(prompt), "/"+name)
+	return ok && (rest == "" || unicode.IsSpace(rune(rest[0])))
 }

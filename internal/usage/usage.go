@@ -380,7 +380,8 @@ func (st *fileState) claudeSkill(line []byte) {
 			st.Skills = append(st.Skills, Skill{At: e.Timestamp.UTC(), Name: st.Command})
 		}
 		st.Command = ""
-	case !e.IsMeta:
+	case !e.IsMeta && strings.HasPrefix(text, "<command-"):
+		// Only the command's own message: a prompt can quote the tags.
 		if m := commandName.FindStringSubmatch(text); m != nil {
 			st.Command = m[1]
 		}
