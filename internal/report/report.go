@@ -125,6 +125,51 @@ func (s *Session) ResponseCount() int {
 	return n
 }
 
+// LastActivity is when the developer last worked in s: the latest prompt,
+// reply, tool call or edit, and false if there was none. Unlike EndedAt, it
+// isn't the session starting or ending, which can come long after (a session
+// resumed only to look at it, a terminal closed days later). An automatic
+// turn (a background task's notification) and the work in it don't count:
+// it can come hours after the developer left.
+func (s *Session) LastActivity() (time.Time, bool) {
+	var last time.Time
+	later := func(at time.Time) {
+		if at.After(last) {
+			last = at
+		}
+	}
+	// automatic reports whether at falls in an automatic turn: the latest
+	// turn started by then is one. Turns are in order.
+	automatic := func(at time.Time) bool {
+		for i := len(s.Turns) - 1; i >= 0; i-- {
+			if !s.Turns[i].At.After(at) {
+				return s.Turns[i].Automatic
+			}
+		}
+		return false
+	}
+	for _, t := range s.Turns {
+		if t.Automatic {
+			continue
+		}
+		later(t.At)
+		if t.EndedAt != nil {
+			later(*t.EndedAt)
+		}
+	}
+	for _, t := range s.Tools {
+		if !automatic(t.At) {
+			later(t.At)
+		}
+	}
+	for _, e := range s.Edits {
+		if !automatic(e.At) {
+			later(e.At)
+		}
+	}
+	return last, !last.IsZero()
+}
+
 // Tool is one tool call. File and Command are set when the tool has them.
 // Root is the worktree it worked in: its file's, else its working
 // directory's; "" if neither is in a repository.

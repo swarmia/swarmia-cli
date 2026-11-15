@@ -398,8 +398,12 @@ func TestBuildSendsLastActivity(t *testing.T) {
 	if p := only(t, s, ctx); p.LastActivityAt == nil || !p.LastActivityAt.Equal(at.Add(6*time.Minute)) {
 		t.Errorf("last activity = %v, want the last tool call", p.LastActivityAt)
 	}
-	if got := lastActivity(&report.Session{StartedAt: at, EndedAt: at}); got != nil {
-		t.Errorf("last activity of a session with none = %v, want nil", got)
+	// A session with only an automatic turn has no activity of the
+	// developer's: it's sent without one.
+	s.Turns = []report.Turn{{At: at, Automatic: true, EndedAt: &reply}}
+	s.Tools = []report.Tool{{At: at.Add(time.Minute), Name: "Read", Root: "/src/app"}}
+	if p := only(t, s, ctx); p.LastActivityAt != nil {
+		t.Errorf("last activity of a session with none = %v, want nil", p.LastActivityAt)
 	}
 }
 

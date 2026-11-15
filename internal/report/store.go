@@ -100,8 +100,10 @@ func (st Store) Save(sessions ...*Session) error {
 	return nil
 }
 
-// Prune deletes sessions whose last activity is older than Retention and
-// returns how many it deleted.
+// Prune deletes sessions whose last event is older than Retention and
+// returns how many it deleted. That's EndedAt, not LastActivity: a session
+// resumed recently may go on, and once deleted, its next events would make a
+// new session that the server takes for the whole of it.
 func (st Store) Prune(sessions []*Session, now time.Time) ([]*Session, int) {
 	var kept []*Session
 	pruned := 0
