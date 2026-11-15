@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/swarmia/swarmia-cli/internal/agent"
+	"github.com/swarmia/swarmia-cli/internal/deliver"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 )
@@ -251,14 +252,23 @@ func TestLogHookSkipsReadOnlyShellCommands(t *testing.T) {
 	}
 }
 
-// Session end, or a log past the size threshold, starts a background fold.
+// Session end, or a log past the size threshold, starts a background fold;
+// only session end's waits for a run in progress.
 func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	var started []string
-	startBackgroundProcess = func(logPath string) { started = append(started, logPath) }
-	t.Cleanup(func() { startBackgroundProcess = func(string) {} })
+	var waits []bool
+	startBackgroundProcess = func(logPath string, wait bool) {
+		started = append(started, logPath)
+		waits = append(waits, wait)
+	}
+	t.Cleanup(func() { startBackgroundProcess = func(string, bool) {} })
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	// A periodic run just happened, so the turn end below isn't due one.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), periodicProcessStamp), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, ev := range []string{"Stop", "PreToolUse", "SessionEnd"} {
 		if err := runLogHook(strings.NewReader(`{"hook_event_name":"` + ev + `","session_id":"s"}`)); err != nil {
@@ -276,6 +286,50 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(started) != 2 {
-		t.Errorf("a large log didn't start a run: %v", started)
+		t.Fatalf("a large log didn't start a run: %v", started)
+	}
+	if !waits[0] || waits[1] {
+		t.Errorf("waits = %v, want session end's run to wait and the large log's not to", waits)
+	}
+}
+
+// A turn end folds the log when no periodic run has happened within
+// MinResendInterval, so a session that never ends is still delivered.
+func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
+	var started []string
+	var waits []bool
+	startBackgroundProcess = func(logPath string, wait bool) {
+		started = append(started, logPath)
+		waits = append(waits, wait)
+	}
+	t.Cleanup(func() { startBackgroundProcess = func(string, bool) {} })
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	stop := func() {
+		t.Helper()
+		if err := runLogHook(strings.NewReader(`{"hook_event_name":"Stop","session_id":"s"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stop()
+	stop()
+	if len(started) != 1 || started[0] != path {
+		t.Fatalf("started = %v, want one run for the first turn end only", started)
+	}
+
+	stamp := filepath.Join(filepath.Dir(path), periodicProcessStamp)
+	past := time.Now().Add(-deliver.MinResendInterval - time.Minute)
+	if err := os.Chtimes(stamp, past, past); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	stop()
+	if len(started) != 2 {
+		t.Fatalf("started = %v, want a second run once the interval passed", started)
+	}
+	if waits[0] || waits[1] {
+		t.Errorf("waits = %v, want turn-end runs to skip when one is in progress", waits)
 	}
 }

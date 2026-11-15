@@ -232,6 +232,19 @@ func TestBuildSendsTurns(t *testing.T) {
 	}
 }
 
+// Turns stored with the system reminders an agent added to the prompt are
+// sent without them; one with nothing else is the agent's, not the person's.
+func TestBuildCutsSystemRemindersFromStoredPrompts(t *testing.T) {
+	s := session()
+	reminder := "<system-reminder>\nWorkspace path: /src/app-wt\nWorkspace name: app-wt\n</system-reminder>\n"
+	s.Turns = []report.Turn{{At: at, Text: reminder + "fix it"}, {At: at, Text: reminder}}
+	p := only(t, s, contextFor(map[string]RepoInfo{"/src/app": app}))
+	want := []Turn{{StartedAt: at, Prompt: "fix it"}, {StartedAt: at, Automatic: true}}
+	if !reflect.DeepEqual(p.Turns, want) {
+		t.Errorf("turns = %+v, want %+v", p.Turns, want)
+	}
+}
+
 // A session that worked in several repositories lists them all in one
 // payload, whatever they're configured with: a developer reports to one
 // organization. Any of them opting out of prompts withholds them.
@@ -357,6 +370,28 @@ func TestBuildOutsideRepository(t *testing.T) {
 	if p, ok := Build(s, ctx); ok {
 		t.Errorf("payload = %+v, want none", p)
 	}
+}
+
+// A session with no turn, tool call or model request isn't sent; one with
+// any of them is.
+func TestBuildSkipsEmptySessions(t *testing.T) {
+	ctx := contextFor(map[string]RepoInfo{"/src/app": app})
+	s := &report.Session{ID: "s1", Agent: "claude-code", StartedAt: at, EndedAt: at, Root: "/src/app", Ended: true}
+	if p, ok := Build(s, ctx); ok {
+		t.Errorf("payload = %+v, want none", p)
+	}
+	s.Usage = &usage.Tracker{}
+	tr := filepath.Join(t.TempDir(), "s.jsonl")
+	os.WriteFile(tr, []byte(`{"type":"assistant","requestId":"r1","message":{"id":"m1","model":"claude-test","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n"), 0o600)
+	if p, ok := Build(s, ctx); ok {
+		t.Errorf("payload with no requests read = %+v, want none", p)
+	}
+	s.Usage.Update(usage.ClaudeTranscript, tr)
+	only(t, s, ctx)
+
+	s.Usage = nil
+	s.Turns = []report.Turn{{At: at, Text: "hi"}}
+	only(t, s, ctx)
 }
 
 func TestRepoSlug(t *testing.T) {

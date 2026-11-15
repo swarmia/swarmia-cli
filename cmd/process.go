@@ -19,6 +19,7 @@ import (
 var (
 	processFile       string
 	processBackground bool
+	processWait       bool
 )
 
 var processCmd = &cobra.Command{
@@ -39,7 +40,7 @@ var processCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		opts, repo, err := processOptions(processFile, true, !processBackground)
+		opts, repo, err := processOptions(processFile, true, !processBackground || processWait)
 		if err != nil {
 			return quietIf(processBackground, err)
 		}
@@ -71,6 +72,7 @@ var processCmd = &cobra.Command{
 func init() {
 	processCmd.Flags().StringVar(&processFile, "file", "", "path to the JSONL log file (overrides $SWARMIA_LOG_FILE and the default)")
 	processCmd.Flags().BoolVar(&processBackground, "background", false, "skip if another run is in progress and print nothing (used by log-hook)")
+	processCmd.Flags().BoolVar(&processWait, "wait", false, "wait for a run in progress rather than skipping, even with --background (used by log-hook at session end)")
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -110,14 +112,19 @@ func processOptions(logFlag string, byAuthor, wait bool) (report.ProcessOptions,
 const backgroundLogSize = 8 << 20
 
 // startBackgroundProcess launches `swarmia-cli process --background`, detached
-// so it outlives the hook and never delays the agent. It's a variable so tests
-// can observe it.
-var startBackgroundProcess = func(logPath string) {
+// so it outlives the hook and never delays the agent. With wait, it waits for a
+// run in progress instead of skipping: that run may have read the log before
+// the events that started this one. It's a variable so tests can observe it.
+var startBackgroundProcess = func(logPath string, wait bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
-	cmd := exec.Command(exe, "process", "--background", "--file", logPath)
+	args := []string{"process", "--background", "--file", logPath}
+	if wait {
+		args = append(args, "--wait")
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = projectDir()
 	detach(cmd)
 	if cmd.Start() == nil {

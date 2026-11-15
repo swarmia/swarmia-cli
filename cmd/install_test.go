@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -769,5 +770,80 @@ func TestInstallUpdatesLegacyProjectHooks(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "updated 2 hook(s)") {
 		t.Errorf("output doesn't report the updates:\n%s", out.String())
+	}
+}
+
+// statusMessagesFor returns the statusMessage of every hook under an event
+// ("" for a hook without one).
+func statusMessagesFor(t *testing.T, doc map[string]any, event string) []string {
+	t.Helper()
+	hooks, _ := doc["hooks"].(map[string]any)
+	arr, _ := hooks[event].([]any)
+	var msgs []string
+	for _, g := range arr {
+		gm, _ := g.(map[string]any)
+		for _, h := range asSlice(gm, "hooks") {
+			hm, _ := h.(map[string]any)
+			msg, _ := hm["statusMessage"].(string)
+			msgs = append(msgs, msg)
+		}
+	}
+	return msgs
+}
+
+// Installed hooks carry a name, so agents don't list them as unnamed.
+func TestInstallNamesHooks(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	doc := readSettings(t, repo)
+	for _, s := range claudeHookSpecs {
+		if got := statusMessagesFor(t, doc, s.event); !reflect.DeepEqual(got, []string{hookStatusMessage}) {
+			t.Errorf("%s statusMessage = %q", s.event, got)
+		}
+	}
+}
+
+// Re-running install on hooks from a version that didn't name them names
+// them, leaving unrelated hooks and a message someone set themselves alone.
+func TestInstallNamesExistingHooks(t *testing.T) {
+	repo := t.TempDir()
+	named := grp("", "swarmia-cli log-hook")
+	named["hooks"].([]any)[0].(map[string]any)["statusMessage"] = "my name"
+	hooks := map[string]any{"Stop": []any{named}}
+	for _, s := range claudeHookSpecs {
+		if s.event != "Stop" {
+			hooks[s.event] = []any{grp(s.matcher, "swarmia-cli log-hook")}
+		}
+	}
+	hooks["PreToolUse"] = append(hooks["PreToolUse"].([]any), grp("Bash", "other-tool"))
+	writeSettings(t, repo, map[string]any{"hooks": hooks})
+
+	var out bytes.Buffer
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("added 0 hook(s), named %d hook(s)", len(claudeHookSpecs)-1); !strings.Contains(out.String(), want) {
+		t.Errorf("output doesn't say %q:\n%s", want, out.String())
+	}
+	doc := readSettings(t, repo)
+	if got := statusMessagesFor(t, doc, "Stop"); !reflect.DeepEqual(got, []string{"my name"}) {
+		t.Errorf("Stop statusMessage = %q, want the user's own kept", got)
+	}
+	if got := statusMessagesFor(t, doc, "PreToolUse"); !reflect.DeepEqual(got, []string{hookStatusMessage, ""}) {
+		t.Errorf("PreToolUse statusMessage = %q, want ours and the unrelated hook's untouched", got)
+	}
+
+	out.Reset()
+	if err := runInstall(&out, repo, installOpts{binaryRef: "swarmia-cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "already configured") {
+		t.Errorf("second install should be a no-op, got: %s", out.String())
 	}
 }
