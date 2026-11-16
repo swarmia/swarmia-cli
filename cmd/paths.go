@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/swarmia/swarmia-cli/internal/gitrepo"
+	"github.com/swarmia/swarmia-cli/internal/report"
 )
 
 // projectDir is the directory the CLI operates against: $CLAUDE_PROJECT_DIR when
@@ -125,4 +128,141 @@ func eventsPath(flagVal string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(stateDir, "events.jsonl"), nil
+}
+
+// ownersDir, under the state base, is the session owner index: one file per
+// session, named by a hash of its id, saying which state directory logged the
+// session first (relative to the base) and the project directory it logged
+// it for.
+const ownersDir = "owners"
+
+// sessionLog is where an event of a session is logged, and the project it
+// belongs to: settings, the token among them, are that project's, wherever
+// the agent runs now.
+type sessionLog struct {
+	Path    string `json:"-"`
+	State   string `json:"state"` // the state directory, relative to the base
+	Project string `json:"project"`
+}
+
+// sessionEventsPath is eventsPath for an event of session id. Where a session
+// is logged depends on where the agent runs, and a session resumed from
+// another directory (a repository inside the workspace it started in, or the
+// other way round) would be split across two state directories, whose halves
+// the server would take for the whole session in turn. So the state directory
+// that logs a session first owns it, and its later events go there, wherever
+// the agent runs: any state directory records work in any repository. They
+// are processed with the settings of the project the session was first logged
+// for, so a session started where nothing is sent isn't sent from where it
+// resumed (nor are the other sessions in its state directory). An explicit
+// log file, or an event without a session, bypasses the index. touch marks
+// the session as still in use, so pruneOwners keeps its entry.
+func sessionEventsPath(flagVal, sessionID string, touch bool) (sessionLog, error) {
+	project := projectDir()
+	if flagVal != "" || os.Getenv("SWARMIA_LOG_FILE") != "" || sessionID == "" {
+		path, err := eventsPath(flagVal)
+		return sessionLog{Path: path, Project: project}, err
+	}
+	base, err := stateBaseDir()
+	if err != nil {
+		return sessionLog{}, err
+	}
+	sum := sha256.Sum256([]byte(sessionID))
+	entry := filepath.Join(base, ownersDir, hex.EncodeToString(sum[:16]))
+	if l, ok := owner(base, entry); ok {
+		if touch {
+			now := time.Now()
+			os.Chtimes(entry, now, now)
+		}
+		return l, nil
+	}
+	path, err := eventsPath("")
+	if err != nil {
+		return sessionLog{}, err
+	}
+	l := sessionLog{Path: path, Project: project}
+	if rel, err := filepath.Rel(base, filepath.Dir(path)); err == nil && filepath.IsLocal(rel) {
+		l.State = filepath.ToSlash(rel)
+		if owned, ok := claimOwner(base, entry, l); ok {
+			return owned, nil
+		}
+	}
+	return l, nil // the index is best-effort; log here rather than not at all
+}
+
+// owner reads an owner index entry, if the state directory it names still
+// exists.
+func owner(base, entry string) (sessionLog, bool) {
+	var l sessionLog
+	data, err := os.ReadFile(entry)
+	if err != nil || json.Unmarshal(data, &l) != nil {
+		return l, false
+	}
+	rel := filepath.FromSlash(l.State)
+	if rel == "" || !filepath.IsLocal(rel) || !filepath.IsAbs(l.Project) {
+		return l, false
+	}
+	dir := filepath.Join(base, rel)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return l, false
+	}
+	l.Path = filepath.Join(dir, "events.jsonl")
+	return l, true
+}
+
+// claimOwner records l as the owner of the session at entry and returns the
+// session's owner: l, or whichever claimed the session concurrently. An entry
+// naming a state directory that is gone is replaced.
+func claimOwner(base, entry string, l sessionLog) (sessionLog, bool) {
+	if !filepath.IsAbs(l.Project) {
+		return l, false
+	}
+	if err := os.MkdirAll(filepath.Dir(entry), 0o700); err != nil {
+		return l, false
+	}
+	data, err := json.Marshal(l)
+	if err != nil {
+		return l, false
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(entry), ".tmp-*")
+	if err != nil {
+		return l, false
+	}
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.Write(append(data, '\n'))
+	if errors.Join(werr, tmp.Close()) != nil {
+		return l, false
+	}
+	// Link, unlike rename, fails if the entry exists: of concurrent first
+	// events, one claims the session and the others follow it.
+	if err := os.Link(tmp.Name(), entry); err == nil {
+		return l, true
+	}
+	if owned, ok := owner(base, entry); ok {
+		return owned, true
+	}
+	if os.Rename(tmp.Name(), entry) == nil { // a stale entry
+		return l, true
+	}
+	return l, false
+}
+
+// pruneOwners deletes owner index entries not used for longer than
+// report.Retention: a session's entry is renewed whenever it starts or
+// resumes, so by then its session file is gone too.
+func pruneOwners(now time.Time) {
+	base, err := stateBaseDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(base, ownersDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > report.Retention {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }

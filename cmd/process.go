@@ -58,6 +58,7 @@ var processCmd = &cobra.Command{
 		if err != nil {
 			return quietIf(processBackground, err)
 		}
+		pruneOwners(opts.Now)
 		if !processBackground {
 			fmt.Fprintf(cmd.OutOrStdout(), "folded %d event(s); %d session(s) stored; %d pruned\n",
 				res.Folded, len(res.Sessions), res.Pruned)
@@ -114,8 +115,10 @@ const backgroundLogSize = 8 << 20
 // startBackgroundProcess launches `swarmia-cli process --background`, detached
 // so it outlives the hook and never delays the agent. With wait, it waits for a
 // run in progress instead of skipping: that run may have read the log before
-// the events that started this one. It's a variable so tests can observe it.
-var startBackgroundProcess = func(logPath string, wait bool) {
+// the events that started this one. It runs for project, whose settings
+// apply: the project the session in logPath was first logged for. It's a
+// variable so tests can observe it.
+var startBackgroundProcess = func(logPath, project string, wait bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -125,7 +128,8 @@ var startBackgroundProcess = func(logPath string, wait bool) {
 		args = append(args, "--wait")
 	}
 	cmd := exec.Command(exe, args...)
-	cmd.Dir = projectDir()
+	cmd.Dir = project
+	cmd.Env = append(os.Environ(), "CLAUDE_PROJECT_DIR="+project) // projectDir prefers it to the working directory
 	detach(cmd)
 	if cmd.Start() == nil {
 		cmd.Process.Release()
