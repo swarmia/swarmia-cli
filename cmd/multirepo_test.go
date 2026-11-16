@@ -216,11 +216,11 @@ func TestSessionOwners(t *testing.T) {
 	logs := func(dir, session string) string {
 		t.Helper()
 		t.Setenv("CLAUDE_PROJECT_DIR", dir)
-		path, err := sessionEventsPath("", session, false)
+		l, err := sessionEventsPath("", session, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return filepath.Dir(path)
+		return filepath.Dir(l.Path)
 	}
 	stateA, _ := repoStateDir(a)
 	stateB, _ := repoStateDir(b)
@@ -244,6 +244,34 @@ func TestSessionOwners(t *testing.T) {
 	}
 	if got := logs(a, "s1"); got != stateB {
 		t.Errorf("s1 logged in %s, want its new owner %s", got, stateB)
+	}
+}
+
+// A session resumed elsewhere is processed with the settings of the project
+// it was first logged for: started where nothing is sent and resumed where a
+// token is configured, neither it nor the other sessions in its state
+// directory are sent with that token.
+func TestResumedSessionProcessedForItsOwner(t *testing.T) {
+	type run struct{ log, project string }
+	var started []run
+	startBackgroundProcess = func(logPath, project string, _ bool) {
+		started = append(started, run{logPath, project})
+	}
+	t.Cleanup(func() { startBackgroundProcess = func(string, string, bool) {} })
+	private, tracked := initRepo(t), initRepo(t)
+	t.Setenv("SWARMIA_STATE_DIR", t.TempDir())
+	t.Setenv("SWARMIA_LOG_FILE", "")
+
+	t.Setenv("CLAUDE_PROJECT_DIR", private)
+	hook(t, map[string]any{"hook_event_name": "SessionStart"})
+	t.Setenv("CLAUDE_PROJECT_DIR", tracked)
+	hook(t, map[string]any{"hook_event_name": "SessionStart"})
+	hook(t, map[string]any{"hook_event_name": "SessionEnd"})
+
+	state, _ := repoStateDir(private)
+	want := []run{{filepath.Join(state, "events.jsonl"), private}}
+	if !reflect.DeepEqual(started, want) {
+		t.Errorf("started %+v, want %+v", started, want)
 	}
 }
 

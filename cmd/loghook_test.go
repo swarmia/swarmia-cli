@@ -257,11 +257,11 @@ func TestLogHookSkipsReadOnlyShellCommands(t *testing.T) {
 func TestLogHookStartsBackgroundProcess(t *testing.T) {
 	var started []string
 	var waits []bool
-	startBackgroundProcess = func(logPath string, wait bool) {
+	startBackgroundProcess = func(logPath, _ string, wait bool) {
 		started = append(started, logPath)
 		waits = append(waits, wait)
 	}
-	t.Cleanup(func() { startBackgroundProcess = func(string, bool) {} })
+	t.Cleanup(func() { startBackgroundProcess = func(string, string, bool) {} })
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
@@ -298,11 +298,11 @@ func TestLogHookStartsBackgroundProcess(t *testing.T) {
 func TestLogHookProcessesPeriodicallyAtTurnEnd(t *testing.T) {
 	var started []string
 	var waits []bool
-	startBackgroundProcess = func(logPath string, wait bool) {
+	startBackgroundProcess = func(logPath, _ string, wait bool) {
 		started = append(started, logPath)
 		waits = append(waits, wait)
 	}
-	t.Cleanup(func() { startBackgroundProcess = func(string, bool) {} })
+	t.Cleanup(func() { startBackgroundProcess = func(string, string, bool) {} })
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	t.Setenv("SWARMIA_LOG_FILE", path)
 	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())

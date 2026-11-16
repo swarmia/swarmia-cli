@@ -333,8 +333,9 @@ Files are owner-only (`0600`). Override the base with `$SWARMIA_STATE_DIR`;
 A session stays in the state directory that logged it first: resumed from
 another directory (a repository inside the workspace it started in, or the
 other way round), its events still go there, so it's reported and sent whole
-from one place. `owners/` under the base records which directory that is,
-one entry per session, kept for 30 days after the session last started.
+from one place, with the settings (the token among them) of where it started.
+`owners/` under the base records which directory that is, one entry per
+session, kept for 30 days after the session last started.
 
 Worktrees can have different swarmia-cli versions sharing this state, so
 event records and session files carry a `format` version. A version leaves

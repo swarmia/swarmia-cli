@@ -103,10 +103,11 @@ func runLogHook(stdin io.Reader) error {
 	}
 
 	ev, _ := ag.Parse(payload)
-	path, err := sessionEventsPath(logFile, ev.SessionID, ev.Name == "SessionStart")
+	log, err := sessionEventsPath(logFile, ev.SessionID, ev.Name == "SessionStart")
 	if err != nil {
 		return fmt.Errorf("resolving log file: %w", err)
 	}
+	path := log.Path
 	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
 	// Best-effort: an unreadable repo state must not stop the event being logged.
 	if repoErr == nil {
@@ -132,7 +133,7 @@ func runLogHook(stdin io.Reader) error {
 	if shouldProcess(ev, path) {
 		// Waiting at session end, so a periodic run already in progress can't
 		// leave the session's last events unsent.
-		startBackgroundProcess(path, ev.Name == "SessionEnd")
+		startBackgroundProcess(path, log.Project, ev.Name == "SessionEnd")
 	}
 	return nil
 }
