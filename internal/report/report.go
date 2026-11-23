@@ -854,6 +854,7 @@ func attribute(r *repo, edits []Edit, commits []commit, include func(Edit) bool)
 				continue // deleted in this commit
 			}
 			introduced := r.addedLines(c.SHA, path)
+			parsed := attribution.ParseFile(content) // once for all the hunks matched against it
 			best := map[int]attribution.Class{}
 			from := map[int][]int{} // committed line -> ids of the added lines it came from
 			for ei, e := range edits {
@@ -861,7 +862,7 @@ func attribute(r *repo, edits []Edit, commits []commit, include func(Edit) bool)
 					continue // a different file, or edited after this commit
 				}
 				for hi, enc := range e.Hunks {
-					for _, l := range attribution.MatchHunk(attribution.DecodeHunk(enc), content).Lines {
+					for _, l := range parsed.Match(attribution.DecodeHunk(enc)).Lines {
 						if introduced[l.Line] && rank[l.Class] > rank[best[l.Line]] {
 							best[l.Line] = l.Class
 							from[l.Line] = nil
