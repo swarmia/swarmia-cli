@@ -178,7 +178,11 @@ func TestProcessMatchesOnlyNewCommits(t *testing.T) {
 	if c := s.Commits(); len(c) != 1 || c[0].SHA != first || c[0].Subject != "from the store" {
 		t.Errorf("commits = %+v, want only %s, reused from the store", c, first[:7])
 	}
-	if len(s.Attribution.Matched) != 2 {
+	n := 0
+	for _, shas := range s.Attribution.Matched {
+		n += len(shas)
+	}
+	if n != 2 {
 		t.Errorf("matched = %v, want both %s and %s", s.Attribution.Matched, first[:7], second[:7])
 	}
 }
@@ -207,6 +211,61 @@ func TestProcessRematchesCommitsNewEditsApplyTo(t *testing.T) {
 	c := f.process(t, state, t0.Add(2*time.Hour)).Sessions[0].Commits()
 	if len(c) != 1 || c[0].Survived() != 8 || c[0].Subject != "both" {
 		t.Errorf("after the late edit: %+v, want %s with 8 lines, matched again", c, sha[:7])
+	}
+}
+
+// A commit git failed to read isn't taken to hold none of the lines: it is
+// matched again on the next run, once it can be read.
+func TestProcessRematchesCommitsGitFailedToRead(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	code := lines(4, "func generated%d() string { return \"value from the agent\" }")
+	f.agentWrite(t0, "gen.go", code, nil)
+	writeLog(t, filepath.Join(state, "events.jsonl"), f.recs)
+	sha := f.commit(t0.Add(time.Minute), "me@example.com", "add gen", map[string]string{"gen.go": code})
+
+	// Hide the file's blob: git can't show it, though the commit still lists it.
+	blob := f.git(t0, "me@example.com", "rev-parse", sha+":gen.go")
+	object := filepath.Join(f.root, ".git", "objects", blob[:2], blob[2:])
+	if err := os.Rename(object, object+".hidden"); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.process(t, state, t0.Add(time.Hour)).Sessions[0].Commits(); len(c) != 0 {
+		t.Fatalf("with the blob hidden: %+v, want none", c)
+	}
+	if err := os.Rename(object+".hidden", object); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.process(t, state, t0.Add(2*time.Hour)).Sessions[0].Commits(); len(c) != 1 || c[0].SHA != sha || c[0].Survived() != 4 {
+		t.Errorf("once readable: %+v, want %s with 4 lines", c, sha[:7])
+	}
+}
+
+// A commit recorded as holding lines whose stored result is missing is
+// matched again rather than dropped.
+func TestProcessRematchesCommitsWithMissingResults(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	code := lines(4, "func generated%d() string { return \"value from the agent\" }")
+	f.agentWrite(t0, "gen.go", code, nil)
+	writeLog(t, filepath.Join(state, "events.jsonl"), f.recs)
+	sha := f.commit(t0.Add(time.Minute), "me@example.com", "add gen", map[string]string{"gen.go": code})
+	f.process(t, state, t0.Add(time.Hour))
+
+	st := Store{Dir: filepath.Join(state, "sessions")}
+	sessions, _, err := st.List()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("stored sessions: %v, %v", sessions, err)
+	}
+	sessions[0].Attribution.Commits = nil
+	sessions[0].Attribution.Key = "stale"
+	if err := st.Save(sessions[0]); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.process(t, state, t0.Add(2*time.Hour)).Sessions[0].Commits(); len(c) != 1 || c[0].SHA != sha {
+		t.Errorf("commits = %+v, want %s matched again", c, sha[:7])
 	}
 }
 

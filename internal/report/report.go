@@ -206,12 +206,13 @@ type Attribution struct {
 	Key        string    `json:"key"`
 	ComputedAt time.Time `json:"computed_at"`
 	Commits    []Commit  `json:"commits"`
-	// Matched has an entry for each candidate commit the last computation
-	// matched, whether or not it held the session's lines, identifying the
-	// inputs it was matched with (see matchKey). Commits whose inputs haven't
+	// Matched identifies, by repository (see repoKeyOf) and SHA, the inputs
+	// each candidate commit was matched with (see matchKey), with heldMark
+	// appended if it held the session's lines. Commits whose inputs haven't
 	// changed are not matched again: a recompute only pays for new commits,
-	// and for commits that new edits apply to.
-	Matched map[string]string `json:"matched,omitempty"`
+	// and for commits that new edits apply to. A commit git failed to read is
+	// left out, so it is matched again.
+	Matched map[string]map[string]string `json:"matched,omitempty"`
 }
 
 // Commit is a commit containing lines the session wrote, in the repository of
@@ -697,32 +698,59 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 					commits = append(commits, c)
 				}
 			}
-			prev := map[string]Commit{} // by matchedID
+			prev := map[string]Commit{} // by repository and SHA
 			for _, c := range s.Commits() {
-				prev[matchedID(keyOf[c.Root], c.SHA)] = c
+				prev[keyOf[c.Root]+" "+c.SHA] = c
 			}
-			matched := map[string]string{}
-			for k, cs := range candidates {
-				include := func(e Edit) bool { return keyOf[e.Root] == k }
-				var todo []commit
-				for _, c := range cs {
-					id, mk := matchedID(k, c.SHA), matchKey(s.Edits, c, include)
-					matched[id] = mk
-					if s.Attribution == nil || s.Attribution.Matched[id] != mk {
-						todo = append(todo, c)
-					}
+			var before map[string]map[string]string
+			if s.Attribution != nil {
+				before = s.Attribution.Matched
+			}
+			matched := map[string]map[string]string{}
+			for k := range edited {
+				if !repos[k].ok && before[k] != nil {
+					matched[k] = before[k] // kept with its commits, for when it can be read again
 				}
-				fresh := map[string]Commit{}
-				for _, c := range attribute(repos[k].r, s.Edits, todo, include) {
-					fresh[c.SHA] = c
+			}
+			for k, cs := range candidates {
+				r, include := repos[k].r, func(e Edit) bool { return keyOf[e.Root] == k }
+				matched[k] = map[string]string{}
+				reused := map[string]Commit{}
+				var todo []commit
+				keys := map[string]string{} // SHA -> matchKey, for todo
+				for _, c := range cs {
+					mk := matchKey(s.Edits, c, include)
+					old, ok := prev[k+" "+c.SHA]
+					switch before[k][c.SHA] {
+					case mk: // held none of the lines
+						matched[k][c.SHA] = mk
+						continue
+					case mk + heldMark:
+						if ok {
+							matched[k][c.SHA] = mk + heldMark
+							reused[c.SHA] = old
+							continue
+						}
+					}
+					todo = append(todo, c) // new, changed, or its result went missing
+					keys[c.SHA] = mk
+				}
+				for _, c := range attribute(r, s.Edits, todo, include) {
+					reused[c.SHA] = c
+				}
+				for _, c := range todo {
+					switch _, held := reused[c.SHA]; {
+					case r.failed[c.SHA]:
+						key = "" // incomplete: matched again next run
+					case held:
+						matched[k][c.SHA] = keys[c.SHA] + heldMark
+					default:
+						matched[k][c.SHA] = keys[c.SHA]
+					}
 				}
 				for _, c := range cs { // in candidate order, as if all were matched now
-					res, ok := fresh[c.SHA]
-					if id := matchedID(k, c.SHA); !ok && s.Attribution != nil && s.Attribution.Matched[id] == matched[id] {
-						res, ok = prev[id] // matched before with the same inputs; absent if it held none of the lines
-					}
-					if ok {
-						res.Root = worktree[k] // not rc.root, which may be another session's
+					if res, ok := reused[c.SHA]; ok {
+						res.Root = worktree[k] // not repos[k].root, which may be another session's
 						commits = append(commits, res)
 					}
 				}
@@ -858,11 +886,9 @@ func attributionKey(s *Session, edited map[string]bool, repos map[string]*repoCo
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// matchedID names a candidate commit in Attribution.Matched: its repository
-// (see repoKeyOf) and SHA.
-func matchedID(repoKey, sha string) string {
-	return repoKey + " " + sha
-}
+// heldMark marks a commit in Attribution.Matched that held the session's
+// lines, so its result must be found among the stored commits to be reused.
+const heldMark = "+"
 
 // matchKey identifies what matching commit c involves (see attribute): the
 // matcher and the session's edits it is matched with — those in its
@@ -878,7 +904,7 @@ func matchKey(edits []Edit, c commit, include func(Edit) bool) string {
 			fmt.Fprintf(h, "%d\n", i)
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil)[:16])
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // rank orders classes from strongest to weakest evidence of the agent's work.
