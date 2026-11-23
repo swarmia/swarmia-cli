@@ -854,12 +854,15 @@ func attribute(r *repo, edits []Edit, commits []commit, include func(Edit) bool)
 				continue // deleted in this commit
 			}
 			introduced := r.addedLines(c.SHA, path)
-			parsed := attribution.ParseFile(content) // once for all the hunks matched against it
+			var parsed *attribution.File // parsed once, for all the hunks matched against it
 			best := map[int]attribution.Class{}
 			from := map[int][]int{} // committed line -> ids of the added lines it came from
 			for ei, e := range edits {
 				if !include(e) || e.Path != path || e.At.After(c.At.Add(clockSlack)) {
 					continue // a different file, or edited after this commit
+				}
+				if parsed == nil {
+					parsed = attribution.ParseFile(content)
 				}
 				for hi, enc := range e.Hunks {
 					for _, l := range parsed.Match(attribution.DecodeHunk(enc)).Lines {
