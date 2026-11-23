@@ -132,6 +132,84 @@ func TestProcessFoldsIncrementally(t *testing.T) {
 	}
 }
 
+// retitle changes a stored commit's subject, so a test can tell a result
+// reused from the store (still retitled) from one matched again.
+func retitle(t *testing.T, stateDir, sha, subject string) {
+	t.Helper()
+	st := Store{Dir: filepath.Join(stateDir, "sessions")}
+	sessions, _, err := st.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sessions {
+		for i, c := range s.Commits() {
+			if c.SHA == sha {
+				s.Attribution.Commits[i].Subject = subject
+				if err := st.Save(s); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}
+	}
+	t.Fatalf("no stored commit %s", sha[:7])
+}
+
+// A new commit recomputes the session's attribution, but commits matched
+// before with the same edits aren't matched again.
+func TestProcessMatchesOnlyNewCommits(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	code := lines(4, "func generated%d() string { return \"value from the agent\" }")
+	f.agentWrite(t0, "gen.go", code, nil)
+	writeLog(t, filepath.Join(state, "events.jsonl"), f.recs)
+	first := f.commit(t0.Add(time.Minute), "me@example.com", "add gen", map[string]string{"gen.go": code})
+	res := f.process(t, state, t0.Add(time.Hour))
+	computed := res.Sessions[0].Attribution.ComputedAt
+	retitle(t, state, first, "from the store")
+
+	second := f.commit(t0.Add(2*time.Minute), "me@example.com", "more", map[string]string{"gen.go": code + "func human() {}\n"})
+	res = f.process(t, state, t0.Add(2*time.Hour))
+	s := res.Sessions[0]
+	if s.Attribution.ComputedAt.Equal(computed) {
+		t.Fatal("attribution not recomputed after a new commit")
+	}
+	if c := s.Commits(); len(c) != 1 || c[0].SHA != first || c[0].Subject != "from the store" {
+		t.Errorf("commits = %+v, want only %s, reused from the store", c, first[:7])
+	}
+	if len(s.Attribution.Matched) != 2 {
+		t.Errorf("matched = %v, want both %s and %s", s.Attribution.Matched, first[:7], second[:7])
+	}
+}
+
+// An edit folded after a commit was matched, but made before it (within the
+// clock slack), changes what the commit is matched with: it is matched again.
+func TestProcessRematchesCommitsNewEditsApplyTo(t *testing.T) {
+	f := newFixture(t)
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	f.commit(t0.Add(-time.Hour), "me@example.com", "base", map[string]string{"README": "hi\n"})
+	one := lines(4, "func first%d() string { return \"written by the agent\" }")
+	two := lines(4, "func second%d() string { return \"also by the agent\" }")
+	f.agentWrite(t0, "x.go", one, nil)
+	writeLog(t, logPath, f.recs)
+	at := t0.Add(time.Minute)
+	sha := f.commit(at, "me@example.com", "both", map[string]string{"x.go": one + two})
+	if c := f.process(t, state, t0.Add(time.Hour)).Sessions[0].Commits(); len(c) != 1 || c[0].Survived() != 4 {
+		t.Fatalf("before the late edit: %+v, want %s with 4 lines", c, sha[:7])
+	}
+	retitle(t, state, sha, "from the store")
+
+	f.recs = nil
+	f.agentWrite(at.Add(time.Second), "x.go", one+two, one)
+	writeLog(t, logPath, f.recs)
+	c := f.process(t, state, t0.Add(2*time.Hour)).Sessions[0].Commits()
+	if len(c) != 1 || c[0].Survived() != 8 || c[0].Subject != "both" {
+		t.Errorf("after the late edit: %+v, want %s with 8 lines, matched again", c, sha[:7])
+	}
+}
+
 func TestProcessPrunesOldSessions(t *testing.T) {
 	f := newFixture(t)
 	state := t.TempDir()

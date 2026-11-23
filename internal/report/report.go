@@ -206,6 +206,12 @@ type Attribution struct {
 	Key        string    `json:"key"`
 	ComputedAt time.Time `json:"computed_at"`
 	Commits    []Commit  `json:"commits"`
+	// Matched has an entry for each candidate commit the last computation
+	// matched, whether or not it held the session's lines, identifying the
+	// inputs it was matched with (see matchKey). Commits whose inputs haven't
+	// changed are not matched again: a recompute only pays for new commits,
+	// and for commits that new edits apply to.
+	Matched map[string]string `json:"matched,omitempty"`
 }
 
 // Commit is a commit containing lines the session wrote, in the repository of
@@ -691,11 +697,34 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 					commits = append(commits, c)
 				}
 			}
+			prev := map[string]Commit{} // by matchedID
+			for _, c := range s.Commits() {
+				prev[matchedID(keyOf[c.Root], c.SHA)] = c
+			}
+			matched := map[string]string{}
 			for k, cs := range candidates {
-				rc := repos[k]
-				for _, c := range attribute(rc.r, s.Edits, cs, func(e Edit) bool { return keyOf[e.Root] == k }) {
-					c.Root = worktree[k] // not rc.root, which may be another session's
-					commits = append(commits, c)
+				include := func(e Edit) bool { return keyOf[e.Root] == k }
+				var todo []commit
+				for _, c := range cs {
+					id, mk := matchedID(k, c.SHA), matchKey(s.Edits, c, include)
+					matched[id] = mk
+					if s.Attribution == nil || s.Attribution.Matched[id] != mk {
+						todo = append(todo, c)
+					}
+				}
+				fresh := map[string]Commit{}
+				for _, c := range attribute(repos[k].r, s.Edits, todo, include) {
+					fresh[c.SHA] = c
+				}
+				for _, c := range cs { // in candidate order, as if all were matched now
+					res, ok := fresh[c.SHA]
+					if id := matchedID(k, c.SHA); !ok && s.Attribution != nil && s.Attribution.Matched[id] == matched[id] {
+						res, ok = prev[id] // matched before with the same inputs; absent if it held none of the lines
+					}
+					if ok {
+						res.Root = worktree[k] // not rc.root, which may be another session's
+						commits = append(commits, res)
+					}
 				}
 			}
 			sort.SliceStable(commits, func(a, b int) bool {
@@ -704,7 +733,7 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 				}
 				return commits[a].Root < commits[b].Root
 			})
-			s.Attribution = &Attribution{Key: key, ComputedAt: now, Commits: commits}
+			s.Attribution = &Attribution{Key: key, ComputedAt: now, Commits: commits, Matched: matched}
 		}
 		for i, c := range s.Attribution.Commits {
 			if rc := repos[keyOf[c.Root]]; rc != nil && rc.ok {
@@ -827,6 +856,29 @@ func attributionKey(s *Session, edited map[string]bool, repos map[string]*repoCo
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// matchedID names a candidate commit in Attribution.Matched: its repository
+// (see repoKeyOf) and SHA.
+func matchedID(repoKey, sha string) string {
+	return repoKey + " " + sha
+}
+
+// matchKey identifies what matching commit c involves (see attribute): the
+// matcher and the session's edits it is matched with — those in its
+// repository, to a path it touched, made before it. Edits are only ever
+// appended to a session and never change, so their indices identify them, and
+// with them the line ids they are credited by. The commit's content is
+// identified by its SHA.
+func matchKey(edits []Edit, c commit, include func(Edit) bool) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", attribution.Version)
+	for i, e := range edits {
+		if include(e) && c.Paths[e.Path] && !e.At.After(c.At.Add(clockSlack)) {
+			fmt.Fprintf(h, "%d\n", i)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // rank orders classes from strongest to weakest evidence of the agent's work.
