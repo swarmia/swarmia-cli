@@ -85,17 +85,21 @@ type line struct {
 	raw     string // trailing whitespace trimmed
 	norm    string
 	loose   string // norm without any , or ; — for comparing wrapped/joined lines
-	toks    map[string]struct{}
+	toks    tokenSet
 	trivial bool
 	added   bool // hunk side only
 	num     int  // 1-based line number in the original text
 }
 
+// looseReplacer strips what makes a line loose (see line.loose). A Replacer is
+// costly to build and safe for concurrent use, so there is one.
+var looseReplacer = strings.NewReplacer(",", "", ";", "")
+
 func newLine(text string, num int, added bool) line {
 	raw := strings.TrimRight(text, " \t\r")
 	norm := normalize(raw)
-	loose := strings.NewReplacer(",", "", ";", "").Replace(norm)
-	return line{raw: raw, norm: norm, loose: loose, toks: tokens(raw), trivial: isTrivial(norm), added: added, num: num}
+	loose := looseReplacer.Replace(norm)
+	return line{raw: raw, norm: norm, loose: loose, toks: newTokenSet(raw), trivial: isTrivial(norm), added: added, num: num}
 }
 
 func hunkLines(h Hunk) []line {
@@ -118,13 +122,30 @@ func fileLines(content string) []line {
 	return out
 }
 
-// MatchHunk locates the hunk in the committed file content and attributes the
-// lines that came from the agent's added lines. Blank lines are ignored on both
-// sides. It may find several pieces, if a human split the hunk up or moved part
-// of it; see accept for what counts as a piece.
+// File is a committed file's content prepared for matching. Preparing it is a
+// large share of the cost of matching one hunk, so to match several hunks
+// against the same content, parse it once with ParseFile and call Match for
+// each. A File is never modified by matching.
+type File struct {
+	lines []line
+}
+
+func ParseFile(content string) *File {
+	return &File{lines: fileLines(content)}
+}
+
+// MatchHunk locates the hunk in the committed file content; see File.Match.
 func MatchHunk(h Hunk, content string) Match {
+	return ParseFile(content).Match(h)
+}
+
+// Match locates the hunk in the committed file and attributes the lines that
+// came from the agent's added lines. Blank lines are ignored on both sides. It
+// may find several pieces, if a human split the hunk up or moved part of it;
+// see accept for what counts as a piece.
+func (file *File) Match(h Hunk) Match {
 	H := hunkLines(h)
-	F := fileLines(content)
+	F := file.lines
 	var m Match
 	for _, l := range H {
 		if l.added {

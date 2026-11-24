@@ -6,6 +6,7 @@
 package attribution
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -56,29 +57,69 @@ func isTrivial(norm string) bool {
 	return true
 }
 
-// tokens splits a line into its identifier/number tokens, for judging whether a
-// changed line is still recognisably the agent's.
-func tokens(s string) map[string]struct{} {
-	set := map[string]struct{}{}
-	for _, f := range strings.FieldsFunc(s, func(r rune) bool {
-		return !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r))
-	}) {
-		set[f] = struct{}{}
+// tokenSet is a line's distinct identifier/number tokens, for judging whether
+// a changed line is still recognisably the agent's. Alignment compares every
+// hunk line with every file line, so the set is laid out for that: sorted, to
+// intersect two sets in one merge pass, with a bloom-style mask that rules out
+// most unrelated pairs before any string is compared.
+type tokenSet struct {
+	toks []string // sorted, distinct
+	mask uint64   // bit hash(t)%64 set for each token t
+}
+
+func newTokenSet(s string) tokenSet {
+	toks := tokens(s)
+	var mask uint64
+	for _, t := range toks {
+		mask |= 1 << (tokenHash(t) % 64)
 	}
-	return set
+	return tokenSet{toks: toks, mask: mask}
+}
+
+// tokens splits a line into its distinct identifier/number tokens, sorted.
+func tokens(s string) []string {
+	toks := strings.FieldsFunc(s, func(r rune) bool {
+		return !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r))
+	})
+	slices.Sort(toks)
+	return slices.Compact(toks)
+}
+
+// tokenHash is FNV-1a, inlined to avoid an allocation per token.
+func tokenHash(t string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(t); i++ {
+		h ^= uint64(t[i])
+		h *= 1099511628211
+	}
+	return h
 }
 
 // similar reports whether two token sets overlap enough (Jaccard ≥ 0.5) that
 // one line is plausibly an edited version of the other.
-func similar(a, b map[string]struct{}) bool {
-	if len(a) == 0 || len(b) == 0 {
+func similar(a, b tokenSet) bool {
+	la, lb := len(a.toks), len(b.toks)
+	if la == 0 || lb == 0 {
+		return false
+	}
+	// Jaccard ≥ 0.5 means 3·|a∩b| ≥ |a|+|b|. As |a∩b| ≤ min(|a|,|b|), sets
+	// whose sizes differ by more than 2× can't qualify, and sets sharing no
+	// mask bit share no token.
+	if 3*min(la, lb) < la+lb || a.mask&b.mask == 0 {
 		return false
 	}
 	inter := 0
-	for t := range a {
-		if _, ok := b[t]; ok {
+	for i, j := 0, 0; i < la && j < lb; {
+		switch c := strings.Compare(a.toks[i], b.toks[j]); {
+		case c < 0:
+			i++
+		case c > 0:
+			j++
+		default:
 			inter++
+			i++
+			j++
 		}
 	}
-	return 2*inter >= len(a)+len(b)-inter
+	return 2*inter >= la+lb-inter
 }
