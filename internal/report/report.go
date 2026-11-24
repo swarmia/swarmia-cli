@@ -707,13 +707,9 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 				before = s.Attribution.Matched
 			}
 			matched := map[string]map[string]string{}
-			for k := range edited {
-				if !repos[k].ok && before[k] != nil {
-					matched[k] = before[k] // kept with its commits, for when it can be read again
-				}
-			}
 			for k, cs := range candidates {
 				r, include := repos[k].r, func(e Edit) bool { return keyOf[e.Root] == k }
+				paths := editedPaths(s.Edits, include)
 				matched[k] = map[string]string{}
 				reused := map[string]Commit{}
 				var todo []commit
@@ -740,7 +736,7 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 				}
 				for _, c := range todo {
 					switch _, held := reused[c.SHA]; {
-					case r.failed[c.SHA]:
+					case r.readFailed(c.SHA, paths):
 						key = "" // incomplete: matched again next run
 					case held:
 						matched[k][c.SHA] = keys[c.SHA] + heldMark
