@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,6 +93,9 @@ func TestProcessFoldsLogAndCachesAttribution(t *testing.T) {
 }
 
 func TestProcessWritesOnlyChangedSessions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix file permissions")
+	}
 	state := t.TempDir()
 	logPath := filepath.Join(state, "events.jsonl")
 	sessionPath := filepath.Join(state, "sessions", "sess-1.json")
@@ -140,6 +144,33 @@ func TestProcessWritesOnlyChangedSessions(t *testing.T) {
 	}
 	if got := sessions[0].Delivery; got == nil || got.Hash != "accepted" {
 		t.Errorf("stored delivery = %+v, want accepted", got)
+	}
+}
+
+func TestProcessRestoresSessionPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix file permissions")
+	}
+	state := t.TempDir()
+	st := Store{Dir: filepath.Join(state, "sessions")}
+	s := &Session{ID: "sess-1", StartedAt: t0, EndedAt: t0}
+	if err := st.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	path := st.path(s.ID)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := ProcessOptions{StateDir: state, LogPath: filepath.Join(state, "events.jsonl"), Now: t0}
+	if _, err := Process(opts); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("session file permissions = %04o, want 0600", got)
 	}
 }
 

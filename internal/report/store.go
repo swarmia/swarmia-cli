@@ -83,7 +83,8 @@ func (st *Store) List() (sessions []*Session, newer map[string]bool, err error) 
 	return sortedSessions(m), newer, nil
 }
 
-// Save writes changed sessions atomically (temp file + rename), in SessionFormat.
+// Save writes sessions atomically (temp file + rename), in SessionFormat.
+// An unchanged file is reused only if it already has mode 0600.
 func (st *Store) Save(sessions ...*Session) error {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return err
@@ -100,7 +101,9 @@ func (st *Store) Save(sessions ...*Session) error {
 		path := st.path(s.ID)
 		checksum := sha256.Sum256(data)
 		if saved, ok := st.checksums[path]; ok && saved == checksum {
-			continue
+			if info, err := os.Lstat(path); err == nil && info.Mode() == 0o600 {
+				continue
+			}
 		}
 		tmp, err := os.CreateTemp(st.Dir, ".tmp-*")
 		if err != nil {
