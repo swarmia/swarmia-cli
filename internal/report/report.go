@@ -206,6 +206,13 @@ type Attribution struct {
 	Key        string    `json:"key"`
 	ComputedAt time.Time `json:"computed_at"`
 	Commits    []Commit  `json:"commits"`
+	// Matched identifies, by repository (see repoKeyOf) and SHA, the inputs
+	// each candidate commit was matched with (see matchKey), with heldMark
+	// appended if it held the session's lines. Commits whose inputs haven't
+	// changed are not matched again: a recompute only pays for new commits,
+	// and for commits that new edits apply to. A commit git failed to read is
+	// left out, so it is matched again.
+	Matched map[string]map[string]string `json:"matched,omitempty"`
 }
 
 // Commit is a commit containing lines the session wrote, in the repository of
@@ -691,11 +698,57 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 					commits = append(commits, c)
 				}
 			}
+			prev := map[string]Commit{} // by repository and SHA
+			for _, c := range s.Commits() {
+				prev[keyOf[c.Root]+" "+c.SHA] = c
+			}
+			var before map[string]map[string]string
+			if s.Attribution != nil {
+				before = s.Attribution.Matched
+			}
+			matched := map[string]map[string]string{}
 			for k, cs := range candidates {
-				rc := repos[k]
-				for _, c := range attribute(rc.r, s.Edits, cs, func(e Edit) bool { return keyOf[e.Root] == k }) {
-					c.Root = worktree[k] // not rc.root, which may be another session's
-					commits = append(commits, c)
+				r, include := repos[k].r, func(e Edit) bool { return keyOf[e.Root] == k }
+				paths := editedPaths(s.Edits, include)
+				matched[k] = map[string]string{}
+				reused := map[string]Commit{}
+				var todo []commit
+				keys := map[string]string{} // SHA -> matchKey, for todo
+				for _, c := range cs {
+					mk := matchKey(s.Edits, c, include)
+					old, ok := prev[k+" "+c.SHA]
+					switch before[k][c.SHA] {
+					case mk: // held none of the lines
+						matched[k][c.SHA] = mk
+						continue
+					case mk + heldMark:
+						if ok {
+							matched[k][c.SHA] = mk + heldMark
+							reused[c.SHA] = old
+							continue
+						}
+					}
+					todo = append(todo, c) // new, changed, or its result went missing
+					keys[c.SHA] = mk
+				}
+				for _, c := range attribute(r, s.Edits, todo, include) {
+					reused[c.SHA] = c
+				}
+				for _, c := range todo {
+					switch _, held := reused[c.SHA]; {
+					case r.readFailed(c.SHA, paths):
+						key = "" // incomplete: matched again next run
+					case held:
+						matched[k][c.SHA] = keys[c.SHA] + heldMark
+					default:
+						matched[k][c.SHA] = keys[c.SHA]
+					}
+				}
+				for _, c := range cs { // in candidate order, as if all were matched now
+					if res, ok := reused[c.SHA]; ok {
+						res.Root = worktree[k] // not repos[k].root, which may be another session's
+						commits = append(commits, res)
+					}
 				}
 			}
 			sort.SliceStable(commits, func(a, b int) bool {
@@ -704,7 +757,7 @@ func Attribute(sessions []*Session, opts Options, now time.Time) error {
 				}
 				return commits[a].Root < commits[b].Root
 			})
-			s.Attribution = &Attribution{Key: key, ComputedAt: now, Commits: commits}
+			s.Attribution = &Attribution{Key: key, ComputedAt: now, Commits: commits, Matched: matched}
 		}
 		for i, c := range s.Attribution.Commits {
 			if rc := repos[keyOf[c.Root]]; rc != nil && rc.ok {
@@ -827,6 +880,27 @@ func attributionKey(s *Session, edited map[string]bool, repos map[string]*repoCo
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// heldMark marks a commit in Attribution.Matched that held the session's
+// lines, so its result must be found among the stored commits to be reused.
+const heldMark = "+"
+
+// matchKey identifies what matching commit c involves (see attribute): the
+// matcher and the session's edits it is matched with — those in its
+// repository, to a path it touched, made before it. Edits are only ever
+// appended to a session and never change, so their indices identify them, and
+// with them the line ids they are credited by. The commit's content is
+// identified by its SHA.
+func matchKey(edits []Edit, c commit, include func(Edit) bool) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", attribution.Version)
+	for i, e := range edits {
+		if include(e) && c.Paths[e.Path] && !e.At.After(c.At.Add(clockSlack)) {
+			fmt.Fprintf(h, "%d\n", i)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // rank orders classes from strongest to weakest evidence of the agent's work.

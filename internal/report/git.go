@@ -17,10 +17,13 @@ type repo struct {
 	contents map[string]*string // sha:path → file content (nil: absent)
 	added    map[string]map[int]bool
 	pushed   map[string]bool
+	// failed holds the sha:path reads that failed (not because the commit
+	// deleted the file): what was learnt about them is incomplete.
+	failed map[string]bool
 }
 
 func newRepo(dir string) *repo {
-	return &repo{dir: dir, contents: map[string]*string{}, added: map[string]map[int]bool{}, pushed: map[string]bool{}}
+	return &repo{dir: dir, contents: map[string]*string{}, added: map[string]map[int]bool{}, pushed: map[string]bool{}, failed: map[string]bool{}}
 }
 
 func (r *repo) git(args ...string) ([]byte, error) {
@@ -79,12 +82,32 @@ func (r *repo) content(sha, path string) (string, bool) {
 	}
 	out, err := r.git("show", key)
 	if err != nil {
+		if !r.absent(sha, path) {
+			r.failed[key] = true
+		}
 		r.contents[key] = nil
 		return "", false
 	}
 	s := string(out)
 	r.contents[key] = &s
 	return s, true
+}
+
+// absent reports whether path is known to be missing from commit sha, as when
+// the commit deleted it — as opposed to git failing to read it.
+func (r *repo) absent(sha, path string) bool {
+	out, err := r.git("ls-tree", "--name-only", sha, "--", path)
+	return err == nil && len(bytes.TrimSpace(out)) == 0
+}
+
+// readFailed reports whether git failed to read any of paths in commit sha.
+func (r *repo) readFailed(sha string, paths []string) bool {
+	for _, path := range paths {
+		if r.failed[sha+":"+path] {
+			return true
+		}
+	}
+	return false
 }
 
 func deref(s *string) (string, bool) {
@@ -107,7 +130,9 @@ func (r *repo) addedLines(sha, path string) map[int]bool {
 	}
 	added := map[int]bool{}
 	out, err := r.git("diff-tree", "-p", "-U0", "--no-color", "--no-ext-diff", "--root", sha, "--", path)
-	if err == nil {
+	if err != nil {
+		r.failed[key] = true
+	} else {
 		for _, l := range strings.Split(string(out), "\n") {
 			m := hunkHeader.FindStringSubmatch(l)
 			if m == nil {
