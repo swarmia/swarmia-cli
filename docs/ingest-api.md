@@ -18,8 +18,8 @@ example, because the repository isn't connected to the token's organization).
 
 ## What the data is
 
-A coding agent (Claude Code today; Codex, Cursor, Copilot CLI and Gemini CLI
-later) works in one or more of a developer's git repositories: it may be started
+A coding agent (Claude Code, Codex and GitHub Copilot today; Cursor and Gemini
+CLI later) works in one or more of a developer's git repositories: it may be started
 inside a repository, edit a sibling one, or be started in a directory holding
 many. The CLI records the session locally, works out on the developer's machine
 which lines of which commits came from the agent, and sends Swarmia one
@@ -198,7 +198,7 @@ cap the decompressed size, see Limits).
 | Field | Type | Description |
 |---|---|---|
 | `session_id` | string | The agent's session id (a UUID for Claude Code and Codex). Unique per agent session; together with the organization (from the token) it identifies the session. Treat it as opaque. |
-| `agent` | string | Which coding agent: `claude-code` or `codex`. Future values: `cursor`, `copilot-cli`, `gemini-cli`. Accept unknown values. |
+| `agent` | string | Which coding agent: `claude-code`, `codex` or `copilot` (GitHub Copilot's agent, in Copilot CLI, VS Code or the GitHub Copilot app). Future values: `cursor`, `gemini-cli`. Accept unknown values. |
 | `model` | string, optional | The model the session started with, as the agent reports it (e.g. `claude-opus-4-8[1m]`): it keeps that value when the session is resumed with another. It is the agent's setting, which can be an alias, so group by `usage[].model` (the API's model ids) for the models a session used. A headless session (`claude -p`) reports none at its start: it gets the API model id that made the most requests instead, or, once resumed interactively, the model it was resumed with. Omitted if neither is known. |
 | `matcher_version` | string (semver) | Version of the client's attribution rules. If a version is later found to attribute wrongly, the server can discount or flag results from it. |
 | `cli_version` | string | Client version that built this payload. |
@@ -233,13 +233,13 @@ client counts a response when the total changes).
 
 | Field | Type | Description |
 |---|---|---|
-| `model` | string | Model id as the agent reports it, e.g. `claude-opus-4-8` or `gpt-6`; `unknown` if a Codex rollout didn't name it. |
+| `model` | string | Model id as the agent reports it, e.g. `claude-opus-4-8` or `gpt-6` (Copilot's own ids, e.g. `claude-sonnet-5.5`, `gpt-5.6-sol`); `unknown` if a Codex rollout didn't name it. |
 | `speed` | string | `standard` or `fast` (fast mode is priced differently). Always `standard` for Codex. Accept other values. |
-| `subagent` | boolean, optional | `true` for calls made by the session's subagents (e.g. Claude Code's Task tool); absent for the main session. Not yet reported for Codex. |
+| `subagent` | boolean, optional | `true` for calls made by the session's subagents (e.g. Claude Code's Task tool, Copilot's agents); absent for the main session. Not yet reported for Codex. |
 | `requests` | integer | Model calls (API responses). |
 | `input_tokens` | integer | Uncached input tokens. |
 | `output_tokens` | integer | Output tokens (including thinking and reasoning). |
-| `reasoning_output_tokens` | integer, optional | Of `output_tokens`, those spent on reasoning (Codex). |
+| `reasoning_output_tokens` | integer, optional | Of `output_tokens`, those spent on reasoning (Codex, Copilot). |
 | `cache_read_input_tokens` | integer | Input tokens read from the prompt cache. |
 | `cache_creation_5m_input_tokens` | integer | Input tokens written to the 5-minute cache (0 for Codex, whose caching is automatic). |
 | `cache_creation_1h_input_tokens` | integer | Input tokens written to the 1-hour cache (0 for Codex). |
@@ -266,12 +266,12 @@ next turn starts is the agent waiting on the developer (or idle).
 | Field | Type | Description |
 |---|---|---|
 | `at` | string, RFC 3339 UTC | When the tool call finished. |
-| `name` | string | The agent's tool name, e.g. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, `WebFetch`, `Task`, `mcp__<server>__<tool>` (Claude Code) or `apply_patch`, `Bash` (Codex). Agent-specific; accept anything. |
+| `name` | string | The agent's tool name, e.g. `Read`, `Edit`, `Write`, `MultiEdit`, `Bash`, `Grep`, `Glob`, `WebFetch`, `Task`, `mcp__<server>__<tool>` (Claude Code), `apply_patch`, `Bash` (Codex) or `Read`, `Edit`, `Write`, `Bash`, `Agent`, `read_bash` (Copilot, which reports most of its tools under Claude Code's names). Agent-specific; accept anything. |
 | `repo` | string, optional | The repository the call worked in, as listed in `repos`: the one holding `file`, or for a call without one (a shell command, a search) the one its working directory is in. Omitted if that isn't one of `repos`. |
 | `file` | string, optional | The file the tool acted on, relative to the root of `repo`, `/`-separated (for Codex's `apply_patch`, which can change several, the first). Omitted if the tool has no file or it lies outside every repository in `repos`. |
 | `command` | string, optional | For shell tools: the command, with heredoc bodies replaced by `[N lines omitted]`, inline interpreter scripts (`python -c`, `node -e`, …) by `'[script omitted]'`, quoted strings over 120 characters by `'[N chars omitted]'`, secrets redacted, local paths masked, and capped at ~1000 characters (truncation ends with `…`). |
 | `skill` | string, optional | For skill tools (Claude Code's `Skill`): the skill the agent loaded, e.g. `db-migration`, or `<plugin>:<skill>` for a plugin's. Its arguments are never sent. The model names the skill, so a value that doesn't look like a skill's name (up to 100 letters, digits and `._:/@-`, not starting with `/`) is left out, and secrets are redacted as in `command`. Sent also when prompts are withheld: like `name`, it identifies the tool, not what the developer wrote. |
-| `status` | string, optional | How the call ended: `ok`, `failed` (the agent reported an error) or `interrupted` (the developer stopped it). Accept other values. Absent when unknown: Codex reports failed calls like successful ones, so its calls have none for now, and neither do calls recorded by older clients. A shell command that exits nonzero may still be `ok`: the agent decides, and Claude Code counts e.g. `grep` finding nothing as success. |
+| `status` | string, optional | How the call ended: `ok`, `failed` (the agent reported an error) or `interrupted` (the developer stopped it). Accept other values. Absent when unknown: Codex reports failed calls like successful ones, so its calls have none for now, and neither do calls recorded by older clients. A shell command that exits nonzero may still be `ok`: the agent decides, and Claude Code counts e.g. `grep` finding nothing as success. Copilot reports every exit status, so its nonzero exits are `failed`. |
 | `exit_code` | integer, optional | For shell tools whose call failed or was interrupted: the command's exit status, when the agent reports it (e.g. `1`, `2`, `127` for a missing command, `130` for an interrupt). Never present on `ok` calls, whose exit status agents don't report. The error message itself is never sent. |
 
 #### CommitAttribution

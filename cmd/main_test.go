@@ -21,12 +21,14 @@ func TestMain(m *testing.M) {
 		"HOME":              home,
 		"CLAUDE_CONFIG_DIR": filepath.Join(home, ".claude"),
 		"CODEX_HOME":        filepath.Join(home, ".codex"),
+		"COPILOT_HOME":      filepath.Join(home, ".copilot"),
 		"XDG_CONFIG_HOME":   filepath.Join(home, ".config"),
 		"SWARMIA_STATE_DIR": filepath.Join(home, "state"),
 	} {
 		os.Setenv(k, v)
 	}
 	os.Unsetenv("CLAUDE_PROJECT_DIR")
+	os.Unsetenv("COPILOT_PROJECT_DIR")
 	code := m.Run()
 	os.RemoveAll(home)
 	os.Exit(code)

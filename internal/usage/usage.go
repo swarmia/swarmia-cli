@@ -21,6 +21,12 @@
 // and reasoning within output tokens; Totals follows Claude's convention, input
 // tokens excluding cache reads.
 //
+// GitHub Copilot writes a session's events to
+// ~/.copilot/session-state/<session>/events.jsonl, with a session.usage_record
+// event per model request, its subagents' too (marked with their agentId).
+// Copilot counts cache reads and writes within input tokens, and reasoning
+// within output tokens.
+//
 // Cost isn't computed here: prices change and depend on contracts, so the
 // server derives cost from these counts.
 package usage
@@ -73,6 +79,7 @@ type Format int
 const (
 	ClaudeTranscript Format = iota // Claude Code's session transcript
 	CodexRollout                   // Codex's session rollout
+	CopilotEvents                  // GitHub Copilot's session events
 )
 
 // Tracker accumulates usage across a session's transcript files.
@@ -334,9 +341,12 @@ func (st *fileState) read(path string, format Format, subagent bool) error {
 		st.Totals = map[string]*Totals{}
 	}
 	for _, line := range bytes.Split(data[:end], []byte("\n")) {
-		if format == CodexRollout {
+		switch format {
+		case CodexRollout:
 			st.codexLine(line)
-		} else {
+		case CopilotEvents:
+			st.copilotLine(line)
+		default:
 			st.claudeLine(line, subagent)
 		}
 	}

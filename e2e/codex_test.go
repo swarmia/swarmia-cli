@@ -21,6 +21,7 @@ type codex struct{}
 func (codex) name() string       { return "codex" }
 func (codex) projectDir() string { return ".codex" }
 func (codex) versionVar() string { return "E2E_CODEX_VERSION" }
+func (codex) model() string      { return os.Getenv("E2E_CODEX_MODEL") }
 
 // installFlags: Codex runs only hooks the user trusts, so the suite trusts
 // them the way users can, through swarmia-cli (in the sandbox's CODEX_HOME).

@@ -190,8 +190,8 @@ Tool *outputs* (Read/Bash/Grep results) are never sent.
    show per-session stored/dropped state in `report` and token problems in
    `config`.
 8. **Global install** (D2) + MDM docs.
-9. **More agents:** Codex (on its branch, see "Codex support"), then Cursor,
-   Copilot CLI, Gemini CLI.
+9. **More agents:** Codex (on its branch, see "Codex support"), GitHub
+   Copilot ✅ ([docs/copilot.md](copilot.md)), then Cursor, Gemini CLI.
 
 15. 🟡 **End-to-end suite** ([docs/e2e.md](e2e.md)): a real Claude Code release
     (`latest` and `stable`, installed from npm) does a task in `unjs/ufo` (MIT,

@@ -30,6 +30,9 @@ func TestClaudeCode(t *testing.T) { runScenario(t, claudeCode{}) }
 // TestCodex runs the scenario in docs/e2e.md against Codex.
 func TestCodex(t *testing.T) { runScenario(t, codex{}) }
 
+// TestCopilot runs the scenario in docs/e2e.md against GitHub Copilot CLI.
+func TestCopilot(t *testing.T) { runScenario(t, copilot{}) }
+
 // runScenario runs the scenario against the agent if E2E_AGENT selects it
 // (claude-code by default).
 func runScenario(t *testing.T, ag agent) {
@@ -129,7 +132,7 @@ func runScenario(t *testing.T, ag agent) {
 	must(t, json.Unmarshal([]byte(raw), &payloads))
 	p1, p2 := findPayload(t, payloads, s1), findPayload(t, payloads, s2)
 
-	m := metrics{Agent: ag.name(), AgentVersion: e.version, Model: envOr("E2E_MODEL", envOr("E2E_CODEX_MODEL", "")),
+	m := metrics{Agent: ag.name(), AgentVersion: e.version, Model: e.agent.model(),
 		CostUSD:        run1.CostUSD + run2.CostUSD + run3.CostUSD,
 		AgentToolCalls: len(run1.ToolUses) + len(run2.ToolUses) + len(run3.ToolUses),
 		Sessions:       map[string]sessionMetrics{}}

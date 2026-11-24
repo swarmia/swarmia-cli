@@ -161,6 +161,16 @@ func (s Store) Save(id string, p Pending) error {
 }
 
 // Load retrieves and removes what was saved for id.
+// SavedAt is when the pending snapshot saved under id was saved, if there is
+// one.
+func (s Store) SavedAt(id string) (time.Time, bool) {
+	fi, err := os.Stat(s.pendingPath(id))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return fi.ModTime(), true
+}
+
 func (s Store) Load(id string) (Pending, bool) {
 	path := s.pendingPath(id)
 	data, err := os.ReadFile(path)
