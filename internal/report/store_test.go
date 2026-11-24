@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -88,6 +89,88 @@ func TestProcessFoldsLogAndCachesAttribution(t *testing.T) {
 	res = f.process(t, state, t0.Add(4*time.Hour))
 	if c := res.Sessions[0].Commits(); len(c) != 1 || !c[0].Pushed {
 		t.Errorf("after push: %+v, want pushed", c)
+	}
+}
+
+func TestProcessWritesOnlyChangedSessions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix file permissions")
+	}
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	sessionPath := filepath.Join(state, "sessions", "sess-1.json")
+	writeLog(t, logPath, []events.Record{{
+		Agent:    "claude-code",
+		LoggedAt: t0.Format(time.RFC3339),
+		Event:    json.RawMessage(`{"hook_event_name":"SessionStart","session_id":"sess-1"}`),
+	}})
+	opts := ProcessOptions{StateDir: state, LogPath: logPath, Now: t0}
+	process := func() {
+		t.Helper()
+		if _, err := Process(opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkUnchanged := func() {
+		t.Helper()
+		info, err := os.Stat(sessionPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(t0) {
+			t.Errorf("unchanged session was rewritten: mtime = %v, want %v", info.ModTime(), t0)
+		}
+	}
+	opts.AfterAttribute = func(_ []*Session) error {
+		// The fold has saved the session. Check that the final save skips it.
+		return os.Chtimes(sessionPath, t0, t0)
+	}
+	process()
+	checkUnchanged()
+
+	opts.AfterAttribute = nil
+	process()
+	checkUnchanged()
+
+	opts.AfterAttribute = func(sessions []*Session) error {
+		sessions[0].Delivery = &Delivery{Hash: "accepted", SentAt: t0}
+		return nil
+	}
+	process()
+	st := Store{Dir: filepath.Dir(sessionPath)}
+	sessions, _, err := st.List()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("stored sessions: %v, %v", sessions, err)
+	}
+	if got := sessions[0].Delivery; got == nil || got.Hash != "accepted" {
+		t.Errorf("stored delivery = %+v, want accepted", got)
+	}
+}
+
+func TestProcessRestoresSessionPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix file permissions")
+	}
+	state := t.TempDir()
+	st := Store{Dir: filepath.Join(state, "sessions")}
+	s := &Session{ID: "sess-1", StartedAt: t0, EndedAt: t0}
+	if err := st.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	path := st.path(s.ID)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := ProcessOptions{StateDir: state, LogPath: filepath.Join(state, "events.jsonl"), Now: t0}
+	if _, err := Process(opts); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("session file permissions = %04o, want 0600", got)
 	}
 }
 

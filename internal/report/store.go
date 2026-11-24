@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,16 +32,19 @@ const SessionFormat = 4 // 2: tools carry status and exit_code; 3: edits, commit
 // hold prompts and the agent's code.
 type Store struct {
 	Dir string
+	// checksums tracks the bytes read or saved during a locked Process run.
+	checksums map[string][sha256.Size]byte
 }
 
-func (st Store) path(id string) string {
+func (st *Store) path(id string) string {
 	return filepath.Join(st.Dir, safeFileName(id)+".json")
 }
 
 // List loads every stored session, newest first. Unreadable files are skipped.
 // Sessions stored by a newer swarmia-cli, in a format this one doesn't know,
 // aren't loaded but listed in newer by id, to be left alone.
-func (st Store) List() (sessions []*Session, newer map[string]bool, err error) {
+func (st *Store) List() (sessions []*Session, newer map[string]bool, err error) {
+	st.checksums = make(map[string][sha256.Size]byte)
 	entries, err := os.ReadDir(st.Dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -54,7 +58,8 @@ func (st Store) List() (sessions []*Session, newer map[string]bool, err error) {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(st.Dir, e.Name()))
+		path := filepath.Join(st.Dir, e.Name())
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -66,6 +71,7 @@ func (st Store) List() (sessions []*Session, newer map[string]bool, err error) {
 			newer[s.ID] = true
 			continue
 		}
+		st.checksums[path] = sha256.Sum256(data)
 		if len(s.Prompts) > 0 { // format 3 and earlier: prompts, which are turns
 			s.Turns, s.Prompts = append(s.Prompts, s.Turns...), nil
 		}
@@ -78,15 +84,26 @@ func (st Store) List() (sessions []*Session, newer map[string]bool, err error) {
 }
 
 // Save writes sessions atomically (temp file + rename), in SessionFormat.
-func (st Store) Save(sessions ...*Session) error {
+// An unchanged file is reused only if it already has mode 0600.
+func (st *Store) Save(sessions ...*Session) error {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return err
+	}
+	if st.checksums == nil {
+		st.checksums = make(map[string][sha256.Size]byte)
 	}
 	for _, s := range sessions {
 		s.Format = SessionFormat
 		data, err := json.Marshal(s)
 		if err != nil {
 			return err
+		}
+		path := st.path(s.ID)
+		checksum := sha256.Sum256(data)
+		if saved, ok := st.checksums[path]; ok && saved == checksum {
+			if info, err := os.Lstat(path); err == nil && info.Mode() == 0o600 {
+				continue
+			}
 		}
 		tmp, err := os.CreateTemp(st.Dir, ".tmp-*")
 		if err != nil {
@@ -98,9 +115,10 @@ func (st Store) Save(sessions ...*Session) error {
 			os.Remove(tmp.Name())
 			return err
 		}
-		if err := os.Rename(tmp.Name(), st.path(s.ID)); err != nil {
+		if err := os.Rename(tmp.Name(), path); err != nil {
 			return err
 		}
+		st.checksums[path] = checksum
 	}
 	return nil
 }
@@ -116,13 +134,17 @@ func (s *Session) isEmptyCodexSession() bool {
 // sessions whose last event is older than Retention. A recently resumed
 // session may go on, so retention uses EndedAt. Events received after
 // deletion would make a new session that the server takes for the whole of it.
-func (st Store) Prune(sessions []*Session, now time.Time) ([]*Session, int) {
+func (st *Store) Prune(sessions []*Session, now time.Time) ([]*Session, int) {
 	var kept []*Session
 	pruned := 0
 	for _, s := range sessions {
 		emptyCodex := s.isEmptyCodexSession()
 		if emptyCodex || now.Sub(s.EndedAt) > Retention {
-			err := os.Remove(st.path(s.ID))
+			path := st.path(s.ID)
+			err := os.Remove(path)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				delete(st.checksums, path)
+			}
 			if err == nil {
 				pruned++
 				continue
@@ -181,7 +203,7 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 		s.upgrade(opts.FallbackRoot)
 		byID[s.ID] = s
 	}
-	if res.Folded, err = foldLog(opts.LogPath, st, byID, newer, opts.FallbackRoot); err != nil {
+	if res.Folded, err = foldLog(opts.LogPath, &st, byID, newer, opts.FallbackRoot); err != nil {
 		return res, err
 	}
 
@@ -208,7 +230,7 @@ func Process(opts ProcessOptions) (ProcessResult, error) {
 // Records a newer swarmia-cli wrote, in a format this one doesn't know, and
 // records of sessions stored in a newer format (newer, by id) stay in the log,
 // byte for byte, for a newer swarmia-cli to fold.
-func foldLog(path string, st Store, byID map[string]*Session, newer map[string]bool, fallbackRoot string) (int, error) {
+func foldLog(path string, st *Store, byID map[string]*Session, newer map[string]bool, fallbackRoot string) (int, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		if os.IsNotExist(err) {
