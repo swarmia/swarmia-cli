@@ -91,6 +91,58 @@ func TestProcessFoldsLogAndCachesAttribution(t *testing.T) {
 	}
 }
 
+func TestProcessWritesOnlyChangedSessions(t *testing.T) {
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	sessionPath := filepath.Join(state, "sessions", "sess-1.json")
+	writeLog(t, logPath, []events.Record{{
+		Agent:    "claude-code",
+		LoggedAt: t0.Format(time.RFC3339),
+		Event:    json.RawMessage(`{"hook_event_name":"SessionStart","session_id":"sess-1"}`),
+	}})
+	opts := ProcessOptions{StateDir: state, LogPath: logPath, Now: t0}
+	process := func() {
+		t.Helper()
+		if _, err := Process(opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkUnchanged := func() {
+		t.Helper()
+		info, err := os.Stat(sessionPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(t0) {
+			t.Errorf("unchanged session was rewritten: mtime = %v, want %v", info.ModTime(), t0)
+		}
+	}
+	opts.AfterAttribute = func(_ []*Session) error {
+		// The fold has saved the session. Check that the final save skips it.
+		return os.Chtimes(sessionPath, t0, t0)
+	}
+	process()
+	checkUnchanged()
+
+	opts.AfterAttribute = nil
+	process()
+	checkUnchanged()
+
+	opts.AfterAttribute = func(sessions []*Session) error {
+		sessions[0].Delivery = &Delivery{Hash: "accepted", SentAt: t0}
+		return nil
+	}
+	process()
+	st := Store{Dir: filepath.Dir(sessionPath)}
+	sessions, _, err := st.List()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("stored sessions: %v, %v", sessions, err)
+	}
+	if got := sessions[0].Delivery; got == nil || got.Hash != "accepted" {
+		t.Errorf("stored delivery = %+v, want accepted", got)
+	}
+}
+
 // Amending a local commit replaces it: the old sha is unreachable, so the
 // attribution moves to the new one.
 func TestProcessFollowsRewrittenCommits(t *testing.T) {
