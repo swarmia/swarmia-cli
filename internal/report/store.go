@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
 )
@@ -67,6 +69,9 @@ func (st Store) List() (sessions []*Session, newer map[string]bool, err error) {
 		if len(s.Prompts) > 0 { // format 3 and earlier: prompts, which are turns
 			s.Turns, s.Prompts = append(s.Prompts, s.Turns...), nil
 		}
+		s.Turns = slices.DeleteFunc(s.Turns, func(t Turn) bool {
+			return agent.IsSuggestionPrompt(s.Agent, s.TranscriptPath, t.Text)
+		})
 		m[s.ID] = &s
 	}
 	return sortedSessions(m), newer, nil
@@ -100,18 +105,30 @@ func (st Store) Save(sessions ...*Session) error {
 	return nil
 }
 
-// Prune deletes sessions whose last event is older than Retention and
-// returns how many it deleted. That's EndedAt, not LastActivity: a session
-// resumed recently may go on, and once deleted, its next events would make a
-// new session that the server takes for the whole of it.
+// isEmptyCodexSession recognizes what remains after dropping a suggestion
+// prompt. Keep live sessions in case later hooks report developer activity.
+func (s *Session) isEmptyCodexSession() bool {
+	return s.Agent == agent.Codex.Name && s.Ended && s.TranscriptPath == "" &&
+		len(s.Turns) == 0 && len(s.Tools) == 0 && len(s.Edits) == 0 && s.Usage == nil
+}
+
+// Prune removes finished, empty Codex sessions without a transcript and
+// sessions whose last event is older than Retention. A recently resumed
+// session may go on, so retention uses EndedAt. Events received after
+// deletion would make a new session that the server takes for the whole of it.
 func (st Store) Prune(sessions []*Session, now time.Time) ([]*Session, int) {
 	var kept []*Session
 	pruned := 0
 	for _, s := range sessions {
-		if now.Sub(s.EndedAt) > Retention {
-			if os.Remove(st.path(s.ID)) == nil {
+		emptyCodex := s.isEmptyCodexSession()
+		if emptyCodex || now.Sub(s.EndedAt) > Retention {
+			err := os.Remove(st.path(s.ID))
+			if err == nil {
 				pruned++
 				continue
+			}
+			if emptyCodex && errors.Is(err, os.ErrNotExist) {
+				continue // foldLog skipped writing a new empty session
 			}
 		}
 		kept = append(kept, s)
@@ -243,7 +260,7 @@ func foldLog(path string, st Store, byID map[string]*Session, newer map[string]b
 	Fold(byID, recs, fallbackRoot)
 	var changed []*Session
 	for id := range touched {
-		if s, ok := byID[id]; ok {
+		if s, ok := byID[id]; ok && !s.isEmptyCodexSession() {
 			changed = append(changed, s)
 		}
 	}

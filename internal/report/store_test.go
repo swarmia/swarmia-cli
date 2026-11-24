@@ -329,6 +329,35 @@ func TestProcessPrunesOldSessions(t *testing.T) {
 	}
 }
 
+func TestProcessDropsPreviouslyCapturedCodexSuggestions(t *testing.T) {
+	state := t.TempDir()
+	logPath := filepath.Join(state, "events.jsonl")
+	st := Store{Dir: filepath.Join(state, "sessions")}
+	const prompt = "This is an app-generated request for a suggested next user message. The user did not write this message.\n\nGenerate a suggestion."
+	if err := st.Save(
+		&Session{ID: "saved", Agent: "codex", StartedAt: t0, EndedAt: t0, Ended: true, Turns: []Turn{{At: t0, Text: prompt}}},
+		&Session{ID: "developer", Agent: "codex", StartedAt: t0, EndedAt: t0, Ended: true, TranscriptPath: "rollout.jsonl", Turns: []Turn{{At: t0, Text: prompt}}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeLog(t, logPath, []events.Record{
+		{Agent: "codex", LoggedAt: t0.Format(time.RFC3339), Event: json.RawMessage(fmt.Sprintf(`{"hook_event_name":"UserPromptSubmit","session_id":"queued","transcript_path":null,"prompt":%q}`, prompt))},
+		{Agent: "codex", LoggedAt: t0.Format(time.RFC3339), Event: json.RawMessage(`{"hook_event_name":"SessionEnd","session_id":"queued","transcript_path":null}`)},
+	})
+	res, err := Process(ProcessOptions{LogPath: logPath, StateDir: state, Now: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Folded != 2 || res.Pruned != 1 || len(res.Sessions) != 1 || res.Sessions[0].ID != "developer" || res.Sessions[0].PromptCount() != 1 {
+		t.Fatalf("folded %d events, pruned %d files, kept %d sessions", res.Folded, res.Pruned, len(res.Sessions))
+	}
+	for _, id := range []string{"saved", "queued"} {
+		if _, err := os.Stat(st.path(id)); !os.IsNotExist(err) {
+			t.Errorf("session %q still on disk: %v", id, err)
+		}
+	}
+}
+
 func TestProcessWithoutWaitReportsBusy(t *testing.T) {
 	state := t.TempDir()
 	lock, err := os.OpenFile(filepath.Join(state, "process.lock"), os.O_CREATE|os.O_RDWR, 0o600)

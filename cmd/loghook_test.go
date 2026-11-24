@@ -14,6 +14,7 @@ import (
 	"github.com/swarmia/swarmia-cli/internal/deliver"
 	"github.com/swarmia/swarmia-cli/internal/events"
 	"github.com/swarmia/swarmia-cli/internal/fslock"
+	"github.com/swarmia/swarmia-cli/internal/report"
 )
 
 // fslock.Lock must exclude a second opener of the same file until released; that
@@ -89,6 +90,47 @@ func TestLogHookToleratesFlagsFromOtherVersions(t *testing.T) {
 	}
 
 	run("--skip-if-project-hooks=maybe") // a known flag with a bad value
+}
+
+func TestCodexSuggestionSessions(t *testing.T) {
+	const header = "This is an app-generated request for a suggested next user message. The user did not write this message."
+	state := t.TempDir()
+	path := filepath.Join(state, "events.jsonl")
+	t.Setenv("SWARMIA_LOG_FILE", path)
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+	logAgent = agent.Codex.Name
+	t.Cleanup(func() { logAgent = agent.ClaudeCode.Name })
+
+	// A periodic run can fold the start before the session ends.
+	process := func() []*report.Session {
+		t.Helper()
+		res, err := report.Process(report.ProcessOptions{LogPath: path, StateDir: state, Now: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Sessions
+	}
+	hook(t, map[string]any{"hook_event_name": "SessionStart"})
+	process()
+	hook(t, map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": header + "\n\nGenerate a suggestion."})
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) != 0 {
+		t.Fatalf("suggestion hook wrote %q, err %v", data, err)
+	}
+	hook(t, map[string]any{"hook_event_name": "SessionEnd"})
+	if got := process(); len(got) != 0 {
+		t.Fatalf("kept %d sessions", len(got))
+	}
+	if _, err := os.Stat(filepath.Join(state, "sessions", "s.json")); !os.IsNotExist(err) {
+		t.Fatalf("suggestion session file: %v", err)
+	}
+
+	prompt := "Can you explain this message?\n" + header
+	hook(t, map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": prompt})
+	hook(t, map[string]any{"hook_event_name": "SessionEnd"})
+	if got := process(); len(got) != 1 || len(got[0].Turns) != 1 || got[0].Turns[0].Text != prompt {
+		t.Fatal("lost a developer's one-prompt session")
+	}
 }
 
 func TestRunLogHookWrapsPayload(t *testing.T) {

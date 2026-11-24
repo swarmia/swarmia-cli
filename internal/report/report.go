@@ -416,6 +416,9 @@ func Fold(sessions map[string]*Session, recs []events.Record, fallbackRoot strin
 		if !ok || ev.SessionID == "" {
 			continue
 		}
+		if ev.Name == "UserPromptSubmit" && agent.IsSuggestionPrompt(ag.Name, ev.TranscriptPath, ev.Prompt) {
+			continue // raw log from an older hook
+		}
 		at, err := time.Parse(time.RFC3339, rec.LoggedAt)
 		if err != nil {
 			continue
