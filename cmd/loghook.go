@@ -102,12 +102,15 @@ func runLogHook(stdin io.Reader) error {
 		event = encoded
 	}
 
+	ev, _ := ag.Parse(payload)
+	if ev.Name == "UserPromptSubmit" && agent.IsSuggestionPrompt(ag.Name, ev.TranscriptPath, ev.Prompt) {
+		return nil
+	}
 	path, err := eventsPath(logFile)
 	if err != nil {
 		return fmt.Errorf("resolving log file: %w", err)
 	}
 	rec := events.Record{LoggedAt: time.Now().UTC().Format(time.RFC3339), Agent: ag.Name, Event: event}
-	ev, _ := ag.Parse(payload)
 	// Best-effort: an unreadable repo state must not stop the event being logged.
 	if repoErr == nil {
 		if st, err := repo.ReadState(); err == nil {

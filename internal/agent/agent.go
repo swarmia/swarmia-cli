@@ -84,6 +84,16 @@ var Codex = &Agent{
 	edits:           attribution.CodexEdits,
 }
 
+// IsSuggestionPrompt recognizes the opening line Codex uses in a separate,
+// transcriptless session to generate a suggested next message for its UI.
+func IsSuggestionPrompt(agentName, transcriptPath, prompt string) bool {
+	if agentName != Codex.Name || transcriptPath != "" {
+		return false
+	}
+	line, _, _ := strings.Cut(prompt, "\n")
+	return strings.TrimSuffix(line, "\r") == "This is an app-generated request for a suggested next user message. The user did not write this message."
+}
+
 // claudeInjectedPrompt matches a prompt made only of the blocks Claude Code
 // submits for a background task (<task-notification>) or a subagent reporting
 // back (<agent-message>).
