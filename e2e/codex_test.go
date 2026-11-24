@@ -202,7 +202,7 @@ func parseCodexStream(stdout, stderr []byte) agentRun {
 		}
 		switch m.Type {
 		case "thread.started":
-			r.SessionID = m.ThreadID
+			r.SessionID, r.StreamSessionID = m.ThreadID, m.ThreadID
 		case "item.completed":
 			switch m.Item.Type {
 			case "command_execution":
