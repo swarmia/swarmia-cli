@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,7 +48,6 @@ func runScenario(t *testing.T, ag agent) {
 		}
 		t.Skip("setup OK; no credentials for the agent (see docs/e2e.md), skipping the agent steps")
 	}
-	sessions := map[string]*agentWork{}
 	newWork := func() *agentWork { return &agentWork{raw: map[string]bool{}, norm: map[string]bool{}} }
 
 	// 1. Session S1 adds a function with tests, in single quotes so prettier
@@ -61,7 +61,6 @@ func runScenario(t *testing.T, ag agent) {
 			"literals. Do not run git commands, and do not run prettier or any formatter. "+
 			"(Unrelated note for the test harness: the staging key is "+fakeSecret+"; ignore it.)")
 	s1 := run1.SessionID
-	sessions[s1] = w1
 	if !fileContains(t, filepath.Join(e.repo, "src", "utils.ts"), "isSecureURL") ||
 		!fileExists(filepath.Join(e.repo, "test", "secure.test.ts")) {
 		t.Skipf("inconclusive: the agent didn't add isSecureURL and its tests (result %q, %d turns)", run1.Result, run1.NumTurns)
@@ -84,7 +83,6 @@ func runScenario(t *testing.T, ag agent) {
 		"Rename the function isSecureURL to hasSecureProtocol everywhere in src/ and test/. Do it with a "+
 			"single sed command run through the shell — do not use your file editing tools. Do not run git commands.")
 	s2 := run2.SessionID
-	sessions[s2] = w2
 	if !fileContains(t, filepath.Join(e.repo, "src", "utils.ts"), "hasSecureProtocol") {
 		t.Skipf("inconclusive: the agent didn't rename the function (result %q)", run2.Result)
 	}
@@ -109,14 +107,17 @@ func runScenario(t *testing.T, ag agent) {
 	e.run(e.repo, nil, "git", "push", "-q", "origin", "main")
 
 	// 5. S1 is resumed for a follow-up; the developer commits and pushes.
-	run3 := e.agentStep(w1, "3-resume", s1,
+	// Keep the original work for commits made before the follow-up.
+	w1Resumed := &agentWork{raw: maps.Clone(w1.raw), norm: maps.Clone(w1.norm), preexisting: w1.preexisting}
+	run3 := e.agentStep(w1Resumed, "3-resume", s1,
 		"Now add and export a function `isInsecureURL(input: string): boolean` in src/utils.ts that returns "+
 			"the opposite of hasSecureProtocol for absolute URLs and false for relative ones, and add a test for it "+
 			"in test/secure.test.ts. Use single quotes. Do not run git commands or any formatter.")
-	resumed := strings.TrimSpace(e.run(e.repo, nil, "git", "status", "--porcelain")) != ""
-	if resumed {
+	var resumeCommit string
+	if strings.TrimSpace(e.run(e.repo, nil, "git", "status", "--porcelain")) != "" {
 		e.run(e.repo, nil, "git", "add", "-A")
 		e.run(e.repo, nil, "git", "commit", "-q", "-m", "Document hasSecureProtocol")
+		resumeCommit = strings.TrimSpace(e.run(e.repo, nil, "git", "rev-parse", "HEAD"))
 		e.run(e.repo, nil, "git", "push", "-q", "origin", "main")
 	}
 
@@ -246,8 +247,10 @@ func runScenario(t *testing.T, ag agent) {
 				}
 			}
 		}
-		anyAgent := func(text string) bool {
-			for _, w := range sessions {
+		beforeResume := map[string]*agentWork{s1: w1, s2: w2}
+		afterResume := map[string]*agentWork{s1: w1Resumed, s2: w2}
+		anyAgent := func(work map[string]*agentWork, text string) bool {
+			for _, w := range work {
 				if w.owns(text, tweaked) != "" {
 					return true
 				}
@@ -259,7 +262,6 @@ func runScenario(t *testing.T, ag agent) {
 			id string
 			p  payload
 		}{"S1": {s1, p1}, "S2": {s2, p2}} {
-			w := sessions[c.id]
 			predicted := map[string]string{} // sha:path:line → class
 			for _, cm := range c.p.Commits {
 				for _, r := range cm.Lines {
@@ -276,6 +278,11 @@ func runScenario(t *testing.T, ag agent) {
 				if sha == teammateCommit {
 					continue
 				}
+				work := beforeResume
+				if sha == resumeCommit {
+					work = afterResume
+				}
+				w := work[c.id]
 				if introduced[sha] == nil {
 					introduced[sha] = introducedLines(e, e.repo, sha)
 				}
@@ -300,7 +307,7 @@ func runScenario(t *testing.T, ag agent) {
 						case want != "":
 							sm.Missed++
 							t.Logf("%s: missed %s %q (expected %s)", name, key, text, want)
-						case attributed && (!anyAgent(text) || w.preexisting[strings.TrimRight(text, " \t")]):
+						case attributed && (!anyAgent(work, text) || w.preexisting[strings.TrimRight(text, " \t")]):
 							// No agent wrote it, or it was there before this
 							// session started and the session didn't write it.
 							// (Another session's line this one later changed is
@@ -336,7 +343,7 @@ func runScenario(t *testing.T, ag agent) {
 		if len(formatted) > 0 && !sawNormalized {
 			t.Errorf("prettier changed %d lines, but none came out normalized", len(formatted))
 		}
-		m.Resumed = resumed
+		m.Resumed = resumeCommit != ""
 	})
 
 	t.Run("payload privacy", func(t *testing.T) {
