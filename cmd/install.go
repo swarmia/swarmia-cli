@@ -316,7 +316,50 @@ func refForExecutable(exe, repoDir string, scope agent.Scope) binaryRef {
 			return ref
 		}
 	}
+	if path := stablePath(exe); path != exe {
+		return binaryRef{cmd: shellQuote(path), source: "this swarmia-cli binary, by a path that survives upgrades"}
+	}
 	return binaryRef{cmd: shellQuote(exe), source: "this swarmia-cli binary"}
+}
+
+// stablePath is a path to exe, a real path, that keeps working when
+// swarmia-cli is upgraded, or exe itself. Package managers keep each version
+// in its own directory and link to the current one: Homebrew from its bin/
+// (/opt/homebrew/bin/swarmia-cli → ../Cellar/swarmia-cli/1.2.3/bin/…), mise
+// with a latest/ next to the versions
+// (…/mise/installs/github-swarmia-swarmia-cli/latest → ./1.2.3). The real
+// path is gone after the next upgrade and cleanup; those links aren't.
+func stablePath(exe string) string {
+	path := exe
+	// On $PATH through a link, as with Homebrew. (mise's shims are links to
+	// mise itself, so they don't resolve to exe.)
+	if found, err := exec.LookPath(binaryName); err == nil {
+		if abs, err := filepath.Abs(found); err == nil && sameFile(abs, exe) {
+			path = abs
+		}
+	}
+	// In a versioned directory with a latest link beside it, as with mise:
+	// the binary's parent, or its grandparent (version/bin/swarmia-cli).
+	dir, rest := filepath.Dir(path), filepath.Base(path)
+	for range 2 {
+		latest := filepath.Join(filepath.Dir(dir), "latest")
+		if fi, err := os.Lstat(latest); err == nil && fi.Mode()&os.ModeSymlink != 0 &&
+			latest != dir && sameFile(latest, dir) {
+			return filepath.Join(latest, rest)
+		}
+		dir, rest = filepath.Dir(dir), filepath.Join(filepath.Base(dir), rest)
+	}
+	return path
+}
+
+// sameFile reports whether a and b resolve to the same real path.
+func sameFile(a, b string) bool {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	return err == nil && ra == rb
 }
 
 // shellQuote single-quotes s for sh if it needs quoting.

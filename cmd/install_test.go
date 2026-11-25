@@ -658,6 +658,88 @@ func TestRefForExecutableFromNpmDependency(t *testing.T) {
 	}
 }
 
+// Installed by a package manager that keeps each version in its own directory,
+// personal installs point at the link to the current version, so upgrading
+// doesn't break them.
+func TestRefForExecutableFromPackageManager(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	writeExe := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symlink := func(target, link string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", "")
+
+	// Homebrew: bin/swarmia-cli → ../Cellar/swarmia-cli/1.2.3/bin/swarmia-cli.
+	brew := filepath.Join(root, "homebrew")
+	cellar := filepath.Join(brew, "Cellar", "swarmia-cli", "1.2.3", "bin", binaryName)
+	writeExe(cellar)
+	symlink("../Cellar/swarmia-cli/1.2.3/bin/"+binaryName, filepath.Join(brew, "bin", binaryName))
+	if got := refForExecutable(cellar, repo, agent.ScopeLocal); got.cmd != cellar {
+		t.Errorf("Homebrew, not on $PATH: %+v, want the binary", got)
+	}
+	t.Setenv("PATH", filepath.Join(brew, "bin"))
+	if got, want := refForExecutable(cellar, repo, agent.ScopeLocal).cmd, filepath.Join(brew, "bin", binaryName); got != want {
+		t.Errorf("Homebrew: %q, want %q", got, want)
+	}
+
+	// mise: installs/github-swarmia-swarmia-cli/{1.2.3,latest → ./1.2.3}, on
+	// $PATH by version (mise activate) or not at all (shims).
+	tool := filepath.Join(root, "mise", "installs", "github-swarmia-swarmia-cli")
+	miseExe := filepath.Join(tool, "1.2.3", binaryName)
+	writeExe(miseExe)
+	symlink("./1.2.3", filepath.Join(tool, "latest"))
+	for _, path := range []string{"", filepath.Join(tool, "1.2.3")} {
+		t.Setenv("PATH", path)
+		if got, want := refForExecutable(miseExe, repo, agent.ScopeLocal).cmd, filepath.Join(tool, "latest", binaryName); got != want {
+			t.Errorf("mise, PATH=%q: %q, want %q", path, got, want)
+		}
+	}
+	// ... also with the binary in a bin/ directory.
+	binExe := filepath.Join(root, "other", "2.0.0", "bin", binaryName)
+	writeExe(binExe)
+	symlink("2.0.0", filepath.Join(root, "other", "latest"))
+	if got, want := refForExecutable(binExe, repo, agent.ScopeLocal).cmd, filepath.Join(root, "other", "latest", "bin", binaryName); got != want {
+		t.Errorf("version/bin: %q, want %q", got, want)
+	}
+	// A latest that points at another version isn't this binary.
+	if err := os.Remove(filepath.Join(tool, "latest")); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(filepath.Join(tool, "1.3.0", binaryName))
+	symlink("./1.3.0", filepath.Join(tool, "latest"))
+	if got := refForExecutable(miseExe, repo, agent.ScopeLocal); got.cmd != miseExe {
+		t.Errorf("mise, latest is another version: %+v, want the binary", got)
+	}
+
+	// A plain binary, on $PATH or not, is used as is.
+	plain := filepath.Join(root, "bin", binaryName)
+	writeExe(plain)
+	for _, path := range []string{"", filepath.Join(root, "bin")} {
+		t.Setenv("PATH", path)
+		if got := refForExecutable(plain, repo, agent.ScopeLocal); got.cmd != plain {
+			t.Errorf("plain binary, PATH=%q: %+v, want the binary", path, got)
+		}
+	}
+}
+
 // Installing into one of a project's settings files while the other already
 // logs events warns about double logging (but still installs).
 func TestInstallWarnsAboutDuplicateProjectHooks(t *testing.T) {
