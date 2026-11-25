@@ -19,6 +19,10 @@ A release is a tag. Pushing `v1.2.3` (or a prerelease, `v1.2.3-rc.1`) on
 4. **GitHub release** with generated notes, the binaries as
    `swarmia-cli_<version>_<os>-<arch>.tar.gz`, and `SHA256SUMS`.
 
+   Committed launchers (`install --launcher`) download these by name, so keep
+   the names, the binary at the top of each tarball, and `SHA256SUMS` as
+   they are.
+
 ## Cutting a release
 
 ```sh

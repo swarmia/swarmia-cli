@@ -14,6 +14,7 @@ import (
 
 	"github.com/swarmia/swarmia-cli/internal/agent"
 	"github.com/swarmia/swarmia-cli/internal/jsonedit"
+	"github.com/swarmia/swarmia-cli/internal/launcher"
 )
 
 const binaryName = "swarmia-cli"
@@ -24,6 +25,9 @@ var (
 	installDryRun bool
 	installScopeF string
 	installTrust  bool
+
+	installLauncher        bool
+	installLauncherVersion string
 )
 
 // skipIfProjectHooksFlag makes a user-scope log-hook stand down in projects
@@ -48,10 +52,15 @@ var installCmd = &cobra.Command{
 		"           project and worktree; stands down in projects that have their own\n" +
 		"           swarmia-cli hooks\n\n" +
 		"For project scope the command used to invoke swarmia-cli is auto-detected: a\n" +
-		"swarmia-cli binary at the repo root (handy for local development), then an npm\n" +
-		"dependency in node_modules, then a swarmia-cli on your $PATH. For local and\n" +
-		"user scope it is the absolute path of the swarmia-cli running this install.\n" +
-		"Override with --binary.\n\n" +
+		"swarmia-cli binary at the repo root (handy for local development), then a\n" +
+		"launcher at " + launcher.Path + ", then an npm dependency in node_modules, then a\n" +
+		"swarmia-cli on your $PATH. For local and user scope it is the absolute path of\n" +
+		"the swarmia-cli running this install. Override with --binary.\n\n" +
+		"--launcher writes (or upgrades) " + launcher.Path + ", a script to commit that\n" +
+		"runs this swarmia-cli version for everyone in the repository, without npm: it\n" +
+		"downloads the version's GitHub release on first use, checks it against the\n" +
+		"checksums it holds, and caches it in ~/.cache/swarmia/cli. Writing it downloads\n" +
+		"the release's checksums.\n\n" +
 		"Codex runs a hook only once you have trusted it, normally by approving it with\n" +
 		"/hooks inside Codex (each person, for project hooks too). --trust records that\n" +
 		"approval for swarmia-cli's Codex hooks in your ~/.codex/config.toml instead.",
@@ -65,7 +74,10 @@ var installCmd = &cobra.Command{
 		if !slices.Contains(agent.Scopes, scope) {
 			return fmt.Errorf("unknown --scope %q (want project, local or user)", installScopeF)
 		}
-		return runInstall(cmd.OutOrStdout(), dir, installOpts{binaryRef: installBinary, dryRun: installDryRun, scope: scope, trust: installTrust})
+		return runInstall(cmd.OutOrStdout(), dir, installOpts{
+			binaryRef: installBinary, dryRun: installDryRun, scope: scope, trust: installTrust,
+			launcher: installLauncher, launcherVersion: installLauncherVersion,
+		})
 	},
 }
 
@@ -75,6 +87,8 @@ func init() {
 	installCmd.Flags().BoolVar(&installDryRun, "dry-run", false, "report what would change without writing anything")
 	installCmd.Flags().StringVar(&installScopeF, "scope", string(agent.ScopeProject), "where to install: project, local or user")
 	installCmd.Flags().BoolVar(&installTrust, "trust", false, "trust swarmia-cli's Codex hooks in ~/.codex/config.toml, as approving them with /hooks would")
+	installCmd.Flags().BoolVar(&installLauncher, "launcher", false, "write a launcher to commit at "+launcher.Path+" that runs this version, and point project hooks at it")
+	installCmd.Flags().StringVar(&installLauncherVersion, "launcher-version", "", "the version the launcher runs (default: this one)")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -83,6 +97,10 @@ type installOpts struct {
 	dryRun    bool
 	scope     agent.Scope // "" means project
 	trust     bool        // record trust for Codex hooks
+	// launcher writes a launcher running launcherVersion (default: this
+	// one) for project hooks to use.
+	launcher        bool
+	launcherVersion string
 }
 
 // agentConfig describes how to install into one supported coding agent:
@@ -134,7 +152,19 @@ func runInstall(out io.Writer, repoDir string, opts installOpts) error {
 		scope = agent.ScopeProject
 	}
 	ref := binaryRef{cmd: opts.binaryRef, source: "--binary override"}
-	if ref.cmd == "" {
+	if opts.launcher {
+		if scope != agent.ScopeProject {
+			return fmt.Errorf("--launcher is for project hooks, not --scope %s", scope)
+		}
+		if opts.binaryRef != "" {
+			return errors.New("--launcher and --binary both say how hooks run swarmia-cli; pick one")
+		}
+		var err error
+		if ref, err = writeLauncher(out, repoDir, opts); err != nil {
+			return err
+		}
+	}
+	if ref.cmd == "" && ref.rel == "" {
 		if scope == agent.ScopeProject {
 			ref = detectBinaryRef(repoDir)
 		} else {
@@ -256,11 +286,14 @@ func (r binaryRef) String() string {
 
 // detectBinaryRef decides how project hooks should invoke swarmia-cli, in
 // order of preference: a binary built at the repo root (local development),
-// then an npm dependency (the @swarmia/cli package), then a binary on $PATH
-// (global install).
+// then a committed launcher, then an npm dependency (the @swarmia/cli
+// package), then a binary on $PATH (global install).
 func detectBinaryRef(repoDir string) binaryRef {
 	if isExecutable(filepath.Join(repoDir, binaryName)) {
 		return binaryRef{rel: binaryName, source: "local binary at repo root"}
+	}
+	if isExecutable(filepath.Join(repoDir, filepath.FromSlash(launcher.Path))) {
+		return binaryRef{rel: launcher.Path, source: "launcher"}
 	}
 	if ref, ok := npmLauncherRef(repoDir); ok {
 		return ref
@@ -306,15 +339,25 @@ func executableRef(repoDir string, scope agent.Scope) binaryRef {
 // a path that can change with every upgrade (pnpm's is versioned:
 // node_modules/.pnpm/@swarmia+cli-darwin-arm64@0.1.0/…), so hooks run the
 // package's launcher instead, which finds whichever version is installed.
+// Likewise, run from the repository's launcher, exe is a version in its cache,
+// and hooks run the launcher, which runs whichever version it pins.
 func refForExecutable(exe, repoDir string, scope agent.Scope) binaryRef {
-	if root, err := filepath.EvalSymlinks(repoDir); err == nil &&
-		strings.HasPrefix(exe, filepath.Join(root, "node_modules")+string(filepath.Separator)) {
-		if ref, ok := npmLauncherRef(root); ok {
-			if scope == agent.ScopeUser { // for every repository, not just this one
-				ref = binaryRef{cmd: shellQuote(filepath.Join(root, filepath.FromSlash(ref.rel))), source: ref.source}
-			}
-			return ref
+	root, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		root = repoDir
+	}
+	ref, ok := binaryRef{}, false
+	if strings.HasPrefix(exe, filepath.Join(root, "node_modules")+string(filepath.Separator)) {
+		ref, ok = npmLauncherRef(root)
+	} else if cache, err := launcher.CacheDir(); err == nil && isUnder(exe, cache) &&
+		isExecutable(filepath.Join(root, filepath.FromSlash(launcher.Path))) {
+		ref, ok = binaryRef{rel: launcher.Path, source: "launcher"}, true
+	}
+	if ok {
+		if scope == agent.ScopeUser { // for every repository, not just this one
+			ref = binaryRef{cmd: shellQuote(filepath.Join(root, filepath.FromSlash(ref.rel))), source: ref.source}
 		}
+		return ref
 	}
 	if path := stablePath(exe); path != exe {
 		return binaryRef{cmd: shellQuote(path), source: "this swarmia-cli binary, by a path that survives upgrades"}
@@ -350,6 +393,14 @@ func stablePath(exe string) string {
 		dir, rest = filepath.Dir(dir), filepath.Join(filepath.Base(dir), rest)
 	}
 	return path
+}
+
+// isUnder reports whether path, a real path, is inside dir.
+func isUnder(path, dir string) bool {
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	return strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 // sameFile reports whether a and b resolve to the same real path.

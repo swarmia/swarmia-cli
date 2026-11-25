@@ -8,7 +8,8 @@ tarballs and mise. `go install` is no longer recommended: its binary has no
 version built in, and releases are the supported channel. Personal-scope hooks
 point at a package manager's link to the current version (mise's `latest`,
 Homebrew's `bin/`) rather than the versioned real path, so the channels in
-option 3 and 4 survive upgrades. The rest is undecided.
+option 3 and 4 survive upgrades. The committed launcher (option 2) is built:
+`swarmia-cli install --launcher`. The rest is undecided.
 
 ## Two separate problems
 
@@ -69,19 +70,22 @@ language.
 
 The direct answer for Java and any other non-npm repository.
 
-- `swarmia-cli install --launcher` (hypothetical) writes a small POSIX
-  `.swarmia/swarmia-cli` holding the pinned version and per-platform SHA256s.
-  On first use it fetches the GitHub release into `~/.cache`; project hooks
-  point at it.
+- Built: `swarmia-cli install --launcher` writes a small POSIX
+  `.swarmia/swarmia-cli` holding the pinned version and per-platform SHA256s
+  (from the release's `SHA256SUMS`). On first use it fetches the GitHub
+  release into `~/.cache/swarmia/cli/<version>/`; project hooks point at it.
+  Once downloaded it adds ~7 ms per hook, like the npm launcher.
 - Java developers already trust this pattern (`gradlew`); Meta's DotSlash is a
   general version of it.
 - Fits what exists: `detectBinaryRef` already prefers a repository-relative
   binary, and hooks already do nothing until the binary exists.
 - Watch-outs:
-  - Never download inline in a hook (latency budget): start a detached
-    download and do nothing until it's ready.
-  - Support corporate proxies and mirrors with an override URL.
-  - It's a download, not data leaving the machine, but document it plainly.
+  - Hooks never download inline (latency budget): they start a detached
+    download and do nothing until it's ready. A failed download holds a lock
+    for 10 minutes, so an offline machine doesn't retry on every tool call.
+  - Proxies: curl and wget's own settings. Mirrors: `SWARMIA_CLI_DOWNLOAD_URL`.
+  - It's a download, not data leaving the machine; the README says so.
+  - Not yet: removing old versions from the cache, or Windows.
 
 ### 3. mise, aqua, Nix
 
@@ -149,9 +153,8 @@ is better for Java.
 
 1. **mise / aqua.** mise done; an aqua registry entry would add checksum
    verification.
-2. **Committed launcher.** Covers Java, Go and Python repositories at project
-   scope. The release workflow already produces the tarballs and
-   `SHA256SUMS` it needs.
+2. **Committed launcher.** Done. Covers Java, Go and Python repositories at
+   project scope.
 3. **Claude Code plugin**, reusing the launcher to fetch the binary.
 4. **GoReleaser** for release builds once Homebrew, deb/rpm and signing are
    wanted: one config for all of them. npm packaging stays custom.
