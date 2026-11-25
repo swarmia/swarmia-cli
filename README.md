@@ -128,16 +128,33 @@ version:
 pnpm add -D @swarmia/cli      # or: npm install -D @swarmia/cli
 ```
 
-Or for yourself, without npm:
+Or for yourself, from a [GitHub
+release](https://github.com/swarmia/swarmia-cli/releases): download the
+tarball for your platform (`darwin-arm64`, `darwin-x64`, `linux-arm64` or
+`linux-x64`) and `SHA256SUMS`, then
 
 ```sh
-go install github.com/swarmia/swarmia-cli@latest     # puts swarmia-cli in ~/go/bin
+shasum -a 256 -c --ignore-missing SHA256SUMS    # or: sha256sum -c --ignore-missing
+tar xzf swarmia-cli_*.tar.gz swarmia-cli
+mv swarmia-cli ~/.local/bin/                     # or anywhere on your $PATH
 ```
 
-Binaries are also attached to each [GitHub
-release](https://github.com/swarmia/swarmia-cli/releases), or build from source:
+Keep it at that path: `local` and `user` hooks point at the binary by absolute
+path (see below), so upgrade by replacing the file in place.
+
+Or with [mise](https://mise.jdx.dev), which installs from the same releases:
+
+```sh
+mise use -g github:swarmia/swarmia-cli     # for yourself
+mise use github:swarmia/swarmia-cli@0.3.3  # pinned in the repository's mise.toml
+```
+
+Project hooks then find `swarmia-cli` on `$PATH`, so every developer needs
+mise activated in the shell they start their coding agent from.
+
+macOS and Linux are supported, on arm64 and x64. To build from source:
 `git clone https://github.com/swarmia/swarmia-cli && cd swarmia-cli && make
-build` (Go 1.26+). macOS and Linux are supported, on arm64 and x64.
+build` (Go 1.26+).
 
 Then run it as `pnpm exec swarmia-cli` (or `npx swarmia-cli`) if it's a
 devDependency, or as `swarmia-cli`.
@@ -170,9 +187,11 @@ Things to know:
   on `$PATH`. Until the repository's one exists — in a fresh clone or worktree,
   before `make build` or `pnpm install` — the hooks quietly do nothing.
 - **`local`** and **`user`** hooks point at the binary that ran `install`, by
-  absolute path — rebuilding it updates them. Run from the repository's npm
-  devDependency (`pnpm exec swarmia-cli install --scope local`), they point at
-  its launcher instead, so upgrading the dependency doesn't break them.
+  absolute path — rebuilding it updates them. Installed by a package manager
+  that keeps each version in its own directory, they point at its link to the
+  current version instead (mise's `latest`, Homebrew's `bin/`), and run from
+  the repository's npm devDependency (`pnpm exec swarmia-cli install --scope
+  local`), at its launcher, so upgrading doesn't break them.
 - **`local`** settings live in one checkout: new git worktrees don't get them,
   so run `install --scope local --dir <worktree>` there too.
 - **`user`** scope captures every repository you open a coding agent in,
