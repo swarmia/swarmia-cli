@@ -128,16 +128,50 @@ version:
 pnpm add -D @swarmia/cli      # or: npm install -D @swarmia/cli
 ```
 
-Or for yourself, without npm:
+Without npm, commit a launcher instead: `swarmia-cli install --launcher`
+(run with swarmia-cli installed as below) writes `.swarmia/swarmia-cli`, a
+short script that runs that swarmia-cli version, and points the project hooks
+at it.
 
 ```sh
-go install github.com/swarmia/swarmia-cli@latest     # puts swarmia-cli in ~/go/bin
+swarmia-cli install --launcher
+git add .swarmia/swarmia-cli .claude/settings.json .codex/hooks.json
 ```
 
-Binaries are also attached to each [GitHub
-release](https://github.com/swarmia/swarmia-cli/releases), or build from source:
+On first use, the launcher downloads its version from the GitHub release into
+`~/.cache/swarmia/cli` and checks it against the checksums it holds. Hooks
+don't wait for that: they start the download in the background and do nothing
+until it's done. To upgrade, `.swarmia/swarmia-cli install --launcher
+--launcher-version <version>`. To download from a mirror of the releases, set
+`SWARMIA_CLI_DOWNLOAD_URL`; curl and wget use your proxy settings.
+
+Or for yourself, from a [GitHub
+release](https://github.com/swarmia/swarmia-cli/releases): download the
+tarball for your platform (`darwin-arm64`, `darwin-x64`, `linux-arm64` or
+`linux-x64`) and `SHA256SUMS`, then
+
+```sh
+shasum -a 256 -c --ignore-missing SHA256SUMS    # or: sha256sum -c --ignore-missing
+tar xzf swarmia-cli_*.tar.gz swarmia-cli
+mv swarmia-cli ~/.local/bin/                     # or anywhere on your $PATH
+```
+
+Keep it at that path: `local` and `user` hooks point at the binary by absolute
+path (see below), so upgrade by replacing the file in place.
+
+Or with [mise](https://mise.jdx.dev), which installs from the same releases:
+
+```sh
+mise use -g github:swarmia/swarmia-cli     # for yourself
+mise use github:swarmia/swarmia-cli@0.3.3  # pinned in the repository's mise.toml
+```
+
+Project hooks then find `swarmia-cli` on `$PATH`, so every developer needs
+mise activated in the shell they start their coding agent from.
+
+macOS and Linux are supported, on arm64 and x64. To build from source:
 `git clone https://github.com/swarmia/swarmia-cli && cd swarmia-cli && make
-build` (Go 1.26+). macOS and Linux are supported, on arm64 and x64.
+build` (Go 1.26+).
 
 Then run it as `pnpm exec swarmia-cli` (or `npx swarmia-cli`) if it's a
 devDependency, or as `swarmia-cli`.
@@ -165,14 +199,18 @@ swarmia-cli install --trust                      # also trust the Codex hooks fo
 Things to know:
 
 - **`project`** hooks reference the CLI the way the repository provides it: a
-  `swarmia-cli` binary at the repository root (development), the npm
-  devDependency's launcher (`node_modules/@swarmia/cli/bin/swarmia-cli`), or one
-  on `$PATH`. Until the repository's one exists — in a fresh clone or worktree,
-  before `make build` or `pnpm install` — the hooks quietly do nothing.
+  `swarmia-cli` binary at the repository root (development), its launcher
+  (`.swarmia/swarmia-cli`), the npm devDependency's launcher
+  (`node_modules/@swarmia/cli/bin/swarmia-cli`), or one on `$PATH`. Until the
+  repository's one exists — in a fresh clone or worktree, before `make build`
+  or `pnpm install` — the hooks quietly do nothing.
 - **`local`** and **`user`** hooks point at the binary that ran `install`, by
-  absolute path — rebuilding it updates them. Run from the repository's npm
-  devDependency (`pnpm exec swarmia-cli install --scope local`), they point at
-  its launcher instead, so upgrading the dependency doesn't break them.
+  absolute path — rebuilding it updates them. Installed by a package manager
+  that keeps each version in its own directory, they point at its link to the
+  current version instead (mise's `latest`, Homebrew's `bin/`), and run from
+  the repository's npm devDependency (`pnpm exec swarmia-cli install --scope
+  local`) or launcher (`.swarmia/swarmia-cli install --scope local`), at that
+  launcher, so upgrading doesn't break them.
 - **`local`** settings live in one checkout: new git worktrees don't get them,
   so run `install --scope local --dir <worktree>` there too.
 - **`user`** scope captures every repository you open a coding agent in,
@@ -250,7 +288,7 @@ sends right away; `send --dry-run` shows how many would go.
 
 | Command | What it does |
 |---|---|
-| `install` | add hooks to the coding agents in a repository (`--trust`: trust them in Codex) |
+| `install` | add hooks to the coding agents in a repository (`--trust`: trust them in Codex; `--launcher`: write a launcher to commit) |
 | `report` | show recent sessions and the committed lines they produced |
 | `config` | show the effective configuration and where it comes from; warn about untrusted Codex hooks |
 | `send` | send changed sessions to Swarmia now |
